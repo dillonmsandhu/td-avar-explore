@@ -19,7 +19,7 @@ class RND_Net(nn.Module):
         )(x)
         embedding = activation(embedding)
         embedding = nn.Dense(
-            64, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
+            128, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
         )(embedding)
         embedding = activation(embedding)
 

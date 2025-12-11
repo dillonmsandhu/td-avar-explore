@@ -198,10 +198,9 @@ def make_train(config):
                     )
                     
                     delta = reward + config["GAMMA"] * next_value * (1 - done) - value
-                    i_delta = i + config["GAMMA"] * i_next_value * i_value # no episodic termination for intrinsic reward.
-                    
                     gae = delta + (config["GAMMA"] * config["GAE_LAMBDA"] * (1 - done) * gae)
-                    
+
+                    i_delta = i + config["GAMMA"] * i_next_value - i_value # no episodic termination for intrinsic reward.
                     i_gae = i_delta + (config["GAMMA"] * config["GAE_LAMBDA"] * i_gae)
                     
                     return (gae, i_gae, value, i_value), (gae, i_gae)
