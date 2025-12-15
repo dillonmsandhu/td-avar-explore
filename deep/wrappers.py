@@ -149,3 +149,12 @@ class NormalizeRewardWrapper(GymnaxWrapper):
         norm_reward = jnp.clip(reward / jnp.sqrt(new_mean_std.var + 1e-8), -10.0, 10.0)
 
         return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
+    
+# --- Wrapper 3: Binary Rewards (such that reward is 0 or 1.) ---
+
+class BinaryRewardWrapper(GymnaxWrapper):
+    
+    def step(self, key, state, action, params=None):
+        obs, env_state, reward, done, info = self._env.step(key, state, action, params)
+        reward = jnp.clip(reward + 1, 0, 1)
+        return obs, state, reward, done, info
