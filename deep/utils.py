@@ -6,6 +6,70 @@ import json
 import cloudpickle
 import matplotlib.pyplot as plt
 
+import jax
+import jax.numpy as jnp
+from typing import NamedTuple, Dict, Sequence, NamedTuple, Any
+import jax
+import jax.numpy as jnp
+import flax.linen as nn
+import numpy as np
+
+import gymnax
+from gymnax.wrappers.purerl import FlattenObservationWrapper, LogWrapper
+from wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, NormalizeVecObservation, BinaryRewardWrapper
+from networks import *
+import optax
+
+config = {
+    "ENV_NAME": "MountainCar-v0",
+    "LR": 5e-4,
+    "LR_END": 5e-5,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
+    "TOTAL_TIMESTEPS": 250_000,
+    "NUM_EPOCHS": 4, 
+    "MINIBATCH_SIZE": 256,
+    "GAMMA": 0.99,
+    "GAE_LAMBDA": 0.6,
+    "CLIP_EPS": 0.2,
+    "VF_CLIP": 0.5,
+    "ENT_COEF": 0.003,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "ACTIVATION": "relu",
+    "SEED": 42,
+    "WARMUP": 200, # warmup steps for running mean/std, 200 is one episode.
+    "N_SEEDS": 16,
+    "RND_TRAIN_FRAC": 0.5,
+    "REGULARIZATION": 1e-2,
+    "PER_UPDATE_REGULARIZATION": 1e-4,
+    "BONUS_SCALE": 1.0,
+    "ema_coeff_w": 0.9, #(not actually used)
+    "NORMALIZE_FEATURES": False,
+    "BINARY_REWARDS": False,
+    "NORMALIZE_REWARDS": True,
+    "NORMALIZE_OBS": True,
+}
+
+def cosine_similarity(a, b):
+    dot = jnp.dot(a,b)
+    mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
+    return dot/mag
+
+class Explore_Transition(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    i_value: jnp.ndarray # extra - intrinsic value from second value head
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray # extra - intrinsic reward (RND loss)
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    next_obs: jnp.ndarray # extra - to get next features
+    embedding: jnp.ndarray # extra - target embedding from target rnd network
+    td_error: jnp.ndarray # for OPG (outer product of gradients), the "meat" of the sandwich covariance
+    info: jnp.ndarray
+
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray

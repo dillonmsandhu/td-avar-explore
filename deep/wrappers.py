@@ -153,8 +153,26 @@ class NormalizeRewardWrapper(GymnaxWrapper):
 # --- Wrapper 3: Binary Rewards (such that reward is 0 or 1.) ---
 
 class BinaryRewardWrapper(GymnaxWrapper):
-    
+    """
+    Sparse reward MountainCar wrapper compatible with PPO+GAE.
+
+    Key idea:
+    - Give reward when goal is reached
+    - DO NOT terminate on that same step
+    - Terminate on the following step
+    """
+
     def step(self, key, state, action, params=None):
-        obs, env_state, reward, done, info = self._env.step(key, state, action, params)
-        reward = jnp.clip(reward + 1, 0, 1)
-        return obs, state, reward, done, info
+        obs, env_state, _, done, info = self._env.step(key, state, action, params)
+
+        # Check for goal
+        is_goal = env_state.position >= params.goal_position
+
+        # Sparse reward: 1 at goal, 0 otherwise
+        reward = jnp.where(is_goal, 1.0, 0.0)
+
+        # IMPORTANT:
+        # If we just reached the goal, delay termination by one step
+        done = jnp.where(is_goal, False, done)
+
+        return obs, env_state, reward, done, info
