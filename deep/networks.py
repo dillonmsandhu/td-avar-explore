@@ -3,7 +3,23 @@ from flax.linen.initializers import constant, orthogonal
 import flax.linen as nn
 import jax.numpy as jnp
 import distrax
-from typing import Sequence
+from typing import Sequence, Any
+from flax.training.train_state import TrainState
+import distrax
+
+class RNDTrainState(TrainState):
+    target_params: Any
+
+class RND_V(nn.Module):
+    activation: str = "tanh"
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        z = RND_Net(activation = 'relu')(x)
+        z_sg = jax.lax.stop_gradient(z)
+        v = nn.Dense(1, kernel_init=orthogonal(1.0))(z_sg)
+        return z, v.squeeze(-1)
+
 
 class RND_Net(nn.Module):
     activation: str = "tanh"
@@ -19,7 +35,7 @@ class RND_Net(nn.Module):
         )(x)
         embedding = activation(embedding)
         embedding = nn.Dense(
-            128, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
         )(embedding)
         embedding = activation(embedding)
 
@@ -112,42 +128,79 @@ class Two_Head_ActorCritic(nn.Module):
         action = policy.sample(seed=key)
         return action
 
+
 class ActorCritic(nn.Module):
-    action_dim: Sequence[int]
+    """
+    2 separate dense networks (Actor, Critic1).
+    """
+    action_dim: int
     activation: str = "tanh"
+    normalize_value_features: bool = False
 
-    @nn.compact
-    def __call__(self, x):
+    def setup(self):
+        # Resolve activation function
         if self.activation == "relu":
-            activation = nn.relu
+            self.act_fn = nn.relu
         else:
-            activation = nn.tanh
-        actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
-        )(x)
-        actor_mean = activation(actor_mean)
-        actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
-        pi = distrax.Categorical(logits=actor_mean)
+            self.act_fn = nn.tanh
 
-        critic = nn.Dense(
-            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
-        )(x)
-        critic = activation(critic)
-        critic = nn.Dense(
-            64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
-        critic = activation(critic)
-        critic = nn.Dense(1, kernel_init=orthogonal(0.001), bias_init=constant(0.0))(
-            critic
-        )
+        # --- Actor Layers ---
+        self.actor_fc1 = nn.Dense(64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+        self.actor_fc2 = nn.Dense(64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+        self.actor_head = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0))
 
-        return pi, jnp.squeeze(critic, axis=-1)
+        # --- Critic 1 Layers ---
+        self.critic1_fc1 = nn.Dense(64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+        self.critic1_fc2 = nn.Dense(64, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+        self.critic1_head = nn.Dense(1, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+
+    def __call__(self, x: jnp.ndarray):
+        """Returns pi, v1, v2 to match original signature"""
+        pi = self.policy(x)
+        v1 = self.value(x)
+        return pi, v1
+
+    def policy(self, x: jnp.ndarray):
+        """Returns pi(s)"""
+        actor_features = self.get_actor_features(x)
+        logits = self.actor_head(actor_features)
+        return distrax.Categorical(logits=logits)
+
+    def value(self, x: jnp.ndarray):
+        """Returns V1(s), V2(s)"""
+        # Get features for both critics
+        c1_features = self.get_value_features(x)
+        
+        # Calculate values
+        v1 = self.critic1_head(c1_features)
+        
+        return jnp.squeeze(v1, axis=-1)
+
+    def get_actor_features(self, x: jnp.ndarray):
+        """Passes input through Actor's hidden layers"""
+        x = self.actor_fc1(x)
+        x = self.act_fn(x)
+        x = self.actor_fc2(x)
+        x = self.act_fn(x)
+        return x
+
+    def get_value_features(self, x: jnp.ndarray):
+            """Passes input through both Critics' hidden layers separately"""
+            # Critic 1 trunk
+            c1 = self.critic1_fc1(x)
+            c1 = self.act_fn(c1)
+            c1 = self.critic1_fc2(c1)
+            c1 = self.act_fn(c1)
+            # --- L2 Normalization Logic ---
+            if self.normalize_value_features:
+                c1 = c1 / (jnp.linalg.norm(c1, axis=-1, keepdims=True))
+            return c1
+    
+    def act(self, x: jnp.ndarray, key: jax.random.PRNGKey):
+        """Samples an action from the policy."""
+        policy = self.policy(x)
+        action = policy.sample(seed=key)
+        return action
     
 class CNN(nn.Module):
     n_layers: int = 2

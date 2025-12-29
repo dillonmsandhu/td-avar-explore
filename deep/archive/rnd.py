@@ -1,3 +1,4 @@
+# RND using PPO and cosine similarity for the intrinsic reward and prediction error.
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -6,9 +7,21 @@ import optax
 import gymnax
 from deep.envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper
 from gymnax.wrappers.purerl import FlattenObservationWrapper, LogWrapper
-import wandb
+from networks import Two_Head_ActorCritic, RND_Net
 from networks import ActorCritic
-from utils import Transition
+from typing import NamedTuple, Any
+
+class Transition(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    i_value: jnp.ndarray # extra - intrinsic value from second value head
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray # extra - intrinsic reward (RND loss)
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    embedding: jnp.ndarray # extra - target embedding from target rnd network
+    info: jnp.ndarray
 
 # PPO
 DEFAULT_CONFIG = {
@@ -18,7 +31,7 @@ DEFAULT_CONFIG = {
     "NUM_ENVS": 32,
     "NUM_STEPS": 128,
     "TOTAL_TIMESTEPS": 250000,
-    "NUM_EPOCHS": 8, # a lot -force memorization
+    "NUM_EPOCHS": 4, # a lot -force memorization
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 0.6,
@@ -35,14 +48,34 @@ DEFAULT_CONFIG = {
     "N_SEEDS": 4,
 }
 
+def cosine_similarity(a, b):
+    dot = jnp.dot(a,b)
+    mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
+    return dot/mag
+
+class RNDTrainState(TrainState):
+    target_params: Any
+
 def make_train(config):
+    def initialize_rnd_network(rng, obs_shape):
+        rnd_network = RND_Net(activation=config["ACTIVATION"])
+        rng, _rng = jax.random.split(rng)
+        init_x = jnp.zeros(obs_shape)
+        rnd_params = rnd_network.init(_rng, init_x)
+        return rnd_network, rnd_params
+    
+    def initialize_network(n_actions, obs_shape, rng):
+        network = Two_Head_ActorCritic(n_actions, activation=config["ACTIVATION"])
+        rng, _rng = jax.random.split(rng)
+        init_x = jnp.zeros(obs_shape)
+        network_params = network.init(_rng, init_x)
+        return network, network_params 
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
     
-    env, env_params = gymnax.make(config["ENV_NAME"])
     env, env_params = gymnax.make(config["ENV_NAME"])
     env = FlattenObservationWrapper(env)
     env = LogWrapper(env)                 # Log REAL returns
@@ -54,11 +87,16 @@ def make_train(config):
     n_actions = env.action_space(env_params).n
 
     def train(rng):
-        network = ActorCritic(env.action_space(env_params).n, activation=config["ACTIVATION"])
-        rng, _rng = jax.random.split(rng)
-        init_x = jnp.zeros(env.observation_space(env_params).shape)
-        network_params = network.init(_rng, init_x)
+        # initialize rnd networks
+        rnd_rng, rng = jax.random.split(rng)
+        target_rng, rng = jax.random.split(rng)
+        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, env.observation_space(env_params).shape)
+        _, target_params = initialize_rnd_network(target_rng, env.observation_space(env_params).shape)
         
+        # initialize value and policy network
+        network_rn, rng = jax.random.split(rng)
+        network, network_params = initialize_network(n_actions, env.observation_space(env_params).shape, rng)
+
         lr_scheduler = optax.linear_schedule(
             init_value=config["LR"],
             end_value=config["LR_END"],
@@ -72,6 +110,12 @@ def make_train(config):
             apply_fn=network.apply,
             params=network_params,
             tx=tx,
+        )
+        rnd_state = RNDTrainState.create(
+            apply_fn=rnd_net.apply,
+            params=rnd_params,
+            tx=tx,
+            target_params=target_params,
         )
 
         # INIT ENV
@@ -108,11 +152,11 @@ def make_train(config):
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, env_state, last_obs, rng= env_scan_state
+                train_state, rnd_state, env_state, last_obs, rng= env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
-                pi, value = network.apply(train_state.params, last_obs)
+                pi, value, i_value = network.apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
@@ -122,70 +166,95 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
                     rng_step, env_state, action, env_params
                 )
+                target_embedding = rnd_state.apply_fn(rnd_state.target_params, obsv) # should be N_ENVS x N_STEPS x k
+                pred = rnd_state.apply_fn(rnd_state.params, obsv)
+                cosine_sim = jax.vmap(cosine_similarity, in_axes = (0,0))(pred, target_embedding) # range from -1 to 1
+                intrinsic_reward =  0.5 * (1.0 - cosine_sim) # should range from 0 to 1. most similar = 0, least similar = 1
+                # intrinsic_reward = jnp.zeros_like(reward) # ablation
                 transition = Transition(
-                    done, action, value, reward, log_prob, last_obs, info
+                    done, action, value, i_value, reward, intrinsic_reward, log_prob, last_obs, target_embedding, info
                 )
-                runner_state = (train_state, env_state, obsv, rng)
+                runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition
             
-            train_state, env_state, last_obs, rng, idx = runner_state
-            env_step_state = (train_state, env_state, last_obs, rng)
-            (train_state, env_state, last_obs, rng), traj_batch = jax.lax.scan(
+            train_state, rnd_state, env_state, last_obs, rng, idx = runner_state
+            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
+            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
             
             # CALCULATE ADVANTAGE
-            
-            _, last_val = network.apply(train_state.params, last_obs)
+            _, last_val, last_i_val = network.apply(train_state.params, last_obs)
 
             def _calculate_gae(traj_batch, last_val):
                 def _get_advantages(gae_and_next_value, transition):
-                    gae, next_value = gae_and_next_value
-                    done, value, reward = (
+                    gae, i_gae, next_value, i_next_value = gae_and_next_value
+                    done, value, reward, i, i_value = (
                         transition.done,
                         transition.value,
                         transition.reward,
+                        transition.intrinsic_reward,
+                        transition.i_value,
                     )
+                    
                     delta = reward + config["GAMMA"] * next_value * (1 - done) - value
-                    gae = (
-                        delta
-                        + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - done) * gae
-                    )
-                    return (gae, value), gae
+                    gae = delta + (config["GAMMA"] * config["GAE_LAMBDA"] * (1 - done) * gae)
 
-                _, advantages = jax.lax.scan(
+                    i_delta = i + config["GAMMA"] * i_next_value - i_value # no episodic termination for intrinsic reward.
+                    i_gae = i_delta + (config["GAMMA"] * config["GAE_LAMBDA"] * i_gae)
+                    
+                    return (gae, i_gae, value, i_value), (gae, i_gae)
+
+                _, (advantages, i_advantages) = jax.lax.scan(
                     _get_advantages,
-                    (jnp.zeros_like(last_val), last_val),
+                    (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
                     traj_batch,
                     reverse=True,
                     unroll=16,
                 )
-                return advantages, advantages + traj_batch.value
-            # GAE:  0, 
-            #       r_T + γ V_{T+1} - V_T = δ_Τ
-            #       r_{T-1} + γ V_{T} - V_{T-1} + λ γ [(r_T + γ V_{T+1} - V_T] = δ_{Τ-1} + λ γ δ_Τ
-            # Suppose V(s_t) <= V_t + U(s_t)
-            # δ_Τ = r_T + γ (V_{T+1}+ U(S_{T+1})) - V_T >= r_T + γ V(s_{T+1}) - V_T
-            # r_t + γ V(s_{t+1}) >= Q(s_t, a_t)
-            advantages, targets = _calculate_gae(traj_batch, last_val)
+                return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+            advantages, targets = _calculate_gae(traj_batch, last_val) # now both tuples of (gae, i_gae)
+            advantages = advantages[0] + advantages[1] # combine extrinsic and intrinsic advantages for training policy
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
-                def _update_minbatch(train_state, batch_info):
+                
+                def _update_minbatch(train_states, batch_info):
+                    train_state, rnd_state = train_states
                     traj_batch, advantages, targets = batch_info
+                    
+                    def rnd_loss_fn(rnd_params, traj_batch):
+                        # RERUN NETWORK
+                        pred = rnd_net.apply(rnd_params, traj_batch.obs)
+                        target = traj_batch.embedding
+                        cosine_sim = jax.vmap(cosine_similarity, in_axes = (0,0))(pred, target)
+                        loss = -cosine_sim.mean()
+                        return loss, _
 
                     def _loss_fn(params, traj_batch, gae, targets):
                         # RERUN NETWORK
-                        pi, value = network.apply(params, traj_batch.obs)
+                        pi, value, i_val = network.apply(params, traj_batch.obs)
                         log_prob = pi.log_prob(traj_batch.action)
-
-                        # CALCULATE VALUE LOSS
+                        targets, i_targets = targets
+                        
+                        # *Extrinsic* VALUE LOSS
                         value_pred_clipped = traj_batch.value + (
                             value - traj_batch.value
                         ).clip(-config["VF_CLIP"], config["VF_CLIP"])
                         value_losses = jnp.square(value - targets)
                         value_losses_clipped = jnp.square(value_pred_clipped - targets)
                         value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+                        
+                        # *Intrinsic* VALUE LOSS
+                        value_pred_clipped = traj_batch.i_value + (
+                            i_val - traj_batch.i_value
+                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+                        value_losses = jnp.square(i_val - i_targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - i_targets)
+                        i_value_loss = (
                             0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
                         )
 
@@ -208,18 +277,28 @@ def make_train(config):
                         total_loss = (
                             loss_actor
                             + config["VF_COEF"] * value_loss
+                            + config["VF_COEF"] * i_value_loss
                             - config["ENT_COEF"] * entropy
                         )
-                        return total_loss, (value_loss, loss_actor, entropy)
+                        return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+                    # end loss_fn
 
+                    # --- UPDATE PPO ---
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
-                    total_loss, grads = grad_fn(
+                    # FIX 2: Correct unpacking. grad_fn returns ((loss, aux), grads)
+                    (total_loss, _), grads = grad_fn(
                         train_state.params, traj_batch, advantages, targets
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    
+                    # --- UPDATE RND ---
+                    rnd_grad_fn = jax.value_and_grad(rnd_loss_fn, has_aux=True)
+                    (rnd_loss, _), rnd_grads = rnd_grad_fn(rnd_state.params, traj_batch)
+                    rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
+                    return (train_state, rnd_state), (total_loss, rnd_loss)
+                # end update_minibatch
 
-                train_state, traj_batch, advantages, targets, rng = update_state
+                train_state, rnd_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 permutation = jax.random.permutation(_rng, batch_size)
                 batch = (traj_batch, advantages, targets)
@@ -235,23 +314,24 @@ def make_train(config):
                     ),
                     shuffled_batch,
                 )
-                train_state, total_loss = jax.lax.scan(
-                    _update_minbatch, train_state, minibatches
+                (train_state, rnd_state), total_loss = jax.lax.scan(
+                    _update_minbatch, (train_state, rnd_state), minibatches
                 )
-                update_state = (train_state, traj_batch, advantages, targets, rng)
+                update_state = (train_state, rnd_state, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
 
-            update_state = (train_state, traj_batch, advantages, targets, rng)
+            update_state = (train_state, rnd_state, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(
                 _update_epoch, update_state, None, config["NUM_EPOCHS"]
             )
-            train_state, _, _, _, rng = update_state
+            train_state, rnd_state, _, _, _, rng = update_state
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-            runner_state = (train_state, env_state, last_obs, rng, idx+1)
+            metric.update({"ppo_loss": loss_info[0], "rnd_loss": loss_info[1],})
+            runner_state = (train_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, env_state, obsv, _rng, 0)
+        runner_state = (train_state, rnd_state, env_state, obsv, _rng, 0)
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
@@ -267,11 +347,11 @@ def main():
     import argparse
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    parser = argparse.ArgumentParser(description='Run PPO experiment')
+    parser = argparse.ArgumentParser(description='Run RND experiment')
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to ppo/{args.run_suffix}' )
+                       help='saves to rnd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
     
     args = parser.parse_args()
@@ -296,7 +376,7 @@ def main():
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
         print("Num Policies " , len(metrics['returned_episode_returns']))
         
-        run_dir = os.path.join("results", f"ppo/{args.run_suffix}")
+        run_dir = os.path.join("results", f"rnd/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)

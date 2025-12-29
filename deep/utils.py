@@ -15,8 +15,9 @@ import flax.linen as nn
 import numpy as np
 
 import gymnax
-from gymnax.wrappers.purerl import FlattenObservationWrapper, LogWrapper
-from wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, NormalizeVecObservation, BinaryRewardWrapper
+from gymnax.wrappers.purerl import FlattenObservationWrapper
+from envs.log_wrapper import LogWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, NormalizeVecObservation, BinaryRewardWrapper
 from networks import *
 import optax
 
