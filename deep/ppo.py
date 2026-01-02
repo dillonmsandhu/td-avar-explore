@@ -1,23 +1,15 @@
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax.training.train_state import TrainState
-import optax
-import gymnax
-from deep.envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper
-from gymnax.wrappers.purerl import FlattenObservationWrapper, LogWrapper
-import wandb
-from networks import ActorCritic
-from utils import Transition
+from utils import *
+from envs.sparse_mc import SparseMountainCar
 
 # PPO
 DEFAULT_CONFIG = {
-    "ENV_NAME": "MountainCar-v0",
+    # "ENV_NAME": "MountainCar-v0",
+    "ENV_NAME": "DeepSea-bsuite",
     "LR": 5e-4,
     "LR_END": 5e-5,
     "NUM_ENVS": 32,
     "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250000,
+    "TOTAL_TIMESTEPS": 500_000,
     "NUM_EPOCHS": 8, # a lot -force memorization
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99,
@@ -33,6 +25,7 @@ DEFAULT_CONFIG = {
     "SEED": 42,
     "WARMUP": 128, # warmup steps for running mean/std
     "N_SEEDS": 4,
+    "DEEPSEA_SIZE": 10,
 }
 
 def make_train(config):
@@ -42,8 +35,14 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
     
-    env, env_params = gymnax.make(config["ENV_NAME"])
-    env, env_params = gymnax.make(config["ENV_NAME"])
+    if config['ENV_NAME'] == "SparseMountainCar-v0":
+        env = SparseMountainCar()
+        env_params = env.default_params
+    elif config['ENV_NAME'] == 'DeepSea-bsuite':
+        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+    else:
+        env, env_params = gymnax.make(config["ENV_NAME"])
+
     env = FlattenObservationWrapper(env)
     env = LogWrapper(env)                 # Log REAL returns
     if config["NORMALIZE_REWARDS"]:
@@ -294,8 +293,7 @@ def main():
 
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
-        print("Num Policies " , len(metrics['returned_episode_returns']))
-        
+                
         run_dir = os.path.join("results", f"ppo/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         

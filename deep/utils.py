@@ -52,34 +52,6 @@ config = {
     "NORMALIZE_OBS": True,
 }
 
-def cosine_similarity(a, b):
-    dot = jnp.dot(a,b)
-    mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
-    return dot/mag
-
-class Explore_Transition(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    i_value: jnp.ndarray # extra - intrinsic value from second value head
-    reward: jnp.ndarray
-    intrinsic_reward: jnp.ndarray # extra - intrinsic reward (RND loss)
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    next_obs: jnp.ndarray # extra - to get next features
-    embedding: jnp.ndarray # extra - target embedding from target rnd network
-    td_error: jnp.ndarray # for OPG (outer product of gradients), the "meat" of the sandwich covariance
-    info: jnp.ndarray
-
-class Transition(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    info: jnp.ndarray
-
 def parse_config_override(config_str):
     """Parse config override from command line argument."""
     if config_str is None:
