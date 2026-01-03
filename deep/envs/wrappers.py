@@ -1,60 +1,9 @@
 import jax
 import jax.numpy as jnp
 from flax import struct
+from gymnax.environments import spaces
 from gymnax.wrappers.purerl import GymnaxWrapper
 from typing import Any
-
-@struct.dataclass
-class NormalizeVecObsEnvState:
-    mean: jnp.ndarray
-    var: jnp.ndarray
-    count: float
-    env_state: Any
-
-class NormalizeVecObservation(GymnaxWrapper):
-    def __init__(self, env):
-        super().__init__(env)
-
-    def reset(self, key, params=None):
-        obs, state = self._env.reset(key, params)
-        
-        # Initialize with the first observation so we don't start with 0 mean/1 var
-        # Note: Since it's a single sample, var is 0 initially.
-        state = NormalizeVecObsEnvState(
-            mean=obs,
-            var=jnp.zeros_like(obs),
-            count=1.0,
-            env_state=state,
-        )
-        # Normalize the first frame (result will be 0 since obs == mean, but that's correct)
-        return self._normalize(obs, state), state
-
-    def step(self, key, state, action, params=None):
-        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
-
-        # Welford's Algorithm for single sample
-        delta = obs - state.mean
-        tot_count = state.count + 1
-
-        new_mean = state.mean + delta / tot_count
-        m_a = state.var * state.count
-        m_b = 0.0
-        M2 = m_a + m_b + jnp.square(delta) * state.count / tot_count
-        new_var = M2 / tot_count
-        new_count = tot_count
-
-        state = NormalizeVecObsEnvState(
-            mean=new_mean,
-            var=new_var,
-            count=new_count,
-            env_state=env_state,
-        )
-        return self._normalize(obs, state), state, reward, done, info
-
-    def _normalize(self, obs, state):
-        # eps is important to prevent div by zero if var is 0 (which it is on first step)
-        normalized = (obs - state.mean) / jnp.sqrt(state.var + 1e-8)
-        return jnp.clip(normalized, -10.0, 10.0)
 
 # --- Running Mean/Std Utilities ---
 @struct.dataclass
@@ -85,6 +34,29 @@ def update_running_mean_std(state, x):
 class NormalizeObsEnvState:
     mean_std: RunningMeanStdState
     env_state: Any
+
+
+class AddChannelWrapper(GymnaxWrapper):
+    """Add a channel dimension to observations for CNNs."""
+
+    def observation_space(self, params):
+        orig = self._env.observation_space(params)
+        return spaces.Box(
+            low=orig.low,
+            high=orig.high,
+            shape=orig.shape + (1,),
+            dtype=orig.dtype,
+        )
+
+    def reset(self, key, params=None):
+        obs, state = self._env.reset(key, params)
+        return obs[..., None], state
+
+    def step(self, key, state, action, params=None):
+        obs, state, reward, done, info = self._env.step(
+            key, state, action, params
+        )
+        return obs[..., None], state, reward, done, info
 
 class NormalizeObservationWrapper(GymnaxWrapper):
     def __init__(self, env):
@@ -150,29 +122,3 @@ class NormalizeRewardWrapper(GymnaxWrapper):
 
         return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
     
-# --- Wrapper 3: Binary Rewards (such that reward is 0 or 1.) ---
-
-class BinaryRewardWrapper(GymnaxWrapper):
-    """
-    Sparse reward MountainCar wrapper compatible with PPO+GAE.
-
-    Key idea:
-    - Give reward when goal is reached
-    - DO NOT terminate on that same step
-    - Terminate on the following step
-    """
-
-    def step(self, key, state, action, params=None):
-        obs, env_state, _, done, info = self._env.step(key, state, action, params)
-
-        # Check for goal
-        is_goal = env_state.position >= params.goal_position
-
-        # Sparse reward: 1 at goal, 0 otherwise
-        reward = jnp.where(is_goal, 1.0, 0.0)
-
-        # IMPORTANT:
-        # If we just reached the goal, delay termination by one step
-        done = jnp.where(is_goal, False, done)
-
-        return obs, env_state, reward, done, info

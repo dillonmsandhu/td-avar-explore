@@ -14,10 +14,6 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 
-import gymnax
-from gymnax.wrappers.purerl import FlattenObservationWrapper
-from envs.log_wrapper import LogWrapper
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, NormalizeVecObservation, BinaryRewardWrapper
 from networks import *
 import optax
 
@@ -99,16 +95,16 @@ def save_results(data, config, env_name, env_dir):
 
     return env_dir
 
-def save_plot(env_dir, env_name, steps_per_pi, episodic_return):
+def save_plot(env_dir, env_name, steps_per_pi, episodic_return, title):
     plt.figure()
     plt.plot([i * steps_per_pi for i in range(len(episodic_return))], episodic_return, 'o-')
     plt.xlabel("Step")
-    plt.ylabel("Return")
+    plt.ylabel(f"{title}")
     plt.title(env_name)
     plt.legend()
 
     # Save plot as a .png file in the environment directory
-    plot_path = os.path.join(env_dir, f"plot.png")
+    plot_path = os.path.join(env_dir, f"{title}.png")
     plt.savefig(plot_path)
     plt.close()
     print(f"Plot saved to {plot_path}")

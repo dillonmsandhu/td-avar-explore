@@ -1,7 +1,32 @@
 import jax.numpy as jnp
 import jax
 from typing import NamedTuple
+from envs.sparse_mc import SparseMountainCar
+import gymnax
+from gymnax.wrappers.purerl import FlattenObservationWrapper
+from envs.log_wrapper import LogWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper
 
+def make_env(config):
+    if config['ENV_NAME'] == "SparseMountainCar-v0":
+        env = SparseMountainCar()
+        env_params = env.default_params
+    elif config['ENV_NAME'] == 'DeepSea-bsuite':
+        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+    else:
+        env, env_params = gymnax.make(config["ENV_NAME"])
+    env = LogWrapper(env)      # Log REAL returns (possibly sparse)
+    if config["NETWORK_TYPE"] == "mlp":
+        env = FlattenObservationWrapper(env)
+    if config["NETWORK_TYPE"] == "cnn":
+        if len(env.observation_space(env_params).shape) < 3:
+            env = AddChannelWrapper(env)
+    if config["NORMALIZE_REWARDS"]:
+        env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) 
+    if config["NORMALIZE_OBS"]:
+        env = NormalizeObservationWrapper(env) 
+    return env, env_params
+    
 def cosine_similarity(a, b):
     dot = jnp.dot(a,b)
     mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)

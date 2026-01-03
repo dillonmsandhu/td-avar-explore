@@ -1,5 +1,6 @@
 from utils import *
 from helpers import _calculate_gae, _get_all_traces, Explore_Transition, _loss_fn
+import helpers
 from envs.sparse_mc import SparseMountainCar
 
 DEFAULT_CONFIG = {
@@ -30,7 +31,7 @@ DEFAULT_CONFIG = {
     "WARMUP": 200, # warmup steps for running mean/std
     "N_SEEDS": 4,
     "PRIOR_N": 1_000, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
-    "DEEPSEA_SIZE": 20,
+    "DEEPSEA_SIZE":15,
 }
 
 def compute_bonus(features, lstd_state, config=None):
@@ -107,61 +108,31 @@ def compute_sandwich(lstd_state: Dict, α = 1):
     return cov_w
 
 def make_train(config):
-    def initialize_rnd_network(rng, obs_shape):
-        rnd_network = RND_Net(activation=config["ACTIVATION"])
-        rng, _rng = jax.random.split(rng)
-        init_x = jnp.zeros(obs_shape)
-        rnd_params = rnd_network.init(_rng, init_x)
-        return rnd_network, rnd_params
-    
-    def initialize_network(n_actions, obs_shape, rng):
-        network = ActorCritic(n_actions, activation=config["ACTIVATION"], normalize_value_features = config['NORMALIZE_FEATURES'])
-        rng, _rng = jax.random.split(rng)
-        init_x = jnp.zeros(obs_shape)
-        network_params = network.init(_rng, init_x)
-        return network, network_params 
-    
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
-    if config['ENV_NAME'] == "SparseMountainCar-v0":
-        env = SparseMountainCar()
-        env_params = env.default_params
-    elif config['ENV_NAME'] == 'DeepSea-bsuite':
-        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
-    else:
-        env, env_params = gymnax.make(config["ENV_NAME"])
-    
-
-    env = FlattenObservationWrapper(env)
-    env = LogWrapper(env)      # Log REAL returns (possibly sparse)
-
-    if config["NORMALIZE_REWARDS"]:
-        env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) # Normalize Rewards
-    if config["NORMALIZE_OBS"]:
-        env = NormalizeObservationWrapper(env) # Normalize Obs
-    
+    env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
+    obs_shape = env.observation_space(env_params).shape
+    # EMA set up:
+    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
     prior_t = config["PRIOR_N"] // batch_size
 
     def train(rng):
 
-        GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
-        # initialize rnd networks
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, env.observation_space(env_params).shape)
-        _, target_params = initialize_rnd_network(target_rng, env.observation_space(env_params).shape)
-        
+        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config)
+        _, target_params = initialize_rnd_network(target_rng, obs_shape, config)
+            
         # initialize value and policy network
-        network_rng, rng = jax.random.split(rng)
-        network, network_params = initialize_network(n_actions, env.observation_space(env_params).shape, network_rng)
+        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
-        dummy_phi = network.apply(network_params, dummy_obs, method="get_value_features")
+        dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
-        # max_td_error = 1.0 / (1.0 - config['GAMMA'])
         max_r = 1.0
+        
         initial_lstd_state = {
             'A': jnp.eye(k) * config['REGULARIZATION'],  # Regularization for numerical stability
             'S': jnp.eye(k) * max_r**2,
@@ -404,13 +375,12 @@ def main():
     parser.add_argument('--n-seeds', type=int, default=0)
     
     args = parser.parse_args()
-    
-    # Start with default config
     config = DEFAULT_CONFIG.copy()
 
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
+    config = resolve_env_config(config)
     rng = jax.random.PRNGKey(config['SEED'])
         
     def evaluate(config, rng):
@@ -435,7 +405,9 @@ def main():
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets)
+        bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean , 'Bonus')
     
     evaluate(config, rng)
 
