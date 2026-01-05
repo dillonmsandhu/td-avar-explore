@@ -148,3 +148,32 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (value_loss, loss_actor, entropy)
+
+def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ):
+    def _get_advantages(gae_and_next_value, transition):
+        gae, i_gae, next_value, i_next_value = gae_and_next_value
+        done, value, reward, i, i_value = (
+            transition.done,
+            transition.value,
+            transition.reward,
+            transition.intrinsic_reward,
+            transition.i_value,
+        )
+        
+        delta = reward + γ * next_value * (1 - done) - value
+        gae = delta + (γ * λ * (1 - done) * gae)
+        
+        # Intrinsic is non-episodic (no done masking)
+        i_delta = i + γ * i_next_value - i_value 
+        i_gae = i_delta + (γ * λ * i_gae)
+        
+        return (gae, i_gae, value, i_value), (gae, i_gae)
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages,
+        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
+        traj_batch,
+        reverse=True,
+        unroll=16,
+    )
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
