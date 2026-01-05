@@ -122,14 +122,16 @@ class RNDTrainState(TrainState):
 
 class RNDNet(nn.Module):
     network_type: str
+    k: int = 64
 
     def setup(self):
-        self.torso = make_torso(self.network_type, out_dim=64)
-        # self.head = nn.Dense(64, kernel_init=orthogonal(1.0))
+        self.torso = make_torso(self.network_type, out_dim=self.k)
+        self.bias = jnp.ones_like(1.0) * (1/self.k) 
 
     def __call__(self, x):
+        z = self.torso(x)
+        z = jnp.concatenate([z, self.bias * jnp.ones(z.shape)], axis=-1)
         return self.torso(x)
-
 
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------

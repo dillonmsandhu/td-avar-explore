@@ -101,9 +101,6 @@ def make_train(config):
         
         # INIT Running Statistics for Intrinsic Reward
         rnd_ret_rms = RunningMeanStd()
-        # Helper to get embedding
-        get_features_fn = lambda params, obs: rnd_state.apply_fn(params, obs)
-        batch_get_features = jax.vmap(get_features_fn, in_axes=(None, 0))
 
         # INIT ENV
         rng, _rng = jax.random.split(rng)
