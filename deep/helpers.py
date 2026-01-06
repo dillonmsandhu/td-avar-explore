@@ -177,3 +177,12 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
         unroll=16,
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+def shuffle_and_batch(rng, transitions, n_minibatches):
+    def preprocess_transition(x, rng):
+        x = x.reshape(-1, *x.shape[2:])  # num_steps*num_envs (batch_size), ...
+        x = jax.random.permutation(rng, x)  # shuffle the transitions
+        x = x.reshape(n_minibatches, -1, *x.shape[1:])  # num_mini_updates, batch_size/num_mini_updates, ...
+        return x
+    minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
+    return minibatches

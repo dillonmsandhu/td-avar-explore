@@ -266,20 +266,8 @@ def make_train(config):
 
                 train_state, rnd_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
-                permutation = jax.random.permutation(_rng, batch_size)
                 batch = (traj_batch, advantages, targets)
-                batch = jax.tree_util.tree_map(
-                    lambda x: x.reshape((batch_size,) + x.shape[2:]), batch
-                )
-                shuffled_batch = jax.tree_util.tree_map(
-                    lambda x: jnp.take(x, permutation, axis=0), batch
-                )
-                minibatches = jax.tree_util.tree_map(
-                    lambda x: jnp.reshape(
-                        x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
-                    ),
-                    shuffled_batch,
-                )
+                minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
                 rng, mask_rng = jax.random.split(rng)
                 (train_state, rnd_state, mask_rng), total_loss = jax.lax.scan(
                     _update_minbatch, (train_state, rnd_state, mask_rng), minibatches
@@ -334,7 +322,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to rnd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--save-checkpoint', action='store_true')
+    
     args = parser.parse_args()
     
     # Start with default config
@@ -364,11 +352,7 @@ def main():
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
 
-        if args.save_checkpoint:
-            save_results(out, config, config['ENV_NAME'], env_dir)
-        else:
-            save_results(metrics, config, config['ENV_NAME'], env_dir)
-            
+        save_results(metrics, config, config['ENV_NAME'], env_dir)
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
@@ -381,8 +365,7 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, ia_mean, 'Intrinsic_Adv')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_mean, 'Intrinsic_Rew')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, rnd_loss, 'rnd_loss')
-        mean_return = float(jnp.mean(metrics['returned_episode_returns']))
-        print(f"RESULT mean_return={mean_return}")
+
     
     evaluate(config, rng)
 

@@ -42,12 +42,6 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-def compute_bonus(features, lstd_state, config=None):
-    """Computes the state bonus"""
-    w = lstd_state['w_int']
-    B = features @ w  # (Batch, k) @ (k,) -> (Batch,)
-    return B
-
 def lstd_i_val(phi_fn, obs, lstd_state):
     """
     phi: (..., k)
@@ -275,21 +269,8 @@ def make_train(config):
 
                 train_state, rnd_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
-                permutation = jax.random.permutation(_rng, batch_size)
                 batch = (traj_batch, advantages, targets)
-                batch = jax.tree_util.tree_map(
-                    lambda x: x.reshape((batch_size,) + x.shape[2:]), batch
-                )
-                shuffled_batch = jax.tree_util.tree_map(
-                    lambda x: jnp.take(x, permutation, axis=0), batch
-                )
-                minibatches = jax.tree_util.tree_map(
-                    lambda x: jnp.reshape(
-                        x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
-                    ),
-                    shuffled_batch,
-                )
-                rng, mask_rng = jax.random.split(rng)
+                minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
                 (train_state, rnd_state, mask_rng), total_loss = jax.lax.scan(
                     _update_minbatch, (train_state, rnd_state, mask_rng), minibatches
                 )
@@ -320,24 +301,9 @@ def make_train(config):
             # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-            
-            v_features = batch_get_v_features(train_state.params, traj_batch.next_obs)
-            v_feat_norm = jnp.linalg.norm(v_features, axis=-1)
-            
-            # constant obs:
-            constant_obs = jnp.zeros_like(traj_batch.obs) + 0.1
-            target_features_const_obs = rnd_net.apply(rnd_state.target_params, constant_obs)
-            avg_targ_feat_const_obs = jnp.linalg.norm(target_features_const_obs,axis=-1).mean()
-
-            mean_state = traj_batch.obs.mean(0).mean(0) # shape: (obs_shape)
-            mean_rew = traj_batch.reward.mean()
             metric.update({
                 "ppo_loss": loss_info[0], 
                 "rnd_loss": loss_info[1],
-                "mean_x": mean_state[0],
-                "mean_v": mean_state[1],
-                "v_feat_norm": v_feat_norm.mean(),
-                "v_feat_norm_std": v_feat_norm.std(),
                 "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
@@ -348,8 +314,8 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "intrinsic_v_mean": traj_batch.i_value.mean(),
                 "intrinsic_v_std": traj_batch.i_value.std(),
-                "avg_targ_feat_const_obs": avg_targ_feat_const_obs,
-                "mean_rew": mean_rew,
+                "i_val_constant_obs": lstd_i_val(get_features_fn, jnp.zeros_like(traj_batch.obs), lstd_state).mean(),
+                "mean_rew": traj_batch.reward.mean(),
             })
             runner_state = (train_state, lstd_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
@@ -414,8 +380,13 @@ def main():
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
+        intrinsic_v_constant_obs = metrics['i_val_const_obs'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_val_const_obs']
+        
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'Bonus')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
     
     evaluate(config, rng)
 
