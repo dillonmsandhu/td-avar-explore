@@ -88,7 +88,7 @@ def lstd_batch_update(
     
     # get intrinsic reward rho: rho = beta * sqrt( (1/N) * phi^T Sigma_ema^-1 phi )
     Sigma_inv = jnp.linalg.solve(S_view, jnp.eye(features.shape[-1]))
-    bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
+    bonus_sq = jnp.einsum('...i,ij,...j->...', next_features, Sigma_inv, next_features) / jnp.maximum(1.0, N)
     rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
 
     # solve LSTD for intrinsic system A^{-1} x = b
@@ -353,7 +353,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to count_rew_prop/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    
+    parser.add_argument('--save-checkpoint', action='store_true')
     args = parser.parse_args()
     
     # Start with default config
@@ -382,15 +382,17 @@ def main():
         os.makedirs(run_dir, exist_ok=True)
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
-
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean, 'Bonus')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'Bonus')
 
         mean_return = float(jnp.mean(metrics['returned_episode_returns']))
         print(f"RESULT mean_return={mean_return}")

@@ -74,7 +74,7 @@ class MLPTorso(nn.Module):
 
 class CNNTorso(nn.Module):
     out_dim: int
-    base_channels: int = 4
+    base_channels: int = 16
     max_channels: int = 128
 
     @nn.compact
@@ -122,7 +122,7 @@ class RNDTrainState(TrainState):
 
 class RNDNet(nn.Module):
     network_type: str
-    k: int = 64
+    k: int = 128
 
     def setup(self):
         self.torso = make_torso(self.network_type, out_dim=self.k)

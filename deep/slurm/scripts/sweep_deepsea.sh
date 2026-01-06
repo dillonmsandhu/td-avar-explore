@@ -14,7 +14,7 @@
 FILE=$1
 DATE=$(date +%Y-%m-%d)
 N=${SLURM_ARRAY_TASK_ID}
-NUM_EPISODES=10000
+NUM_EPISODES=50000
 TOTAL_TIMESTEPS=$((N * NUM_EPISODES))
 
 # ----------------------------

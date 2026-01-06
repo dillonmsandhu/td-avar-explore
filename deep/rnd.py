@@ -334,7 +334,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to rnd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    
+    parser.add_argument('--save-checkpoint', action='store_true')
     args = parser.parse_args()
     
     # Start with default config
@@ -364,7 +364,11 @@ def main():
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
 
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
+            
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']

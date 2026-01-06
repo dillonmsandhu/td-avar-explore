@@ -60,7 +60,8 @@ def lstd_batch_update(
                     next_features: jnp.ndarray,
                     traces: jnp.ndarray,
                     config: Dict,
-                    α: float
+                    α: float,
+                    α_b: float
     ):
     
     def lstd(traces, features, next_features, done):
@@ -92,7 +93,8 @@ def lstd_batch_update(
     # solve LSTD for intrinsic system A^{-1} x = b
     b_int_sample = traces * transitions.intrinsic_reward[..., None]
     b_b = b_int_sample.mean(axis=batch_axes)
-    b_new = (1-α) * lstd_state['b_int'] + α * b_b
+    b_new = (1-α_b) * lstd_state['b_int'] + α_b * b_b
+    bc = jnp.maximum(1.0 - (1.0 - α_b)**t, 1e-6)
     b_view = b_new / bc
     w_int = jnp.linalg.solve(A_view, b_view)
     
@@ -132,6 +134,7 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
 
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    ALPHA_B = 1/2
 
     def train(rng):
         # initialize rnd networks
@@ -212,7 +215,8 @@ def make_train(config):
                 pi, value = network.apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
-
+                
+                i_val = lstd_i_val(get_rnd_features, jnp.clip(last_obs, -5, 5), lstd_state)
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -230,7 +234,7 @@ def make_train(config):
                 rnd_ret_rms = rnd_ret_rms.update(intrinsic_reward_raw)
                 intrinsic_reward = intrinsic_reward_raw / (jnp.sqrt(rnd_ret_rms.var) + 1e-8)                
                 # intrinsic value (dot product with LSTD weights)
-                i_val = lstd_i_val(get_rnd_features, rnd_obs, lstd_state)
+                
                 transition = Transition(
                     done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, target_embedding, info
                 )
@@ -323,6 +327,7 @@ def make_train(config):
                 traces,
                 config,
                 α=GET_ALPHA_FN(lstd_state['t']),
+                α_b=ALPHA_B,
             )
             # Metrics
             metric = {k: v.mean() for k, v in traj_batch.info.items()} 
@@ -335,7 +340,7 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "rnd_return_mean_est": rnd_ret_rms.mean,
                 "rnd_return_std_est": jnp.sqrt(rnd_ret_rms.var),
-                "bonus_mean": gaes[1].mean(),
+                "intrinsc_adv_mean": gaes[1].mean(),
             })
             runner_state = (train_state, rnd_state, lstd_state, env_state, last_obs, rng, rnd_ret_rms, idx+1)
             return runner_state, metric
@@ -363,6 +368,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to rnd_lstd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=1)
+    parser.add_argument('--save-checkpoint', action='store_true')
     
     args = parser.parse_args()
     
@@ -393,17 +399,21 @@ def main():
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
 
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
+
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
-        bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['ia_mean']
+        intrinsc_adv_mean = metrics['intrinsc_adv_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['ia_mean']
         i_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
         rnd_loss = metrics['rnd_loss'].mean(0) if config['N_SEEDS'] > 1 else metrics['rnd_loss']
 
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean, 'Bonus')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsc_adv_mean, 'Intrinsic_Adv')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_mean, 'Intrinsic_Rew')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, rnd_loss, 'rnd_loss')
         mean_return = float(jnp.mean(metrics['returned_episode_returns']))

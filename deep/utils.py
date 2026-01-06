@@ -108,3 +108,32 @@ def save_plot(env_dir, env_name, steps_per_pi, episodic_return, title):
     plt.savefig(plot_path)
     plt.close()
     print(f"Plot saved to {plot_path}")
+
+def load_run_data(run_folder_name, env_name, results_base_path="../results"):
+    """
+    Load the configuration and output data for a run given the run folder and environment.
+    
+    Parameters:
+    - run_folder_name (str): The timestamped run folder name, e.g., "dpi_20241110_193658"
+    - env_name (str): The environment name, e.g., "Asterix-MinAtar"
+    - results_base_path (str): Base path to the results directory, default is a sibling "results" directory.
+    
+    Returns:
+    - config (dict): Loaded JSON configuration.
+    - results (object): Loaded output data from pickle.
+    """
+    # Construct paths
+    run_path = os.path.join(results_base_path, run_folder_name, env_name)
+    config_path = os.path.join(run_path, "config.json")
+    results_path = os.path.join(run_path, "out.pkl")
+    
+    # Load the config
+    with open(config_path, 'r') as json_file:
+        config = json.load(json_file)
+    
+    # Load the results
+    with open(results_path, 'rb') as pkl_file:
+        results = cloudpickle.load(pkl_file)
+    
+    
+    return config, results
