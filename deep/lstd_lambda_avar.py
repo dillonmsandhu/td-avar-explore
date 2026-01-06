@@ -408,7 +408,8 @@ def main():
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean , 'Bonus')
-    
+        mean_return = float(jnp.mean(metrics['returned_episode_returns']))
+        print(f"RESULT mean_return={mean_return}")
     evaluate(config, rng)
 
 if __name__ == '__main__':

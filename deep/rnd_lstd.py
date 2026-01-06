@@ -361,8 +361,8 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to rnd/{args.run_suffix}' )
-    parser.add_argument('--n-seeds', type=int, default=0)
+                       help='saves to rnd_lstd/{args.run_suffix}' )
+    parser.add_argument('--n-seeds', type=int, default=1)
     
     args = parser.parse_args()
     
@@ -406,7 +406,8 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean, 'Bonus')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_mean, 'Intrinsic_Rew')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, rnd_loss, 'rnd_loss')
-
+        mean_return = float(jnp.mean(metrics['returned_episode_returns']))
+        print(f"RESULT mean_return={mean_return}")
     
     evaluate(config, rng)
 
