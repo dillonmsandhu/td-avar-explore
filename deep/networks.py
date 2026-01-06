@@ -7,6 +7,7 @@ from flax.training.train_state import TrainState
 import distrax
 from typing import Any
 import math
+import optax
 # =====================================================
 # ---------------- ENV → NETWORK ----------------------
 # =====================================================
@@ -49,6 +50,29 @@ def initialize_actor_critic(rng, obs_shape, action_dim, config, n_heads: int):
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
 
+def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, target_params = None):
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    lr_scheduler = optax.linear_schedule(
+        init_value=config["LR"],
+        end_value=config["LR_END"],
+        transition_steps=total_grad_steps
+    )
+    tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adamw(lr_scheduler, eps=1e-5),
+    )
+    train_state = TrainState.create(
+        apply_fn=network.apply,
+        params=params,
+        tx=tx,
+    )
+    rnd_state = RNDTrainState.create(
+        apply_fn=rnd_net.apply,
+        params=rnd_params,
+        tx=tx,
+        target_params=target_params,
+    )
+    return train_state, rnd_state
 
 # =====================================================
 # ------------------- TORSOS --------------------------

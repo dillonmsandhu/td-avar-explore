@@ -1,6 +1,6 @@
 from utils import *
 import helpers
-from envs.sparse_mc import SparseMountainCar
+import networks
 
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
     "NORMALIZE_REWARDS": False,
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,
-    "BONUS_SCALE": 1.96,
+    "BONUS_SCALE": 10.0,
     "REGULARIZATION": 1e-4,
     "PER_UPDATE_REGULARIZATION": 1e-4,
     "SEED": 42,
@@ -63,7 +63,8 @@ def lstd_batch_update(
                     next_features: jnp.ndarray,
                     traces: jnp.ndarray,
                     config: Dict,
-                    α: float
+                    α: float,
+                    α_b: float
     ):
     
     # Fix 1: Add 'current_features' as argument
@@ -106,11 +107,15 @@ def lstd_batch_update(
     A_view, S_view = jax.tree.map(lambda x: x / bc, (A, S))
     
     rho = get_int_rew(S_view, next_features, N)
+    # batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
+    # rho = get_int_rew(S_view, next_features, 2*batch_size/α)
 
     # solve LSTD for intrinsic system A^{-1} x = b
     b_int_sample = traces * rho[..., None] # Expand rho for broadcast
     b_b = b_int_sample.mean(axis=batch_axes)
-    b_new = (1-α) * lstd_state['b_int'] + α * b_b
+    b_new = (1-α_b) * lstd_state['b_int'] + α_b * b_b
+    # bc = 1.0 - (1.0 - α_b)**t
+    # bc = jnp.maximum(bc, 1e-6)
     b_view = b_new / bc
     w_int = jnp.linalg.solve(A_view, b_view)
     
@@ -120,12 +125,12 @@ def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
-    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
     
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    GET_ALPHA_FN = lambda t: jnp.maximum(1/100, 1/t)
+    GET_ALPHA_FN_b = lambda t: jnp.maximum(1/10, 1/t)
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -147,31 +152,10 @@ def make_train(config):
             't': 1, # number of updates
             'int_rew': jnp.zeros((config['NUM_STEPS'], config['NUM_ENVS'], ))
         }
-        lr_scheduler = optax.linear_schedule(
-            init_value=config["LR"],
-            end_value=config["LR_END"],
-            transition_steps=total_grad_steps
-        )
-        tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adamw(lr_scheduler, eps=1e-5),
-        )
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=network_params,
-            tx=tx,
-        )
-        rnd_state = RNDTrainState.create(
-            apply_fn=rnd_net.apply,
-            params=rnd_params,
-            tx=tx,
-            target_params=target_params,
-        )
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
+        
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
-        
-        get_v_features_fn = lambda params, obs: train_state.apply_fn(params, obs, method="get_value_features")[0]
-        batch_get_v_features = jax.vmap(get_v_features_fn, in_axes=(None, 0))
 
         # INIT ENV
         rng, _rng = jax.random.split(rng)
@@ -244,6 +228,7 @@ def make_train(config):
             # COMPUTE intrinsic reward:            
             next_phi = batch_get_features(traj_batch.next_obs)
             rho = get_int_rew(lstd_state['S'], next_phi, lstd_state['N'])
+            # rho = get_int_rew(lstd_state['S'], next_phi, 2 * batch_size / GET_ALPHA_FN(lstd_state['t']))
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
@@ -255,25 +240,21 @@ def make_train(config):
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 
-                def _update_minbatch(minibatch_input, batch_info):
-                    train_state, rnd_state, mask_rng = minibatch_input
+                def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
                     (total_loss, _), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    rnd_loss = jnp.zeros_like(total_loss)                    
-                    return (train_state, rnd_state, mask_rng), (total_loss, rnd_loss)
+                    return train_state, total_loss
                 # end update_minibatch
 
                 train_state, rnd_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                (train_state, rnd_state, mask_rng), total_loss = jax.lax.scan(
-                    _update_minbatch, (train_state, rnd_state, mask_rng), minibatches
-                )
+                train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
                 update_state = (train_state, rnd_state, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
             # end update_epoch
@@ -297,6 +278,7 @@ def make_train(config):
                 traces,
                 config,
                 α=GET_ALPHA_FN(lstd_state['t']),
+                α_b=GET_ALPHA_FN_b(lstd_state['t']),
             )
             # -------------------------------
             # --------- Update metrics ------
@@ -314,7 +296,7 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "intrinsic_v_mean": traj_batch.i_value.mean(),
                 "intrinsic_v_std": traj_batch.i_value.std(),
-                "i_val_constant_obs": lstd_i_val(get_features_fn, jnp.zeros_like(traj_batch.obs), lstd_state).mean(),
+                "i_val_const_obs": lstd_i_val(get_features_fn, jnp.zeros_like(traj_batch.obs), lstd_state).mean(),
                 "mean_rew": traj_batch.reward.mean(),
             })
             runner_state = (train_state, lstd_state, rnd_state, env_state, last_obs, rng, idx+1)
@@ -344,6 +326,8 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to count_rew_prop/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
+    parser.add_argument('--save-checkpoint', action='store_true')
+
     
     args = parser.parse_args()
     
@@ -374,7 +358,11 @@ def main():
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
 
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
+        
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']

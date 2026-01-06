@@ -1,6 +1,6 @@
 from utils import *
 import helpers
-from envs.sparse_mc import SparseMountainCar
+import networks
 
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -75,7 +75,6 @@ def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
-    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
@@ -85,11 +84,11 @@ def make_train(config):
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config)
-        _, target_params = initialize_rnd_network(target_rng, obs_shape, config)
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config)
             
         # initialize value and policy network
-        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
@@ -98,26 +97,8 @@ def make_train(config):
             'N': 0, # number of samples
             't': 1, # number of updates
         }
-        lr_scheduler = optax.linear_schedule(
-            init_value=config["LR"],
-            end_value=config["LR_END"],
-            transition_steps=total_grad_steps
-        )
-        tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adamw(lr_scheduler, eps=1e-5),
-        )
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=network_params,
-            tx=tx,
-        )
-        rnd_state = RNDTrainState.create(
-            apply_fn=rnd_net.apply,
-            params=rnd_params,
-            tx=tx,
-            target_params=target_params,
-        )
+
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
         # INIT ENV
@@ -287,7 +268,7 @@ def make_train(config):
             
             # constant obs:
             constant_obs = jnp.zeros_like(traj_batch.obs)
-            i_val_const_obs = network.apply(train_state.params, constant_obs)
+            _, _, i_val_const_obs = network.apply(train_state.params, constant_obs)
 
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
@@ -333,9 +314,10 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to count_rew_prop/{args.run_suffix}' )
+                       help='saves to count_rew_net/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    
+    parser.add_argument('--save-checkpoint', action='store_true')
+
     args = parser.parse_args()
     
     # Start with default config
@@ -358,14 +340,18 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"count_rew_prop/{args.run_suffix}")
+        run_dir = os.path.join("results", f"count_rew_net/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)
         os.makedirs(env_dir, exist_ok=True)
         print(f"Saving {config['ENV_NAME']} results to {run_dir}")
 
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
+        
         mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']

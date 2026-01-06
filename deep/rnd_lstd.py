@@ -1,7 +1,7 @@
 from utils import * 
 import helpers
-from envs.sparse_mc import SparseMountainCar
 import flax
+import networks
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
     "ENV_NAME": "DeepSea-bsuite",
@@ -146,21 +146,7 @@ def make_train(config):
         # initialize value and policy network
         network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
 
-        tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adamw(config['LR'], eps=1e-5),
-        )
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=network_params,
-            tx=tx,
-        )
-        rnd_state = RNDTrainState.create(
-            apply_fn=rnd_net.apply,
-            params=rnd_params,
-            tx=tx,
-            target_params=target_params,
-        )
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         # INIT Running Statistics for Intrinsic Reward
         rnd_ret_rms = RunningMeanStd()

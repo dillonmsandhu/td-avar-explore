@@ -1,7 +1,7 @@
 from utils import *
 from helpers import _calculate_gae, _get_all_traces, Explore_Transition, _loss_fn
 import helpers
-from envs.sparse_mc import SparseMountainCar
+import networks
 
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -142,27 +142,9 @@ def make_train(config):
             'S_update': jnp.zeros((k, k)),
         }
         initial_lstd_state['Sandwich']= compute_sandwich(initial_lstd_state)
+        
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
 
-        lr_scheduler = optax.linear_schedule(
-            init_value=config["LR"],
-            end_value=config["LR_END"],
-            transition_steps=total_grad_steps
-        )
-        tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adamw(lr_scheduler, eps=1e-5),
-        )
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=network_params,
-            tx=tx,
-        )
-        rnd_state = RNDTrainState.create(
-            apply_fn=rnd_net.apply,
-            params=rnd_params,
-            tx=tx,
-            target_params=target_params,
-        )
         get_features_fn = lambda params, obs: rnd_net.apply(params, obs)
         batch_get_features = jax.vmap(get_features_fn, in_axes=(None, 0))
         
@@ -299,27 +281,14 @@ def make_train(config):
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
             
-            v_features = batch_get_v_features(train_state.params, traj_batch.next_obs)
-            v_feat_norm = jnp.linalg.norm(v_features, axis=-1)
-            feat_norm = jnp.linalg.norm(next_phi, axis=-1)
-
             # constant obs:
-            constant_obs = jnp.zeros_like(traj_batch.obs) + 0.1
+            constant_obs = jnp.zeros_like(traj_batch.obs)
             target_features_const_obs = rnd_net.apply(rnd_state.target_params, constant_obs)
             avg_targ_feat_const_obs = jnp.linalg.norm(target_features_const_obs,axis=-1).mean()
 
-            # 2. Bonus Statistics
-            mean_state = traj_batch.obs.mean(0).mean(0) # shape: (obs_shape)
-            mean_rew = traj_batch.reward.mean()
             metric.update({
                 "ppo_loss": loss_info[0], 
                 "rnd_loss": loss_info[1],
-                "mean_x": mean_state[0],
-                "mean_v": mean_state[1],
-                "v_feat_norm": v_feat_norm.mean(),
-                "feat_norm_std": feat_norm.std(),
-                "feat_norm": feat_norm.mean(),
-                "feat_norm_std": feat_norm.std(),
                 "bonus_mean": U_prime.mean(),
                 "bonus_std": U_prime.std(),
                 "bonus_max": U_prime.max(),
@@ -332,7 +301,7 @@ def make_train(config):
                 "td_error_mean":traj_batch.td_error.mean(),
                 "td_error_std": traj_batch.td_error.std(),
                 "avg_targ_feat_const_obs": avg_targ_feat_const_obs,
-                "mean_rew": mean_rew,
+                "mean_rew": traj_batch.reward.mean(),
             })
             runner_state = (train_state, lstd_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
