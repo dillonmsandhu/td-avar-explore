@@ -1,0 +1,385 @@
+from utils import *
+import helpers
+from envs.sparse_mc import SparseMountainCar
+
+DEFAULT_CONFIG = {
+    # "ENV_NAME": "SparseMountainCar-v0",
+    "ENV_NAME": "DeepSea-bsuite",
+    "LR": 5e-4,
+    "LR_END": 5e-4,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
+    "TOTAL_TIMESTEPS": 250_000,
+    "NUM_EPOCHS": 4,
+    "MINIBATCH_SIZE": 256,
+    "GAMMA": 0.99,
+    "GAE_LAMBDA": 0.6,
+    "CLIP_EPS": 0.2,
+    "VF_CLIP": 0.5,
+    "ENT_COEF": 0.003,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_OBS": False,
+    "NORMALIZE_FEATURES": False,
+    "BONUS_SCALE": 1.96,
+    "REGULARIZATION": 1e-4,
+    "PER_UPDATE_REGULARIZATION": 1e-4,
+    "SEED": 42,
+    "WARMUP": 200, # warmup steps for running mean/std
+    "N_SEEDS": 4,
+    "DEEPSEA_SIZE": 20,
+}
+class Transition(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray 
+    i_value: jnp.ndarray
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray 
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    next_obs: jnp.ndarray
+    info: jnp.ndarray
+
+def get_int_rew(S, features, N):
+    Sigma_inv = jnp.linalg.solve(S, jnp.eye(features.shape[-1]))
+    bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
+    rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+    return rho
+
+def sigma_update(   sigma_state: Dict,
+                    transitions, # Explore_Transition
+                    features: jnp.ndarray,
+                    eps: float,
+                    α: float
+    ):
+    
+    # Unpack state (Assuming these are RAW uncorrected EMAs)
+    S, t = sigma_state['S'], sigma_state['t']
+    batch_axes = tuple(range(transitions.done.ndim))
+    N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
+    # S_update (L, B, k, k)
+    S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
+    # Batch average
+    S_b = S_update.mean(axis=batch_axes)
+    # regularize
+    S_b += eps * jnp.eye(S.shape[0])
+    # symmetrize
+    S_b = 0.5 * (S_b + S_b.T)
+    # EMA
+    S = (1-α) * S + α * S_b
+    return {'S': S, 'N': N, 't': t+1} # new sigma_state
+
+def make_train(config):
+    batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
+    config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
+    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    env, env_params = helpers.make_env(config)
+    n_actions = env.action_space(env_params).n
+    obs_shape = env.observation_space(env_params).shape
+    
+    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    
+    def train(rng):
+        rnd_rng, rng = jax.random.split(rng)
+        target_rng, rng = jax.random.split(rng)
+        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config)
+        _, target_params = initialize_rnd_network(target_rng, obs_shape, config)
+            
+        # initialize value and policy network
+        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
+        dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
+        dummy_phi = rnd_net.apply(target_params, dummy_obs)
+        k = dummy_phi.shape[-1]
+        initial_sigma_state = {
+            'S': jnp.eye(k) * config['REGULARIZATION'],
+            'N': 0, # number of samples
+            't': 1, # number of updates
+        }
+        lr_scheduler = optax.linear_schedule(
+            init_value=config["LR"],
+            end_value=config["LR_END"],
+            transition_steps=total_grad_steps
+        )
+        tx = optax.chain(
+                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+                optax.adamw(lr_scheduler, eps=1e-5),
+        )
+        train_state = TrainState.create(
+            apply_fn=network.apply,
+            params=network_params,
+            tx=tx,
+        )
+        rnd_state = RNDTrainState.create(
+            apply_fn=rnd_net.apply,
+            params=rnd_params,
+            tx=tx,
+            target_params=target_params,
+        )
+        get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
+        batch_get_features = jax.vmap(get_features_fn)
+        # INIT ENV
+        rng, _rng = jax.random.split(rng)
+        reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
+        obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+
+        # WARMUP:
+        def _warmup_step(runner_state, unused):
+            env_state, last_obs, rng = runner_state
+            
+            # Select RANDOM actions (no need for network here, just exploring state space)
+            rng, _rng = jax.random.split(rng)
+            rng_action = jax.random.split(_rng, config["NUM_ENVS"])
+            action = jax.vmap(env.action_space(env_params).sample)(rng_action)
+            
+            # Step env (wrappers will update their internal mean/std stats automatically)
+            rng, _rng = jax.random.split(rng)
+            rng_step = jax.random.split(_rng, config["NUM_ENVS"])
+            obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
+                rng_step, env_state, action, env_params
+            )
+            
+            return (env_state, obsv, rng), None
+
+        # Run the warmup
+        warmup_runner_state = (env_state, obsv, rng)
+        (env_state, obsv, rng), _ = jax.lax.scan(
+            _warmup_step, warmup_runner_state, None, config["WARMUP"]
+        )
+        # -------------------------
+
+        # TRAIN LOOP
+        def _update_step(runner_state, unused):
+            
+            train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx = runner_state
+            
+            # COLLECT TRAJECTORIES
+            def _env_step(env_scan_state, unused):
+                train_state, rnd_state, env_state, last_obs, rng= env_scan_state
+
+                # SELECT ACTION
+                rng, _rng = jax.random.split(rng)
+                pi, value, i_val = network.apply(train_state.params, last_obs)
+                action = pi.sample(seed=_rng)
+                log_prob = pi.log_prob(action)
+
+                # STEP ENV
+                rng, _rng = jax.random.split(rng)
+                rng_step = jax.random.split(_rng, config["NUM_ENVS"])
+                obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
+                    rng_step, env_state, action, env_params
+                )
+                
+                # Record
+                intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
+                transition = Transition(
+                    done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                )
+
+                runner_state = (train_state, rnd_state, env_state, obsv, rng)
+                return runner_state, transition
+            
+            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
+            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
+                _env_step, env_step_state , None, config["NUM_STEPS"]
+            )
+            # COMPUTE intrinsic reward:            
+            next_phi = batch_get_features(traj_batch.next_obs)
+            rho = get_int_rew(sigma_state['S'], next_phi, sigma_state['N'])
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)
+            # Advantage
+            _, last_val, last_i_val = network.apply(train_state.params, last_obs)
+            gaes, targets = helpers.calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            advantages = gaes[0] + gaes[1]
+
+            # UPDATE NETWORK
+            def _update_epoch(update_state, unused):
+                def _update_minbatch(train_state, batch_info):
+                    traj_batch, advantages, targets = batch_info
+
+                    def _loss_fn(params, traj_batch, gae, targets):
+                        targets, i_targets = targets
+                        # RERUN NETWORK
+                        pi, value, i_val = network.apply(params, traj_batch.obs)
+                        log_prob = pi.log_prob(traj_batch.action)
+                        
+                        # Extrinsic VALUE LOSS
+                        value_pred_clipped = traj_batch.value + (
+                            value - traj_batch.value
+                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+                        value_losses = jnp.square(value - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+                        
+                        # Intrinsic VALUE LOSS
+                        value_pred_clipped = traj_batch.i_value + (
+                            i_val - traj_batch.i_value
+                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+                        value_losses = jnp.square(i_val - i_targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - i_targets)
+                        i_value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+
+                        # CALCULATE ACTOR LOSS
+                        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+                        loss_actor1 = ratio * gae
+                        loss_actor2 = (
+                            jnp.clip(
+                                ratio,
+                                1.0 - config["CLIP_EPS"],
+                                1.0 + config["CLIP_EPS"],
+                            )
+                            * gae
+                        )
+                        loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+                        loss_actor = loss_actor.mean()
+                        entropy = pi.entropy().mean()
+
+                        total_loss = (
+                            loss_actor
+                            + config["VF_COEF"] * value_loss
+                            + config["VF_COEF"] * i_value_loss
+                            - config["ENT_COEF"] * entropy
+                        )
+                        return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+
+                    # --- UPDATE PPO ---
+                    grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    (total_loss, (i_value_loss, value_loss, loss_actor, entropy)), grads = grad_fn(
+                        train_state.params, traj_batch, advantages, targets
+                    )
+                    train_state = train_state.apply_gradients(grads=grads)
+                    
+                    return train_state, (total_loss, i_value_loss, value_loss, loss_actor, entropy)
+
+                train_state, traj_batch, advantages, targets, rng = update_state
+                rng, _rng = jax.random.split(rng)
+                batch = (traj_batch, advantages, targets)
+                minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
+                train_state, losses = jax.lax.scan(_update_minbatch, train_state, minibatches)
+                update_state = (train_state, traj_batch, advantages, targets, rng)
+                return update_state, losses
+            # --------- Train the network ---------
+            initial_update_state = (train_state, traj_batch, advantages, targets, rng)
+            update_state, loss_info = jax.lax.scan(
+                _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
+            )
+            train_state, _, _, _, rng = update_state
+            # -------------------------------
+            # --------- Update LSTD ---------
+            new_phi = batch_get_features(traj_batch.obs)
+            sigma_state = sigma_update(
+                sigma_state,
+                traj_batch,
+                new_phi,
+                config['PER_UPDATE_REGULARIZATION'],
+                α=GET_ALPHA_FN(sigma_state['t']),
+            )
+            # -------------------------------
+            # --------- Update metrics ------
+            metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
+            
+            # constant obs:
+            constant_obs = jnp.zeros_like(traj_batch.obs)
+            i_val_const_obs = network.apply(train_state.params, constant_obs)
+
+            metric.update({
+                "ppo_loss": loss_info[0].mean(), 
+                "i_value_loss": loss_info[1].mean(),
+                "e_value_loss": loss_info[2].mean(),
+                "pi_loss": loss_info[3].mean(),
+                "entropy": loss_info[4].mean(),
+                "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
+                "bonus_mean": gaes[1].mean(),
+                "bonus_std": gaes[1].std(),
+                "bonus_max": gaes[1].max(),
+                "lambda_ret_mean": targets[0].mean(),
+                "lambda_ret_std": targets[0].std(),
+                "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
+                "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
+                "intrinsic_v_mean": traj_batch.i_value.mean(),
+                "intrinsic_v_std": traj_batch.i_value.std(),
+                "i_val_const_obs": i_val_const_obs,
+                "mean_rew": traj_batch.reward.mean(),
+            })
+            runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
+            return runner_state, metric
+            # end update_step
+
+        rng, _rng = jax.random.split(rng)
+        runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 0)
+        runner_state, metrics = jax.lax.scan(
+            _update_step, runner_state, None, config["NUM_UPDATES"]
+        )
+        return {"runner_state": runner_state, "metrics": metrics}
+
+    return train
+    
+def main():
+    import warnings; warnings.simplefilter('ignore')
+    import os
+    from utils import save_results, save_plot, parse_config_override
+    import datetime
+    import argparse
+    
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
+    parser.add_argument('--config', type=str, default=None,
+                       help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
+    parser.add_argument('--run_suffix', type=str, default=run_timestamp,
+                       help='saves to count_rew_prop/{args.run_suffix}' )
+    parser.add_argument('--n-seeds', type=int, default=0)
+    
+    args = parser.parse_args()
+    
+    # Start with default config
+    config = DEFAULT_CONFIG.copy()
+
+    # Override with command line config
+    config_override = parse_config_override(args.config)
+    config.update(config_override)
+    # update the network type and learning rate based on the env.
+    config = resolve_env_config(config)
+    rng = jax.random.PRNGKey(config['SEED'])
+        
+    def evaluate(config, rng):
+        steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
+        run_fn = jax.jit(jax.vmap(make_train(config)))
+        rngs = jax.random.split(rng, config['N_SEEDS'])
+        out = run_fn(rngs)
+        metrics = out["metrics"]
+
+        print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
+        print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
+
+        run_dir = os.path.join("results", f"count_rew_prop/{args.run_suffix}")
+        env_dir = os.path.join(run_dir, config['ENV_NAME'])
+        
+        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(env_dir, exist_ok=True)
+        print(f"Saving {config['ENV_NAME']} results to {run_dir}")
+
+        save_results(metrics, config, config['ENV_NAME'], env_dir)
+        mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
+        if config['ENV_NAME'] == "SparseMountainCar-v0":
+            mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
+        
+        bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
+        intrinsic_v_constant_obs = metrics['i_val_const_obs'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_val_const_obs']
+        
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_adv')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
+    
+    evaluate(config, rng)
+
+if __name__ == '__main__':
+    main()
