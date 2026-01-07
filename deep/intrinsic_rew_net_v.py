@@ -1,6 +1,7 @@
 from utils import *
 import helpers
 import networks
+from deepsea_v import DeepSeaExactValue
 
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -80,6 +81,7 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
     
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -266,10 +268,12 @@ def make_train(config):
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
             
-            # constant obs:
-            constant_obs = jnp.zeros_like(traj_batch.obs)
-            _, _, i_val_const_obs = network.apply(train_state.params, constant_obs)
+            # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
+            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, sigma_state, batch_get_features, get_int_rew)
+            v_pred, v_i_pred = v_pred
 
+            e_value_error = jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2)
+            i_value_error = jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2)
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "i_value_loss": loss_info[1].mean(),
@@ -286,8 +290,14 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "intrinsic_v_mean": traj_batch.i_value.mean(),
                 "intrinsic_v_std": traj_batch.i_value.std(),
-                "i_val_const_obs": i_val_const_obs,
                 "mean_rew": traj_batch.reward.mean(),
+                "mean_rew": traj_batch.reward.mean(),
+                "v_i": v_i,
+                "v_e": v_e,
+                "v_e_pred": v_pred,
+                "v_i_pred": v_i_pred,
+                "e_value_error": e_value_error,
+                "i_value_error": i_value_error
             })
             runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
@@ -340,7 +350,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"count_rew_net/{args.run_suffix}")
+        run_dir = os.path.join("results", f"count_rew_net_v/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)
@@ -356,6 +366,7 @@ def main():
         if config['ENV_NAME'] == "SparseMountainCar-v0":
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
+        
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
@@ -368,7 +379,21 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
-    
+
+        # List of new value metrics to plot
+        value_metrics = ["v_i", "v_e", "v_e_pred", "v_i_pred"]
+
+        for key in value_metrics:
+            if key in metrics:
+                # 1. Handle Multi-Seed Averaging
+                data = metrics[key]
+                mean_data = data.mean(0) if config['N_SEEDS'] > 1 else data
+                initial_state_data = mean_data[:, 0, 0] # initial state is 0 0 on grid.
+                
+                # 2. Save Plot
+                # We slice [1:] to skip the initial untrained step, matching your other plots
+                save_plot(env_dir, config['ENV_NAME'], steps_per_pi, initial_state_data[1:], key)
+
     evaluate(config, rng)
 
 if __name__ == '__main__':
