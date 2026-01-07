@@ -306,7 +306,6 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "intrinsic_v_mean": traj_batch.i_value.mean(),
                 "intrinsic_v_std": traj_batch.i_value.std(),
-                "i_val_const_obs": lstd_i_val(get_features_fn, jnp.zeros_like(traj_batch.obs), lstd_state).mean(),
                 "mean_rew": traj_batch.reward.mean(),
                 "v_i": v_i,
                 "v_e": v_e,
@@ -385,7 +384,6 @@ def main():
         
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
-        intrinsic_v_constant_obs = metrics['i_val_const_obs'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_val_const_obs']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
         i_value_error = metrics['i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_value_error']
         e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
@@ -393,7 +391,6 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')

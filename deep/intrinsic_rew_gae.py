@@ -227,6 +227,7 @@ def make_train(config):
             )
             # COMPUTE intrinsic reward:            
             next_phi = batch_get_features(traj_batch.next_obs)
+            # TODO: Zero out intrinsic reward when done...
             rho = get_int_rew(lstd_state['S'], next_phi, lstd_state['N'])
             # rho = get_int_rew(lstd_state['S'], next_phi, 2 * batch_size / GET_ALPHA_FN(lstd_state['t']))
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
@@ -370,11 +371,14 @@ def main():
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
         intrinsic_v_constant_obs = metrics['i_val_const_obs'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_val_const_obs']
+        intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
     
     evaluate(config, rng)
 
