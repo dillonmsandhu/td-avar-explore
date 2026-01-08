@@ -42,11 +42,6 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-def get_int_rew(S, features, N):
-    Sigma_inv = jnp.linalg.solve(S, jnp.eye(features.shape[-1]))
-    bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
-    rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
-    return rho
 
 def sigma_update(   sigma_state: Dict,
                     transitions, # Explore_Transition
@@ -80,6 +75,12 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
     
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+
+    def get_int_rew(S, features, N):
+        Sigma_inv = jnp.linalg.solve(S, jnp.eye(features.shape[-1]))
+        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
+        rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+        return rho
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)

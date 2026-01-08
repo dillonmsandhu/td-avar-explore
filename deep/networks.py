@@ -124,7 +124,7 @@ class CNNTorso(nn.Module):
             channels = min(channels * 2, self.max_channels)
 
         x = x.reshape(*x.shape[:-3], -1)
-        x = nn.Dense(self.out_dim, name="proj")(x)
+        x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         x = nn.relu(x)
         return x
 
@@ -144,18 +144,45 @@ def make_torso(network_type: str, **kwargs):
 class RNDTrainState(TrainState):
     target_params: Any
 
+# class RNDNet(nn.Module):
+#     network_type: str
+#     k: int = 128
+
+#     def setup(self):
+#         self.torso = make_torso(self.network_type, out_dim=self.k)
+#         self.bias = jnp.ones_like(1.0) * (1/jnp.sqrt(self.k))
+
+#     def __call__(self, x):
+#         z = self.torso(x)
+#         z = jnp.concatenate([z, self.bias * jnp.ones(z.shape)], axis=-1)
+#         return self.torso(x)
+
 class RNDNet(nn.Module):
     network_type: str
     k: int = 128
 
     def setup(self):
-        self.torso = make_torso(self.network_type, out_dim=self.k)
-        self.bias = jnp.ones_like(1.0) * (1/self.k) 
+        # We output k-1 features so that after adding the bias term we have exactly k
+        self.torso = make_torso(self.network_type, out_dim=self.k - 1)
 
     def __call__(self, x):
-        z = self.torso(x)
-        z = jnp.concatenate([z, self.bias * jnp.ones(z.shape)], axis=-1)
-        return self.torso(x)
+        phi = self.torso(x)
+        
+        # 1. Normalize the raw neural features (essential for stable LSTD)
+        #    This ensures ||phi|| == 1.0
+        phi = phi / jnp.linalg.norm(phi, axis=-1, keepdims=True)
+        
+        # 2. Append a constant bias term
+        #    This allows LSTD to learn a non-zero intercept.
+        #    We scale it by 1/sqrt(k) so it has similar magnitude to other features.
+        batch_size = phi.shape[:-1]
+        bias_val = 1.0 / jnp.sqrt(self.k)
+        bias = jnp.ones((*batch_size, 1)) * bias_val
+        
+        # 3. Concatenate
+        phi_augmented = jnp.concatenate([phi, bias], axis=-1)
+        
+        return phi_augmented
 
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------

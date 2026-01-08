@@ -23,7 +23,8 @@ DEFAULT_CONFIG = {
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,
     "BONUS_SCALE": 1.96,
-    "A_REGULARIZATION": 1e-4,
+    "A_REGULARIZATION_PER_STEP": 1e-4,
+    "A_REGULARIZATION": 1e-1,
     "GRAM_REG": 1e-3,
     "SEED": 42,
     "WARMUP": 200, # warmup steps for running mean/std
@@ -58,8 +59,11 @@ def make_train(config):
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
     
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
-    GET_ALPHA_FN_b = lambda t: jnp.maximum(1/5, 1/t)
+    # GET_ALPHA_FN = lambda t: jnp.maximum(1/(2*t), 1/10)
+    GET_ALPHA_FN = lambda t: 1/10
+    # GET_ALPHA_FN_b = lambda t: jnp.maximum(1/5, 1/t)
+    # GET_ALPHA_FN_b = lambda t: jnp.maximum(1/(2*t), 1/10)
+    GET_ALPHA_FN_b = lambda t: 1/10
     GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
 
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
@@ -88,7 +92,7 @@ def make_train(config):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
         bonus_sq /= jnp.maximum(1.0, N)
-        rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+        rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
         return rho
     
     def lstd_batch_update( 
@@ -113,14 +117,20 @@ def make_train(config):
         A_update = batch_lstd(traces, features, next_features, transitions) # (L, B, k, k)
         A_b = A_update.mean(axis=batch_axes)
         # EMA
-        A = (1-α) * A + α * A_b
-        A_view = A + config['A_REGULARIZATION'] * jnp.eye((A.shape[0]))
+        β = (1-α)
+        bc = 1-β**t
+        A = β * A + α * A_b
+        A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye((A.shape[0]))
+        # A_view /=  (1-β**t)
         rho = transitions.intrinsic_reward
         # solve LSTD for intrinsic system A^{-1} x = b
         b_int_sample = traces * rho[..., None] # Expand rho for broadcast
         b_b = b_int_sample.mean(axis=batch_axes)
         b = (1-α_b) * lstd_state['b_int'] + α_b * b_b
-        w_int = jnp.linalg.solve(A_view, b)
+        βb = (1-α_b)
+        # b_view = b / (1-βb**t)
+        b_view = b
+        w_int = jnp.linalg.solve(A_view, b_view)
         return {'A': A, 'b_int': b, 'w_int': w_int, 'N': N, 't': t+1}
 
     def train(rng):
@@ -135,7 +145,8 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_lstd_state = {
-            'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
+            # 'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
+            'A': jnp.eye(k),  # Regularization for numerical stability
             'b_int': jnp.zeros(k), 
             'w_int': jnp.zeros(k),
             'N': 0, # number of samples
@@ -217,9 +228,8 @@ def make_train(config):
             (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
-            # -----------------------------------------------------------------
-            # --------- Compute intrinsic reward 
-            # -----------------------------------------------------------------
+            
+            # Intrinsic reward 
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
             sigma_state = sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
@@ -229,6 +239,19 @@ def make_train(config):
             # rho = get_int_rew(lstd_state['S'], next_phi, N_eff) * (1-traj_batch.done)
             rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
+
+            # Solve for the Intrinsic Critic:
+            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
+            lstd_state = lstd_batch_update(
+                lstd_state,
+                traj_batch,
+                phi,
+                next_phi,
+                traces,
+                α=GET_ALPHA_FN(lstd_state['t']),
+                α_b=GET_ALPHA_FN_b(lstd_state['t']),
+            )
+
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val = lstd_i_val(get_features_fn, last_obs, lstd_state)
@@ -264,17 +287,6 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, _, rng = update_state
-            # Solve for the Intrinsic Critic:
-            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
-            lstd_state = lstd_batch_update(
-                lstd_state,
-                traj_batch,
-                phi,
-                next_phi,
-                traces,
-                α=GET_ALPHA_FN(lstd_state['t']),
-                α_b=GET_ALPHA_FN_b(lstd_state['t']),
-            )
             # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
@@ -375,12 +387,14 @@ def main():
             mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        bonus_std = metrics['bonus_std'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_std']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
         i_value_error = metrics['i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_value_error']
         e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage_mean')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_std[1:], 'i_advantage_std')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
