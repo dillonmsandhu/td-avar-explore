@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,
     "BONUS_SCALE": 1.96,
-    "A_REGULARIZATION": 1e-5,
+    "A_REGULARIZATION": 1e-4,
     "GRAM_REG": 1e-3,
     "SEED": 42,
     "WARMUP": 200, # warmup steps for running mean/std
@@ -64,6 +64,26 @@ def make_train(config):
 
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
 
+    def sigma_update(   sigma_state: Dict,
+                        transitions, # Explore_Transition
+                        features: jnp.ndarray,
+                        α: float
+        ):
+        
+        # Unpack state (Assuming these are RAW uncorrected EMAs)
+        S, t = sigma_state['S'], sigma_state['t']
+        batch_axes = tuple(range(transitions.done.ndim))
+        N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
+        # S_update (L, B, k, k)
+        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
+        # Batch average
+        S_b = S_update.mean(axis=batch_axes)
+        # symmetrize
+        S_b = 0.5 * (S_b + S_b.T)
+        # EMA
+        S = (1-α) * S + α * S_b
+        return {'S': S, 'N': N, 't': t+1} # new sigma_state
+    
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
@@ -79,7 +99,6 @@ def make_train(config):
                         traces: jnp.ndarray,
                         α: float,
                         α_b: float,
-                        α_cov: float,
         ):
         def lstd(traces, current_features, next_features, transition):
             td_features = current_features - config['GAMMA'] * next_features
@@ -87,31 +106,22 @@ def make_train(config):
             return A_sample
         
         # Unpack state (Assuming these are RAW uncorrected EMAs)
-        A, S, t = lstd_state['A'], lstd_state['S'], lstd_state['t']
+        A, t = lstd_state['A'], lstd_state['t']
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
         batch_lstd = jax.vmap(jax.vmap(lstd))
-        
         A_update = batch_lstd(traces, features, next_features, transitions) # (L, B, k, k)
-        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)   # (L, B, k, k)
-
-        # Batch average
-        A_b, S_b = jax.tree.map(lambda x: x.mean(axis=batch_axes), (A_update, S_update))
-        S_b = 0.5 * (S_b + S_b.T)  # symmetrize
-        
+        A_b = A_update.mean(axis=batch_axes)
         # EMA
         A = (1-α) * A + α * A_b
-        S = (1-α_cov) * S + α_cov * S_b
-
         A_view = A + config['A_REGULARIZATION'] * jnp.eye((A.shape[0]))
-        rho = get_int_rew(S, next_features, N)# Continuing *(1-transitions.done)
-        
+        rho = transitions.intrinsic_reward
         # solve LSTD for intrinsic system A^{-1} x = b
         b_int_sample = traces * rho[..., None] # Expand rho for broadcast
         b_b = b_int_sample.mean(axis=batch_axes)
         b = (1-α_b) * lstd_state['b_int'] + α_b * b_b
         w_int = jnp.linalg.solve(A_view, b)
-        return {'A': A, 'S': S, 'b_int': b, 'w_int': w_int, 'N': N, 't': t+1, 'int_rew': rho}
+        return {'A': A, 'b_int': b, 'w_int': w_int, 'N': N, 't': t+1}
 
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -128,10 +138,13 @@ def make_train(config):
             'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
             'b_int': jnp.zeros(k), 
             'w_int': jnp.zeros(k),
+            'N': 0, # number of samples
+            't': 1, # number of updates
+        }
+        initial_sigma_state = {
             'S': jnp.eye(k),
             'N': 0, # number of samples
             't': 1, # number of updates
-            'int_rew': jnp.zeros((config['NUM_STEPS'], config['NUM_ENVS'], ))
         }
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
@@ -171,7 +184,7 @@ def make_train(config):
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             
-            train_state, lstd_state, rnd_state, env_state, last_obs, rng, idx = runner_state
+            train_state, lstd_state, sigma_state, rnd_state, env_state, last_obs, rng, idx = runner_state
             
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
@@ -205,22 +218,12 @@ def make_train(config):
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
             # -----------------------------------------------------------------
-            # --------- Solve LSTD, and compute intrinsic reward 
+            # --------- Compute intrinsic reward 
             # -----------------------------------------------------------------
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
-            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
-            lstd_state = lstd_batch_update(
-                lstd_state,
-                traj_batch,
-                phi,
-                next_phi,
-                traces,
-                α=GET_ALPHA_FN(lstd_state['t']),
-                α_b=GET_ALPHA_FN_b(lstd_state['t']),
-                α_cov=GET_ALPHA_FN_cov(lstd_state['t']),
-            )
-            int_rew_from_features = lambda features: get_int_rew(lstd_state['S'], features, lstd_state['N'])
+            sigma_state = sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
+            int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             # alpha = GET_ALPHA_FN_cov(lstd_state['t'])
             # N_eff = (batch_size / alpha )
             # rho = get_int_rew(lstd_state['S'], next_phi, N_eff) * (1-traj_batch.done)
@@ -261,7 +264,17 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, _, rng = update_state
-
+            # Solve for the Intrinsic Critic:
+            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
+            lstd_state = lstd_batch_update(
+                lstd_state,
+                traj_batch,
+                phi,
+                next_phi,
+                traces,
+                α=GET_ALPHA_FN(lstd_state['t']),
+                α_b=GET_ALPHA_FN_b(lstd_state['t']),
+            )
             # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
@@ -294,12 +307,12 @@ def make_train(config):
                 "e_value_error": e_value_error,
                 "i_value_error": i_value_error
             })
-            runner_state = (train_state, lstd_state, rnd_state, env_state, last_obs, rng, idx+1)
+            runner_state = (train_state, lstd_state, rnd_state, sigma_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
             # end update_step
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, initial_lstd_state, rnd_state, env_state, obsv, _rng, 0)
+        runner_state = (train_state, initial_lstd_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 0)
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
