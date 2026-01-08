@@ -10,22 +10,21 @@ DEFAULT_CONFIG = {
     "LR_END": 5e-4,
     "NUM_ENVS": 32,
     "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250_000,
+    "TOTAL_TIMESTEPS": 20 * 50_000,
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99,
     "GAE_LAMBDA": 0.6,
     "CLIP_EPS": 0.2,
     "VF_CLIP": 0.5,
-    "ENT_COEF": 0.003,
+    "ENT_COEF": 0.001,
     "VF_COEF": 0.5,
     "MAX_GRAD_NORM": 0.5,
     "NORMALIZE_REWARDS": False,
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,
     "BONUS_SCALE": 1.96,
-    "REGULARIZATION": 1e-4,
-    "PER_UPDATE_REGULARIZATION": 1e-4,
+    "GRAM_REG": 1e-3,
     "SEED": 42,
     "WARMUP": 200, # warmup steps for running mean/std
     "N_SEEDS": 4,
@@ -43,16 +42,9 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-def get_int_rew(S, features, N):
-    Sigma_inv = jnp.linalg.solve(S, jnp.eye(features.shape[-1]))
-    bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
-    rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
-    return rho
-
 def sigma_update(   sigma_state: Dict,
                     transitions, # Explore_Transition
                     features: jnp.ndarray,
-                    eps: float,
                     α: float
     ):
     
@@ -65,7 +57,7 @@ def sigma_update(   sigma_state: Dict,
     # Batch average
     S_b = S_update.mean(axis=batch_axes)
     # regularize
-    S_b += eps * jnp.eye(S.shape[0])
+    # S_b += eps * jnp.eye(S.shape[0])
     # symmetrize
     S_b = 0.5 * (S_b + S_b.T)
     # EMA
@@ -82,6 +74,12 @@ def make_train(config):
     
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
+
+    def get_int_rew(S, features, N):
+        Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
+        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
+        rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+        return rho
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -95,7 +93,8 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_sigma_state = {
-            'S': jnp.eye(k) * config['REGULARIZATION'],
+            # 'S': jnp.eye(k) * config['GRAM_REG'],
+            'S': jnp.eye(k),
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -168,9 +167,21 @@ def make_train(config):
             (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
+
+            # -------------------------------------------------------------
+            # --------- Update Sigma and compute intrinsic reward ---------
+            phis = batch_get_features(traj_batch.obs)
+            sigma_state = sigma_update(
+                sigma_state,
+                traj_batch,
+                phis,
+                α=GET_ALPHA_FN(sigma_state['t']),
+            )
             # COMPUTE intrinsic reward:            
+            int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             next_phi = batch_get_features(traj_batch.next_obs)
-            rho = get_int_rew(sigma_state['S'], next_phi, sigma_state['N'])
+            
+            rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Advantage
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
@@ -255,21 +266,11 @@ def make_train(config):
             )
             train_state, _, _, _, rng = update_state
             # -------------------------------
-            # --------- Update LSTD ---------
-            new_phi = batch_get_features(traj_batch.obs)
-            sigma_state = sigma_update(
-                sigma_state,
-                traj_batch,
-                new_phi,
-                config['PER_UPDATE_REGULARIZATION'],
-                α=GET_ALPHA_FN(sigma_state['t']),
-            )
-            # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
             
             # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
-            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, sigma_state, batch_get_features, get_int_rew)
+            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
             v_pred, v_i_pred = v_pred
 
             e_value_error = jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2)
@@ -375,7 +376,6 @@ def main():
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
