@@ -307,7 +307,7 @@ def make_train(config):
                 "e_value_error": e_value_error,
                 "i_value_error": i_value_error
             })
-            runner_state = (train_state, lstd_state, rnd_state, sigma_state, env_state, last_obs, rng, idx+1)
+            runner_state = (train_state, lstd_state,sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
             # end update_step
 
