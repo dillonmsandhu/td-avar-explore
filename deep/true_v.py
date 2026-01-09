@@ -1,11 +1,10 @@
 # uses the CURRENT true intrinsic value function for exploration.)
-# uses the true intrinsic value function for exploration.
-# BUT from the LAST round (associated with higher rewards)
-
 from utils import *
 import helpers
 import networks
 from deepsea_v import DeepSeaExactValue
+
+SAVE_DIR = 'true_v'
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
     "ENV_NAME": "DeepSea-bsuite",
@@ -196,7 +195,10 @@ def make_train(config):
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
-
+            # Compute Intrinsic Value 
+            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
+            i_val = value_lookup(traj_batch.obs, v_i)
+            traj_batch = traj_batch._replace(i_value=i_val)
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val =  value_lookup(last_obs, v_i)
@@ -235,8 +237,6 @@ def make_train(config):
             
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-
-            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
 
             e_value_error = jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2)
 
@@ -284,7 +284,7 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to true_v_lag/{args.run_suffix}' )
+                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
     
@@ -310,7 +310,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"true_v_lag/{args.run_suffix}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)

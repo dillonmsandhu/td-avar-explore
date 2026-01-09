@@ -5,6 +5,7 @@ from utils import *
 import helpers
 import networks
 from deepsea_v import DeepSeaExactValue
+SAVE_DIR = 'true_v_lag'
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
     "ENV_NAME": "DeepSea-bsuite",
@@ -283,7 +284,7 @@ def main():
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to true_v_lag/{args.run_suffix}' )
+                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
     
@@ -309,7 +310,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"true_v_lag/{args.run_suffix}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)
