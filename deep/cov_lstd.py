@@ -114,8 +114,7 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_lstd_state = {
-            # 'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
-            'A': jnp.eye(k),  # Regularization for numerical stability
+            'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
             'b_int': jnp.zeros(k), 
             'w_int': jnp.zeros(k),
             'N': 0, # number of samples
@@ -300,6 +299,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
+    parser.add_argument('--save-checkpoint', action='store_true')
     parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     

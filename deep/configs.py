@@ -41,5 +41,5 @@ shared = {
     "N_SEEDS": 4,
 }
 
-mc_config = shared | mc_specific # union
+mc_config = shared | mc_specific # | is the union op.
 ds_config = shared | ds_specific
