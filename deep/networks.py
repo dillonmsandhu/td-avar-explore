@@ -149,13 +149,18 @@ class RNDNet(nn.Module):
     k: int = 128
 
     def setup(self):
-        self.torso = make_torso(self.network_type, out_dim=self.k)
-        self.bias = jnp.ones_like(1.0) * (1/self.k) 
+        self.torso = make_torso(self.network_type, out_dim=self.k - 1)
 
     def __call__(self, x):
         z = self.torso(x)
-        z = jnp.concatenate([z, self.bias * jnp.ones(z.shape)], axis=-1)
-        return self.torso(x)
+        # normalize
+        z = z / jnp.linalg.norm(z, axis=-1, keepdims=True)
+        # add bias
+        batch_size = z.shape[:-1]
+        bias_val = 1.0 / jnp.sqrt(self.k)
+        bias = jnp.ones((*batch_size, 1)) * bias_val
+        z = jnp.concatenate([z, bias], axis=-1)
+        return z
 
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------
