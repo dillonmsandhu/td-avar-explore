@@ -169,6 +169,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     return total_loss, (value_loss, loss_actor, entropy)
 
 def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ):
+    """Continuing Intrinsic TD Target"""
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value = (
