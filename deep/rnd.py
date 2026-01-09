@@ -1,15 +1,16 @@
+# RND: RND intrinsic reward propagated by a value net.
 from utils import * 
 import helpers
 import networks
 import flax
 DEFAULT_CONFIG = {
-    # "ENV_NAME": "SparseMountainCar-v0",
-    "ENV_NAME": "DeepSea-bsuite",
+    "ENV_NAME": "SparseMountainCar-v0",
+    # "ENV_NAME": "DeepSea-bsuite",
     "LR": 5e-4,
     "LR_END": 5e-4,
     "NUM_ENVS": 32,
     "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250_000,
+    "TOTAL_TIMESTEPS": 120_000,
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99,
@@ -300,7 +301,8 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    
+    from configs import mc_config, ds_config
+
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
@@ -308,11 +310,14 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to rnd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     
-    # Start with default config
-    config = DEFAULT_CONFIG.copy()
+    if args.base_config == 'mc':
+        config = mc_config.copy()
+    elif args.base_config == 'ds':
+        config = ds_config.copy()
+
 
     # Override with command line config
     config_override = parse_config_override(args.config)

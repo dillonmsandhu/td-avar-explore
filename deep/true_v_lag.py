@@ -4,7 +4,7 @@
 from utils import *
 import helpers
 import networks
-from deepsea_v import DeepSeaExactValue
+from envs.deepsea_v import DeepSeaExactValue
 SAVE_DIR = 'true_v_lag'
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -278,7 +278,8 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    
+    from configs import mc_config, ds_config
+
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
@@ -287,7 +288,15 @@ def main():
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    args = parser.parse_args()
     
+    if args.base_config == 'mc':
+        config = mc_config.copy()
+        raise AssertionError('Only Deep Sea has explicit value calculation implemented')
+    elif args.base_config == 'ds':
+        config = ds_config.copy()
+
     args = parser.parse_args()
     
     # Start with default config

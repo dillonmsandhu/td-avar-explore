@@ -2,37 +2,7 @@ from utils import *
 from helpers import _calculate_gae, _get_all_traces, Explore_Transition, _loss_fn
 import helpers
 import networks
-
-DEFAULT_CONFIG = {
-    # "ENV_NAME": "SparseMountainCar-v0",
-    "ENV_NAME": "DeepSea-bsuite",
-    "LR": 5e-4,
-    "LR_END": 5e-4,
-    "NUM_ENVS": 32,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250_000,
-    "NUM_EPOCHS": 4,
-    "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.6,
-    "CLIP_EPS": 0.2,
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.003,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "ACTIVATION": "relu",
-    "NORMALIZE_REWARDS": False,
-    "NORMALIZE_OBS": False,
-    "NORMALIZE_FEATURES": False,
-    "BONUS_SCALE": 1.0,
-    "REGULARIZATION": 1e-4,
-    "PER_UPDATE_REGULARIZATION": 1e-4,
-    "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
-    "N_SEEDS": 4,
-    "PRIOR_N": 1_000, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
-    "DEEPSEA_SIZE":15,
-}
+SAVE_DIR = 'lstd_lambda_avar'
 
 def compute_bonus(features, lstd_state, config=None):
     """Computes the state bonus using the sandwich covariance"""
@@ -79,20 +49,14 @@ def lstd_batch_update(
     # batch averages
     A_b, S_b = jax.tree.map(lambda x: x.mean(axis=batch_axes), (A_update, S_update))
     S_b = 0.5 * (S_b + S_b.T)  # immediately symmetrize for numerical stability
-    # Add regularization
-    A_b = A_b + config['PER_UPDATE_REGULARIZATION'] * jnp.eye(A.shape[0])  # Regularization for numerical stability
 
     # EMA
     A = (1-α_A) * A + α_A * A_b
     S = (1-α_S) * S + α_S * S_b
     
-    # bias correction
-    # bc = 1.0 - (1.0 - α_A)**t
-    # bc = jnp.maximum(bc, 1e-6)
-    bc = 1.0
-    A_view = A / bc
+    A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
 
-    # effective sample size of EMA is 1/alpha
+    # effective sample size of EMA is 2/alpha
     A_inv = jnp.linalg.solve(A_view, jnp.eye(A.shape[0]))
     N_eff = 2.0 / α_A
     cov_w = (1 / N_eff) * (A_inv @ S @ A_inv.T)
@@ -103,7 +67,8 @@ def lstd_batch_update(
 def compute_sandwich(lstd_state: Dict, α = 1):
     "Computes the sandwich covariance from LSTD state"
     A, S = lstd_state['A'], lstd_state['S']
-    A_inv = jnp.linalg.pinv(A)
+    A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
+    A_inv = jnp.linalg.pinv(A_view)
     cov_w = (α/2) * (A_inv @ S @ A_inv.T)
     return cov_w
 
@@ -134,7 +99,7 @@ def make_train(config):
         max_r = 1.0
         
         initial_lstd_state = {
-            'A': jnp.eye(k) * config['REGULARIZATION'],  # Regularization for numerical stability
+            'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
             'S': jnp.eye(k) * max_r**2,
             'N': 0, # number of samples
             't': 1, # number of updates
@@ -322,17 +287,23 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
+    from configs import ds_config, mc_config
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to lstd_lambda_avar/{args.run_suffix}' )
+                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
-    config = DEFAULT_CONFIG.copy()
+    
+    if args.base_config == 'mc':
+        config = mc_config.copy()
+    elif args.base_config == 'ds':
+        config = ds_config.copy()
 
     # Override with command line config
     config_override = parse_config_override(args.config)
@@ -350,7 +321,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"lstd_lambda_avar/{args.run_suffix}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)

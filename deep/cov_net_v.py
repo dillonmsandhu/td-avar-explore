@@ -1,35 +1,11 @@
+# Covariance-Based Intrinsic Reward, propegated by an intrinsic value net.
+# For deepsea only, solves for the value function for debugging.
 from utils import *
 import helpers
 import networks
-from deepsea_v import DeepSeaExactValue
+from envs.deepsea_v import DeepSeaExactValue
+SAVE_DIR = 'cov_net_v'
 
-DEFAULT_CONFIG = {
-    # "ENV_NAME": "SparseMountainCar-v0",
-    "ENV_NAME": "DeepSea-bsuite",
-    "LR": 5e-4,
-    "LR_END": 5e-4,
-    "NUM_ENVS": 32,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 20 * 50_000,
-    "NUM_EPOCHS": 4,
-    "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.6,
-    "CLIP_EPS": 0.2,
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.001,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "NORMALIZE_REWARDS": False,
-    "NORMALIZE_OBS": False,
-    "NORMALIZE_FEATURES": False,
-    "BONUS_SCALE": 1.96,
-    "GRAM_REG": 1e-3,
-    "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
-    "N_SEEDS": 4,
-    "DEEPSEA_SIZE": 20,
-}
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -292,7 +268,6 @@ def make_train(config):
                 "intrinsic_v_mean": traj_batch.i_value.mean(),
                 "intrinsic_v_std": traj_batch.i_value.std(),
                 "mean_rew": traj_batch.reward.mean(),
-                "mean_rew": traj_batch.reward.mean(),
                 "v_i": v_i,
                 "v_e": v_e,
                 "v_e_pred": v_pred,
@@ -319,20 +294,24 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    
+    import configs    
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to count_rew_net/{args.run_suffix}' )
+                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     
-    # Start with default config
-    config = DEFAULT_CONFIG.copy()
+    if args.base_config == 'mc':
+        config = configs.mc_config.copy()
+        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
+    
+    elif args.base_config == 'ds':
+        config = configs.ds_config.copy()
 
     # Override with command line config
     config_override = parse_config_override(args.config)
@@ -351,7 +330,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"count_rew_net_v/{args.run_suffix}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)

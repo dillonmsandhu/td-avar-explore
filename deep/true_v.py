@@ -2,38 +2,10 @@
 from utils import *
 import helpers
 import networks
-from deepsea_v import DeepSeaExactValue
+from envs.deepsea_v import DeepSeaExactValue
 
 SAVE_DIR = 'true_v'
-DEFAULT_CONFIG = {
-    # "ENV_NAME": "SparseMountainCar-v0",
-    "ENV_NAME": "DeepSea-bsuite",
-    "LR": 5e-4,
-    "LR_END": 5e-4,
-    "NUM_ENVS": 32,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 5 * 50_000,
-    "NUM_EPOCHS": 4,
-    "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.6,
-    "CLIP_EPS": 0.2, # consider increasing
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.001,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5, # consider increasing
-    "NORMALIZE_REWARDS": False,
-    "NORMALIZE_OBS": False,
-    "NORMALIZE_FEATURES": False,
-    "BONUS_SCALE": 1.96,
-    "A_REGULARIZATION_PER_STEP": 1e-4,
-    "A_REGULARIZATION": 1e-1,
-    "GRAM_REG": 1e-3,
-    "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
-    "N_SEEDS": 4,
-    "DEEPSEA_SIZE": 5,
-}
+
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -278,6 +250,7 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
+    from configs import mc_config, ds_config
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
@@ -286,12 +259,14 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--save-checkpoint', action='store_true')
-    
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     
-    # Start with default config
-    config = DEFAULT_CONFIG.copy()
+    if args.base_config == 'mc':
+        config = mc_config.copy()
+    elif args.base_config == 'ds':
+        config = ds_config.copy()
+
 
     # Override with command line config
     config_override = parse_config_override(args.config)
