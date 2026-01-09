@@ -32,7 +32,7 @@ def resolve_env_config(config):
 # =====================================================
 
 def initialize_rnd_network(rng, obs_shape, config):
-    model = RNDNet(network_type=config["NETWORK_TYPE"])
+    model = RND_Net(network_type=config["NETWORK_TYPE"], k=128, normalize = config['NORMALIZE_FEATURES'])
     rng, init_rng = jax.random.split(rng)
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
@@ -40,9 +40,9 @@ def initialize_rnd_network(rng, obs_shape, config):
 def initialize_actor_critic(rng, obs_shape, action_dim, config, n_heads: int):
 
     if n_heads == 2:
-        model = ActorCritic2Head(action_dim=action_dim,network_type=config["NETWORK_TYPE"])
+        model = ActorCritic2Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"])
     elif n_heads == 3:
-        model = ActorCritic3Head(action_dim=action_dim,network_type=config["NETWORK_TYPE"])
+        model = ActorCritic3Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"])
     else:
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
@@ -80,9 +80,11 @@ def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, t
 
 class MLPTorso(nn.Module):
     hidden_dim: int = 64
+    out_dim: int = 128
 
     @nn.compact
     def __call__(self, x):
+        
         x = nn.Dense(
             self.hidden_dim,
             kernel_init=orthogonal(jnp.sqrt(2)),
@@ -90,10 +92,9 @@ class MLPTorso(nn.Module):
         x = nn.relu(x)
 
         x = nn.Dense(
-            self.hidden_dim,
+            self.out_dim,
             kernel_init=orthogonal(jnp.sqrt(2)),
         )(x)
-        x = nn.relu(x)
         return x
 
 class CNNTorso(nn.Module):
@@ -124,8 +125,7 @@ class CNNTorso(nn.Module):
             channels = min(channels * 2, self.max_channels)
 
         x = x.reshape(*x.shape[:-3], -1)
-        x = nn.Dense(self.out_dim, name="proj")(x)
-        x = nn.relu(x)
+        x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         return x
 
 def make_torso(network_type: str, **kwargs):
@@ -144,23 +144,49 @@ def make_torso(network_type: str, **kwargs):
 class RNDTrainState(TrainState):
     target_params: Any
 
-class RNDNet(nn.Module):
+# class RND_Net(nn.Module):
+#     activation: str = "tanh"
+
+#     @nn.compact
+#     def __call__(self, x):
+#         if self.activation == "relu":
+#             activation = nn.relu
+#         else:
+#             activation = nn.tanh
+#         embedding = nn.Dense(
+#             64, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
+#         )(x)
+#         embedding = activation(embedding)
+#         embedding = nn.Dense(
+#             128, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
+#         )(embedding)
+#         embedding = activation(embedding)
+
+#         return embedding
+
+class RND_Net(nn.Module):
     network_type: str
     k: int = 128
-
+    normalize: bool = False
+    
     def setup(self):
+        # We output k-1 features so that after adding the bias term we have exactly k
         self.torso = make_torso(self.network_type, out_dim=self.k - 1)
 
     def __call__(self, x):
-        z = self.torso(x)
-        # normalize
-        z = z / jnp.linalg.norm(z, axis=-1, keepdims=True)
-        # add bias
-        batch_size = z.shape[:-1]
+        phi = self.torso(x)  
+
+        if self.normalize:
+            norm = jnp.linalg.norm(phi, axis=-1)  # normalize
+            phi = phi / jnp.maximum(norm[..., None], 1e-8)
+        
+        batch_size = phi.shape[:-1]
         bias_val = 1.0 / jnp.sqrt(self.k)
         bias = jnp.ones((*batch_size, 1)) * bias_val
-        z = jnp.concatenate([z, bias], axis=-1)
-        return z
+        
+        phi = jnp.concatenate([phi, bias], axis=-1)
+        
+        return phi
 
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------
@@ -177,9 +203,9 @@ class ActorCritic2Head(nn.Module):
     def setup(self):
         self.actor_torso = make_torso(self.network_type, out_dim=64)
         self.critic_torso = make_torso(self.network_type, out_dim=64)
-
-        self.pi_head = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))
-        self.v_head = nn.Dense(1, kernel_init=orthogonal(1.0))
+        
+        self.pi_head = nn.Sequential([nn.relu, nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))])
+        self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
 
     def policy(self, x):
         logits = self.pi_head(self.actor_torso(x))
@@ -216,11 +242,10 @@ class ActorCritic3Head(nn.Module):
         self.actor_torso = make_torso(self.network_type, out_dim=64)
         self.critic_ext = make_torso(self.network_type, out_dim=64)
         self.critic_int = make_torso(self.network_type, out_dim=64)
-
-        self.pi_head = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))
-        self.v_ext_head = nn.Dense(1, kernel_init=orthogonal(1.0))
-        self.v_int_head = nn.Dense(1, kernel_init=orthogonal(1.0))
-
+        
+        self.pi_head = nn.Sequential([nn.relu, nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))])
+        self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
+        self.v_int_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
     # ---------------- Policy ----------------
 
     def policy(self, x):

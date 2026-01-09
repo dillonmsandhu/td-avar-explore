@@ -36,7 +36,7 @@ def _get_all_traces(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
     Returns: L x B x k
     """
-    def get_lambda_traces(phis_s, dones, γ, λ):
+    def get_lambda_traces(phis_s, dones, γ, λ,):
         # We need to manage the carry (prev trace) separate from current trace output
         def _step_trace(trace_prev, inputs):
             phi, done = inputs
@@ -50,6 +50,25 @@ def _get_all_traces(traj_batch, features, γ, λ):
     # Fix: Ensure dones are passed correctly to the inner function
     traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(
         features, traj_batch.done, γ, λ
+    )
+    return traces.transpose(1,0,2)
+
+def _get_all_traces_continuing(features, γ, λ):
+    """Get all traces for a batch of trajectories.
+    Returns: L x B x k
+    """
+    def get_lambda_traces(phis_s, γ, λ,):
+        # We need to manage the carry (prev trace) separate from current trace output
+        def _step_trace(trace_prev, phi):
+            trace = trace_prev * γ * λ + phi
+            return trace, trace
+        
+        init_traces = jnp.zeros_like(phis_s[0]) 
+        _, traces = jax.lax.scan(_step_trace, init_traces, phis_s)
+        return traces 
+    # Fix: Ensure dones are passed correctly to the inner function
+    traces = jax.vmap(get_lambda_traces, in_axes=(1, None, None))(
+        features, γ, λ
     )
     return traces.transpose(1,0,2)
 
@@ -150,6 +169,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     return total_loss, (value_loss, loss_actor, entropy)
 
 def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ):
+    """Continuing Intrinsic TD Target"""
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value = (
@@ -186,3 +206,31 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
         return x
     minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
+
+def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i_val, γ, λ):
+    def _get_advantages(gae_and_next_value, transition):
+        gae, i_gae, next_value, i_next_value = gae_and_next_value
+        done, value, reward, i, i_value = (
+            transition.done,
+            transition.value,
+            transition.reward,
+            transition.intrinsic_reward,
+            transition.i_value,
+        )
+        
+        delta = reward + γ * next_value * (1 - done) - value
+        gae = delta + (γ * λ * (1 - done) * gae)
+        
+        i_delta = i + γ * i_next_value * (1 - done) - i_value 
+        i_gae = i_delta + (γ * λ * i_gae)
+        
+        return (gae, i_gae, value, i_value), (gae, i_gae)
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages,
+        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
+        traj_batch,
+        reverse=True,
+        unroll=16,
+    )
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)

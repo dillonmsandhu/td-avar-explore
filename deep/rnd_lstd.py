@@ -2,36 +2,8 @@ from utils import *
 import helpers
 import flax
 import networks
-DEFAULT_CONFIG = {
-    # "ENV_NAME": "SparseMountainCar-v0",
-    "ENV_NAME": "DeepSea-bsuite",
-    "LR": 5e-4,
-    "LR_END": 5e-4,
-    "NUM_ENVS": 32,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250_000,
-    "NUM_EPOCHS": 4,
-    "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.6,
-    "CLIP_EPS": 0.2,
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.003,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "NORMALIZE_REWARDS": False,
-    "NORMALIZE_OBS": False,
-    "NORMALIZE_FEATURES": False,
-    "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
-    "N_SEEDS": 4,
-    # LSTD specific:
-    "REGULARIZATION": 1e-4,
-    "PER_UPDATE_REGULARIZATION": 1e-4,
-    "RND_TRAIN_FRAC": 0.5,
-    # deepsea
-    "DEEPSEA_SIZE": 20,
-}
+SAVE_DIR = 'rnd_lstd'
+
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -64,9 +36,8 @@ def lstd_batch_update(
                     α_b: float
     ):
     
-    def lstd(traces, features, next_features, done):
-        td_features = features - config['GAMMA'] * (1 - done) * next_features
-        # A += z * (φ - γφ')^T
+    def lstd(traces, features, next_features):
+        td_features = features - config['GAMMA'] * next_features
         A_sample = jnp.outer(traces, td_features)
         return A_sample
     
@@ -74,28 +45,23 @@ def lstd_batch_update(
     A, t = lstd_state['A'], lstd_state['t']
     batch_axes = tuple(range(transitions.done.ndim))
     N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
-    batch_lstd = jax.vmap(jax.vmap(lstd))
-    
-    # A_update will be (L, B, k, k)
-    A_update = batch_lstd(traces, features, next_features, transitions.done)
+    A_update = jax.vmap(jax.vmap(lstd))(traces, features, next_features) # (L, B, k, k)
 
     # Batch average
-    A_b = A_update.mean(axis=batch_axes) + config['PER_UPDATE_REGULARIZATION'] * jnp.eye(A.shape[0])
-    
+    A_b = A_update.mean(axis=batch_axes)
+
     # EMA
     A = (1-α) * A + α * A_b    
-    # bias correction
-    # bc = 1.0 - (1.0 - α)**t
-    # bc = jnp.maximum(bc, 1e-6)
-    bc = 1.0
-    A_view = A / bc
+    A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye((A.shape[0]))
 
-    # solve LSTD for intrinsic system A^{-1} x = b
+    # Get reward vector
     b_int_sample = traces * transitions.intrinsic_reward[..., None]
     b_b = b_int_sample.mean(axis=batch_axes)
     b_new = (1-α_b) * lstd_state['b_int'] + α_b * b_b
     bc = jnp.maximum(1.0 - (1.0 - α_b)**t, 1e-6)
     b_view = b_new / bc
+    
+    # solve LSTD w = A^{-1} b
     w_int = jnp.linalg.solve(A_view, b_view)
     
     return {'A': A, 'b_int': b_new, 'w_int': w_int, 'N': N, 't': t+1}
@@ -180,7 +146,7 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_lstd_state = {
-            'A': jnp.eye(k) * config['REGULARIZATION'],  # Regularization for numerical stability
+            'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
             'b_int': jnp.zeros(k), 
             'w_int': jnp.zeros(k),
             'N': 0, # number of samples
@@ -334,21 +300,24 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
+    from configs import ds_config, mc_config
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to rnd_lstd/{args.run_suffix}' )
+                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=1)
     parser.add_argument('--save-checkpoint', action='store_true')
-    
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     
-    # Start with default config
-    config = DEFAULT_CONFIG.copy()
-
+    if args.base_config == 'mc':
+        config = mc_config.copy()
+    elif args.base_config == 'ds':
+        config = ds_config.copy()
+    
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
@@ -366,7 +335,7 @@ def main():
         print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
         print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-        run_dir = os.path.join("results", f"rnd_lstd/{args.run_suffix}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
         env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
         os.makedirs(run_dir, exist_ok=True)
