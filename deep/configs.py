@@ -2,6 +2,8 @@ mc_specific = {
     "ENV_NAME": "SparseMountainCar-v0",
     "NORMALIZE_OBS": True,
     "NORMALIZE_FEATURES": False,
+    "WARMUP": 200, # warmup steps for running mean/std
+
 }
 
 ds_specific = {
@@ -9,6 +11,7 @@ ds_specific = {
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": True,
     "DEEPSEA_SIZE": 20,
+    "WARMUP": 0, # warmup steps for running mean/std
 }
 
 shared = {    
@@ -27,7 +30,6 @@ shared = {
     "VF_COEF": 0.5,
     "MAX_GRAD_NORM": 0.5,
     "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
     "NORMALIZE_REWARDS": False,
     # FOR RND
     "RND_TRAIN_FRAC": 0.5,

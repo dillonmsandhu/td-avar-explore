@@ -1,3 +1,4 @@
+# This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
 import jax.numpy as jnp
 import jax
 from typing import NamedTuple
@@ -197,6 +198,42 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
         unroll=16,
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, λ):
+    """
+    Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
+    A = Q_fast - V_slow
+    Value Target = Q_fast
+    """
+    def _get_advantages(gae_and_next_value, transition):
+        gae, i_gae, next_value, i_next_value = gae_and_next_value
+        done, value, reward, i, i_value_fast, i_value_slow = (
+            transition.done,
+            transition.value,
+            transition.reward,
+            transition.intrinsic_reward,
+            transition.i_value_fast,
+            transition.i_value_slow,
+        )
+        
+        delta = reward + γ * next_value * (1 - done) - value
+        gae = delta + (γ * λ * (1 - done) * gae)
+        
+        # Intrinsic is non-episodic (no done masking)
+        i_delta = i + γ * i_next_value - i_value_slow 
+        i_gae = i_delta + (γ * λ * i_gae)
+        
+        return (gae, i_gae, value, i_value_fast), (gae, i_gae)
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages,
+        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val_fast),
+        traj_batch,
+        reverse=True,
+        unroll=16,
+    )
+    
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value_slow)
 
 def shuffle_and_batch(rng, transitions, n_minibatches):
     def preprocess_transition(x, rng):

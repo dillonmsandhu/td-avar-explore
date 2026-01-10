@@ -1,3 +1,4 @@
+# This file contains helpers relating to logging, checkpointing, and loading the data.
 from typing import NamedTuple
 import jax.numpy as jnp
 import os
