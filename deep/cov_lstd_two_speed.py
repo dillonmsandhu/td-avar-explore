@@ -44,9 +44,10 @@ def make_train(config):
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
 
-    alpha_fast_fn = lambda t: jnp.maximum(1/10, 1/t)
+    # alpha_fast_fn = lambda t: jnp.maximum(1/10, 1/(2*t))
+    alpha_fast_fn = lambda t: 1/10
     alpha_slow_fn = lambda t: 1/20
-    GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/50, 1/t)
+    GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
 
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
 
@@ -54,20 +55,14 @@ def make_train(config):
                         transitions, # Explore_Transition
                         features: jnp.ndarray,
         ):
-        
-        # Unpack state (Assuming these are RAW uncorrected EMAs)
         S, t = sigma_state['S'], sigma_state['t']
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
         α = GET_ALPHA_FN_cov(sigma_state['t'])
-        # S_update (L, B, k, k)
-        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
-        # Batch average
-        S_b = S_update.mean(axis=batch_axes)
-        # symmetrize
-        S_b = 0.5 * (S_b + S_b.T)
-        # EMA
-        S = (1-α) * S + α * S_b
+        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
+        S_b = S_update.mean(axis=batch_axes) # Batch average
+        S_b = 0.5 * (S_b + S_b.T) # symmetrize
+        S = (1-α) * S + α * S_b # EMA
         return {'S': S, 'N': N, 't': t+1} # new sigma_state
     
     def get_int_rew(S, features, N):
@@ -83,8 +78,8 @@ def make_train(config):
                             next_features: jnp.ndarray,
                             traces: jnp.ndarray,
         ):
-        def cross_cov(traces, current_features, next_features):
-            td_features = current_features - config['GAMMA'] * next_features
+        def cross_cov(traces, current_features, next_features, done):
+            td_features = current_features - config['GAMMA']  * next_features * (1-done)
             A_sample = jnp.outer(traces, td_features)
             return A_sample
         
@@ -95,7 +90,7 @@ def make_train(config):
         rho = transitions.intrinsic_reward / reward_scale
         
         # A: Cross Correlation Matrix (Cov(Trace, Feature Diff))
-        A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features) # (L, B, k, k)
+        A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
         A_b = A_update.mean(axis=batch_axes)
         
         A_fast, A_slow = lstd_state['A_fast'], lstd_state['A_slow']
@@ -132,21 +127,7 @@ def make_train(config):
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
-        initial_lstd_state = {
-            'A_fast': jnp.eye(k) * config['A_REGULARIZATION'], 
-            'A_slow': jnp.eye(k) * config['A_REGULARIZATION'],
-            'b_fast': jnp.zeros(k), 
-            'b_slow': jnp.zeros(k), 
-            'w_fast': jnp.zeros(k),
-            'w_slow': jnp.zeros(k),
-            'N': 0, # number of samples
-            't': 1, # number of updates
-        }
-        initial_sigma_state = {
-            'S': jnp.eye(k),
-            'N': 0, # number of samples
-            't': 1, # number of updates
-        }
+
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
@@ -156,6 +137,29 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        initial_phi = get_features_fn(obsv)
+        initial_rho = get_int_rew(S = jnp.eye(k), features = initial_phi, N=config['NUM_ENVS'])
+        V_target = 1/(1-config['GAMMA'])
+        # V_target = 1
+        # bias only:
+        b = jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION'])
+
+        initial_lstd_state = {
+            'A_fast': jnp.eye(k) * config['A_REGULARIZATION'], 
+            'A_slow': jnp.eye(k) * config['A_REGULARIZATION'],
+            'b_fast': b, 
+            'b_slow': jnp.zeros(k), 
+            'w_fast': jnp.zeros(k),
+            'w_slow': jnp.zeros(k),
+            'N': 0, # number of samples
+            't': 1, # number of updates
+        }
+        # Initial intrinsic value will be  v_target / config['A_REGULARIZATION'] * scale.
+        initial_sigma_state = {
+            'S': jnp.eye(k),
+            'N': 0, # number of samples
+            't': 1, # number of updates
+        }
 
         # WARMUP:
         def _warmup_step(runner_state, unused):
@@ -282,7 +286,7 @@ def make_train(config):
             v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
             v_i_pred_fast = evaluator.get_value_grid(lstd_i_val_fast(get_features_fn, evaluator.obs_stack, lstd_state))
             v_i_pred_slow = evaluator.get_value_grid(lstd_i_val_slow(get_features_fn, evaluator.obs_stack, lstd_state))
-
+            ri_grid = evaluator.get_value_grid(int_rew_from_features(batch_get_features(evaluator.obs_stack)))
 
             metric.update({
                 "ppo_loss": loss_info[0], 
@@ -294,6 +298,8 @@ def make_train(config):
                 "lambda_ret_mean": targets[0].mean(),
                 "lambda_ret_std": targets[0].std(),
                 "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
+                "ri_grid": ri_grid,
+                "intrinsic_rew_terminal": traj_batch.intrinsic_reward.mean(),
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "mean_rew": traj_batch.reward.mean(),
                 "v_i": v_i,

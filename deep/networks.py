@@ -175,13 +175,15 @@ class RND_Net(nn.Module):
 
     def __call__(self, x):
         phi = self.torso(x)  
+        # phi = nn.relu(phi) # we want only 0> features
 
         if self.normalize:
             norm = jnp.linalg.norm(phi, axis=-1)  # normalize
             phi = phi / jnp.maximum(norm[..., None], 1e-8)
         
         batch_size = phi.shape[:-1]
-        bias_val = 1.0 / jnp.sqrt(self.k)
+        # bias_val = 1.0 / jnp.sqrt(self.k)
+        bias_val = 1.0
         bias = jnp.ones((*batch_size, 1)) * bias_val
         
         phi = jnp.concatenate([phi, bias], axis=-1)
