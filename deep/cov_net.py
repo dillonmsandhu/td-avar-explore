@@ -15,29 +15,7 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-
-def sigma_update(   sigma_state: Dict,
-                    transitions, # Explore_Transition
-                    features: jnp.ndarray,
-                    α: float
-    ):
     
-    # Unpack state (Assuming these are RAW uncorrected EMAs)
-    S, t = sigma_state['S'], sigma_state['t']
-    batch_axes = tuple(range(transitions.done.ndim))
-    N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
-    # S_update (L, B, k, k)
-    S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
-    # Batch average
-    S_b = S_update.mean(axis=batch_axes)
-    # regularize
-    # S_b += eps * jnp.eye(S.shape[0])
-    # symmetrize
-    S_b = 0.5 * (S_b + S_b.T)
-    # EMA
-    S = (1-α) * S + α * S_b
-    return {'S': S, 'N': N, 't': t+1} # new sigma_state
-
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
@@ -47,6 +25,11 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
     
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+
+    if config['EPISODIC']: 
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
+    else:
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
@@ -144,12 +127,7 @@ def make_train(config):
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
             phis = batch_get_features(traj_batch.obs)
-            sigma_state = sigma_update(
-                sigma_state,
-                traj_batch,
-                phis,
-                α=GET_ALPHA_FN(sigma_state['t']),
-            )
+            sigma_state = helpers.sigma_update( sigma_state, traj_batch, phis, α=GET_ALPHA_FN(sigma_state['t']),)
             # COMPUTE intrinsic reward:            
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             next_phi = batch_get_features(traj_batch.next_obs)
@@ -158,7 +136,7 @@ def make_train(config):
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Advantage
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
-            gaes, targets = helpers.calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
 
             # UPDATE NETWORK

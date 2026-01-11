@@ -5,15 +5,17 @@ from typing import Any, Dict, Callable, Tuple, Optional
 PyTree = Any
 
 class DeepSeaExactValue:
-    def __init__(self, size: int, unscaled_move_cost: float = 0.01, gamma: float = 0.99):
+    def __init__(self, size: int, unscaled_move_cost: float = 0.01, gamma: float = 0.99, episodic: bool = False):
         self.N = size
         self.cost = unscaled_move_cost
         self.gamma = gamma
+        self.episodic = episodic  # <--- New Flag
         self.num_grid_states = size * size
         self.num_total_states = self.num_grid_states + 1  # +1 for Absorbing Terminal
         self.terminal_idx = self.num_grid_states
         self.reachable_mask = jnp.tril(jnp.ones((size,size)))
         self.num_actions = 2
+        
         # 1. Pre-compute Observations Stack (N^2 x N x N)
         self.obs_stack = self._create_obs_stack()
         
@@ -75,7 +77,7 @@ class DeepSeaExactValue:
 
     def _build_env_dynamics_continuing(self):
         """
-        Constructs P and R for the CONTINUING setting.
+        Constructs P for the CONTINUING setting.
         Transitions that would hit 'Terminal' instead loop back to 'Start' (State 0).
         """
         num_states = self.num_total_states
@@ -104,9 +106,6 @@ class DeepSeaExactValue:
 
                 P[curr_idx, 1, next_idx_right] = 1.0
         
-        # Continuing Goal Reward: On the edge transitioning Bottom-Right -> Start
-        bottom_right_idx = (self.N - 1) * self.N + (self.N - 1)
-
         # Dummy Terminal Loop (for shape consistency)
         P[self.terminal_idx, :, self.terminal_idx] = 1.0
         
@@ -137,18 +136,22 @@ class DeepSeaExactValue:
     def compute_true_values(self, network: Any, params: PyTree, get_features: Callable, get_int_rew: Callable
         ) -> Tuple[jax.Array, jax.Array, Any]:
             """
-            Computes V_e (Episodic) and V_i (Continuing).
+            Computes V_e (Episodic) and V_i (Episodic OR Continuing based on flag).
             """
-            # 1. Get Network Output
+            # 1. Get Network Output (Handle 2-tuple vs 3-tuple and shapes)
             out = network.apply(params, self.obs_stack)
+            
+            def safe_squeeze(v):
+                return v[..., 0] if v.ndim > 1 else v
+
             if len(out) == 2:
                 pi_probs, v_net = out
-                v_net_grid = self.get_value_grid(v_net[..., 0] if v_net.ndim > 1 else v_net)
+                v_net_grid = self.get_value_grid(safe_squeeze(v_net))
             elif len(out) == 3:
                 pi_probs, v_net_ext, v_net_int = out
                 v_net_grid = (
-                    self.get_value_grid(v_net_ext), 
-                    self.get_value_grid(v_net_int)
+                    self.get_value_grid(safe_squeeze(v_net_ext)), 
+                    self.get_value_grid(safe_squeeze(v_net_int))
                 )
             
             # Construct full policy matrix (N^2 + 1, 2)
@@ -157,22 +160,25 @@ class DeepSeaExactValue:
             pi_full = jnp.vstack([pi_probs.probs, terminal_policy])
 
             # 2. Compute Intrinsic Reward Vector (State-Based)
-            # Note: We use the Sum-based get_int_rew (no 'N' argument needed)
             feats = get_features(self.obs_stack)
             r_next_grid = get_int_rew(feats) # shape (N^2,)
             
             # Append 0.0 for terminal state
             r_next_all = jnp.concatenate([r_next_grid, jnp.array([0.0])])
 
-            # 3. Project Intrinsic Reward to (s,a) using CONTINUING Dynamics
-            # We use P_cont to ensure that actions leading to "Start" get the reward of "Start".
-            R_int_sa = jnp.einsum('sam, m -> sa', self.P_cont, r_next_all)
+            # 3. Project Intrinsic Reward to (s,a)
+            if self.episodic:
+                # Use EPISODIC P: Transitions to terminal state get 0 reward
+                R_int_sa = jnp.einsum('sam, m -> sa', self.P, r_next_all)
+            else:
+                # Use CONTINUING P: Transitions to Start get reward of Start
+                R_int_sa = jnp.einsum('sam, m -> sa', self.P_cont, r_next_all)
 
-            # 4. Solve Extrinsic Value (Uses Episodic P)
+            # 4. Solve Extrinsic Value (Always Uses Episodic P)
             v_e_true = self.solve_linear_system(pi_full, self.P, self.R_extrinsic)
 
-            # 5. Solve Intrinsic Value (Uses Continuing P)
-            v_i_true = self.solve_linear_system(pi_full, self.P_cont, R_int_sa)
+            # 5. Solve Intrinsic Value (Uses Episodic OR Continuing P based on flag)
+            target_P = self.P if self.episodic else self.P_cont
+            v_i_true = self.solve_linear_system(pi_full, target_P, R_int_sa)
 
             return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid
-        

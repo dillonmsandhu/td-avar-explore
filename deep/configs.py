@@ -41,6 +41,7 @@ shared = {
     # For LSTD Avar
     "PRIOR_N": 1_000, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
     "N_SEEDS": 4,
+    "EPISODIC": True
 }
 
 mc_config = shared | mc_specific # | is the union op.

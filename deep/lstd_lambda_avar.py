@@ -45,7 +45,6 @@ def lstd_batch_update(
     A_update = batch_lstd(traces, features, next_features, transitions)
     S_update = jax.vmap(jax.vmap(per_sample_OPG))(traces, transitions.td_error)
 
-    # Batch averages
     # batch averages
     A_b, S_b = jax.tree.map(lambda x: x.mean(axis=batch_axes), (A_update, S_update))
     S_b = 0.5 * (S_b + S_b.T)  # immediately symmetrize for numerical stability
@@ -64,13 +63,6 @@ def lstd_batch_update(
     # return {'A': A_view, 'S': S, 'N': N, 't': t+1, 'Sandwich': cov_w, 'A_update': A_b, 'S_update': S_b}
     return {'A': A, 'S': S, 'N': N + lstd_state['N'], 't': t+1, 'Sandwich': cov_w, 'A_update': A_b, 'S_update': S_b}
 
-def compute_sandwich(lstd_state: Dict, α = 1):
-    "Computes the sandwich covariance from LSTD state"
-    A, S = lstd_state['A'], lstd_state['S']
-    A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
-    A_inv = jnp.linalg.pinv(A_view)
-    cov_w = (α/2) * (A_inv @ S @ A_inv.T)
-    return cov_w
 
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -83,6 +75,14 @@ def make_train(config):
     # EMA set up:
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
     prior_t = config["PRIOR_N"] // batch_size
+
+    def compute_sandwich(lstd_state: Dict, α = 1):
+        "Computes the sandwich covariance from LSTD state"
+        A, S = lstd_state['A'], lstd_state['S']
+        A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
+        A_inv = jnp.linalg.pinv(A_view)
+        cov_w = (α/2) * (A_inv @ S @ A_inv.T)
+        return cov_w
 
     def train(rng):
 
