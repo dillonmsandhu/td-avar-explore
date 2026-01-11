@@ -296,8 +296,6 @@ def main():
         raise AssertionError('Only Deep Sea has explicit value calculation implemented')
     elif args.base_config == 'ds':
         config = ds_config.copy()
-
-    args = parser.parse_args()
     
     # Start with default config
     config = DEFAULT_CONFIG.copy()
