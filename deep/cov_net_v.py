@@ -32,7 +32,7 @@ def make_train(config):
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
     
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
-    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
+    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma = config['GAMMA'], episodic = config['EPISODIC'])
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))

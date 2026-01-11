@@ -42,7 +42,7 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
     GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
     N = config['DEEPSEA_SIZE']
-    evaluator = DeepSeaExactValue(N, unscaled_move_cost=0.01)
+    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma = config['GAMMA'], episodic = config['EPISODIC'])
     
     def sigma_update(   sigma_state: Dict,
                         transitions, # Explore_Transition

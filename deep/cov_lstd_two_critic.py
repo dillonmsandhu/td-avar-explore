@@ -48,7 +48,7 @@ def make_train(config):
     alpha_fn = lambda t: 1/10
     GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
 
-    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
+    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma = config['GAMMA'], episodic = config['EPISODIC'])
 
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
