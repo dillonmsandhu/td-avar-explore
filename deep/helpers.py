@@ -1,7 +1,7 @@
 # This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
 import jax.numpy as jnp
 import jax
-from typing import NamedTuple
+from typing import NamedTuple, Dict
 from envs.sparse_mc import SparseMountainCar
 import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
@@ -27,11 +27,39 @@ def make_env(config):
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
     return env, env_params
-    
+
+def cross_cov(traces, current_features, next_features, done, γ):
+    "One a sample of the LSTD A matrix - episodic"
+    td_features = current_features - γ  * next_features * (1-done)
+    A_sample = jnp.outer(traces, td_features)
+    return A_sample
+
+def cross_cov_continuing(traces, current_features, next_features, done, γ):
+    "One sample of the LSTD A matrix - continuing"
+    td_features = current_features - γ  * next_features
+    A_sample = jnp.outer(traces, td_features)
+    return A_sample
+
 def cosine_similarity(a, b):
     dot = jnp.dot(a,b)
     mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
     return dot/mag
+
+
+def sigma_update(   sigma_state: Dict,
+                    transitions, # Explore_Transition
+                    features: jnp.ndarray,
+                    α: float,
+                    
+    ):
+    S, t = sigma_state['S'], sigma_state['t']
+    batch_axes = tuple(range(transitions.done.ndim))
+    N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
+    S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
+    S_b = S_update.mean(axis=batch_axes) # Batch average
+    S_b = 0.5 * (S_b + S_b.T) # symmetrize
+    S = (1-α) * S + α * S_b # EMA
+    return {'S': S, 'N': N, 't': t+1} # new sigma_state
 
 def _get_all_traces(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
@@ -54,7 +82,7 @@ def _get_all_traces(traj_batch, features, γ, λ):
     )
     return traces.transpose(1,0,2)
 
-def _get_all_traces_continuing(features, γ, λ):
+def _get_all_traces_continuing(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
     Returns: L x B x k
     """
@@ -199,6 +227,38 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
+def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ):
+    """Episodic Intrinsic TD Target"""
+    def _get_advantages(gae_and_next_value, transition):
+        gae, i_gae, next_value, i_next_value = gae_and_next_value
+        done, value, reward, i, i_value = (
+            transition.done,
+            transition.value,
+            transition.reward,
+            transition.intrinsic_reward,
+            transition.i_value,
+        )
+
+        not_done = (1-done)
+        
+        delta = reward + γ * next_value * not_done - value
+        gae = delta + (γ * λ * not_done * gae)
+        
+        # Intrinsic is non-episodic (no done masking)
+        i_delta = i + γ * not_done * i_next_value - i_value 
+        i_gae = i_delta + (γ * λ * not_done * i_gae )
+        
+        return (gae, i_gae, value, i_value), (gae, i_gae)
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages,
+        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
+        traj_batch,
+        reverse=True,
+        unroll=16,
+    )
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
 def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, λ):
     """
     Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
@@ -222,6 +282,44 @@ def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, 
         # Intrinsic is non-episodic (no done masking)
         i_delta = i + γ * i_next_value - i_value_slow 
         i_gae = i_delta + (γ * λ * i_gae)
+        
+        return (gae, i_gae, value, i_value_fast), (gae, i_gae)
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages,
+        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val_fast),
+        traj_batch,
+        reverse=True,
+        unroll=16,
+    )
+    
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value_slow)
+
+def calculate_i_and_e_gae_two_critic_episodic(traj_batch, last_val, last_i_val_fast, γ, λ):
+    """
+    Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
+    A = Q_fast - V_slow
+    Value Target = Q_fast
+    """
+    def _get_advantages(gae_and_next_value, transition):
+        gae, i_gae, next_value, i_next_value = gae_and_next_value
+        done, value, reward, i, i_value_fast, i_value_slow = (
+            transition.done,
+            transition.value,
+            transition.reward,
+            transition.intrinsic_reward,
+            transition.i_value_fast,
+            transition.i_value_slow,
+        )
+
+        not_done = (1-done)
+        
+        delta = reward + γ * next_value * not_done - value
+        gae = delta + (γ * λ * not_done * gae)
+        
+        # Intrinsic is non-episodic (no done masking)
+        i_delta = i + γ * i_next_value * not_done- i_value_slow 
+        i_gae = i_delta + (γ * λ * not_done * i_gae)
         
         return (gae, i_gae, value, i_value_fast), (gae, i_gae)
 

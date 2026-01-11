@@ -73,7 +73,12 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
-
+    
+    if config['EPISODIC']: 
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
+    else:
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
+    
     def train(rng):
         # initialize rnd networks
         rnd_rng, rng = jax.random.split(rng)
@@ -162,7 +167,7 @@ def make_train(config):
             # CALCULATE ADVANTAGE
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
 
-            gaes, targets = helpers.calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
             # Combine advantages
             advantages = gaes[0] + gaes[1] 
 

@@ -26,7 +26,7 @@ def lstd_i_val_fast(phi_fn, obs, lstd_state):
     returns: (...)
     """
     features = phi_fn(obs)
-    return features @ lstd_state["w_fast"]
+    return features @ lstd_state["w_optimistic"]
 
 def lstd_i_val_slow(phi_fn, obs, lstd_state):
     """
@@ -34,7 +34,7 @@ def lstd_i_val_slow(phi_fn, obs, lstd_state):
     returns: (...)
     """
     features = phi_fn(obs)
-    return features @ lstd_state["w_slow"]
+    return features @ lstd_state["w_pessimistic"]
 
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -45,25 +45,19 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
 
     # alpha_fast_fn = lambda t: jnp.maximum(1/10, 1/(2*t))
-    alpha_fast_fn = lambda t: 1/10
-    alpha_slow_fn = lambda t: 1/20
+    alpha_fn = lambda t: 1/10
     GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
 
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01)
 
-    def sigma_update(   sigma_state: Dict,
-                        transitions, # Explore_Transition
-                        features: jnp.ndarray,
-        ):
-        S, t = sigma_state['S'], sigma_state['t']
-        batch_axes = tuple(range(transitions.done.ndim))
-        N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
-        α = GET_ALPHA_FN_cov(sigma_state['t'])
-        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
-        S_b = S_update.mean(axis=batch_axes) # Batch average
-        S_b = 0.5 * (S_b + S_b.T) # symmetrize
-        S = (1-α) * S + α * S_b # EMA
-        return {'S': S, 'N': N, 't': t+1} # new sigma_state
+    if config['EPISODIC']: 
+        gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
+        trace_fn = helpers._get_all_traces
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+    else:
+        gae_fn = helpers.calculate_i_and_e_gae_two_critic
+        trace_fn =helpers. _get_all_traces_continuing
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
     
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
@@ -77,15 +71,11 @@ def make_train(config):
                             features: jnp.ndarray,
                             next_features: jnp.ndarray,
                             traces: jnp.ndarray,
-        ):
-        def cross_cov(traces, current_features, next_features, done):
-            td_features = current_features - config['GAMMA']  * next_features * (1-done)
-            A_sample = jnp.outer(traces, td_features)
-            return A_sample
-        
+        ):        
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
         t = lstd_state['t']
+        α = alpha_fn(lstd_state['t']) 
         reward_scale = 1.0 / jnp.sqrt(N)
         rho = transitions.intrinsic_reward / reward_scale
         
@@ -93,28 +83,24 @@ def make_train(config):
         A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
         A_b = A_update.mean(axis=batch_axes)
         
-        A_fast, A_slow = lstd_state['A_fast'], lstd_state['A_slow']
-        b_fast, b_slow = lstd_state['b_fast'], lstd_state['b_slow']
+        A, b_optimistic, b_pessimistic = lstd_state['A'], lstd_state['b_optimistic'], lstd_state['b_pessimistic']
         b_int_sample = traces * rho[..., None] # Expand rho for broadcast
         b_b = b_int_sample.mean(axis=batch_axes)
-
-        α_fast = alpha_fast_fn(lstd_state['t']) 
-        α_slow =  alpha_slow_fn(lstd_state['t'])
-
+        
         # EMAs
-        A_fast = (1-α_fast) * A_fast + α_fast * A_b
-        b_fast = (1-α_fast) * b_fast + α_fast * b_b
-        A_slow = (1-α_slow) * A_slow + α_slow * A_b
-        b_slow = (1-α_slow) * b_slow + α_slow * b_b
+        def EMA(α, x_start, x_sample):
+            return (1-α) * x_start + α * x_sample
+        
+        A = EMA(α, A, A_b)
+        b_optimistic = EMA(α, b_optimistic, b_b)
+        b_pessimistic = EMA(α, b_pessimistic, b_b)
 
-        εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye((A_fast.shape[0]))
+        εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
 
-        w_fast = jnp.linalg.solve(A_fast + εI, b_fast) * reward_scale
-        w_slow = jnp.linalg.solve(A_slow + εI, b_slow) * reward_scale
-        return {'A_fast': A_fast, 'A_slow': A_slow, 
-                'b_fast': b_fast, 'b_slow': b_slow, 
-                'w_fast': w_fast, 'w_slow': w_slow, 
-                'N': N, 't': t+1}
+        w_optimistic = jnp.linalg.solve(A + εI, b_optimistic) * reward_scale
+        w_pessimistic = jnp.linalg.solve(A + εI, b_pessimistic) * reward_scale
+        
+        return {'A': A, 'b_optimistic': b_optimistic, 'b_pessimistic': b_pessimistic, 'w_optimistic': w_optimistic, 'w_pessimistic': w_pessimistic, 'N': N, 't': t+1}
 
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -137,20 +123,17 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
-        initial_phi = get_features_fn(obsv)
-        initial_rho = get_int_rew(S = jnp.eye(k), features = initial_phi, N=config['NUM_ENVS'])
+        # initial_phi = get_features_fn(obsv)
+        # initial_rho = get_int_rew(S = jnp.eye(k), features = initial_phi, N=config['NUM_ENVS'])
         V_target = 1/(1-config['GAMMA'])
         # V_target = 1
-        # bias only:
-        b = jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION'])
 
         initial_lstd_state = {
-            'A_fast': jnp.eye(k) * config['A_REGULARIZATION'], 
-            'A_slow': jnp.eye(k) * config['A_REGULARIZATION'],
-            'b_fast': b, 
-            'b_slow': jnp.zeros(k), 
-            'w_fast': jnp.zeros(k),
-            'w_slow': jnp.zeros(k),
+            'A': jnp.eye(k) * config['A_REGULARIZATION'], 
+            'b_optimistic': jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION']), # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
+            'b_pessimistic': jnp.zeros(k), 
+            'w_optimistic': jnp.zeros(k),
+            'w_pessimistic': jnp.zeros(k),
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -228,25 +211,19 @@ def make_train(config):
             # Intrinsic reward 
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
-            sigma_state = sigma_update(sigma_state, traj_batch, phi)
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
 
             # Intrinsic Critics:
-            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
-            lstd_state = lstd_batch_update(
-                lstd_state,
-                traj_batch,
-                phi,
-                next_phi,
-                traces
-            )
+            traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
+            lstd_state = lstd_batch_update( lstd_state, traj_batch, phi, next_phi, traces)
 
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val_fast = lstd_i_val_fast(get_features_fn, last_obs, lstd_state)
-            gaes, targets = helpers.calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
 

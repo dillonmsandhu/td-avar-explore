@@ -22,7 +22,7 @@ def lstd_i_val(phi_fn, obs, lstd_state):
     returns: (...)
     """
     features = phi_fn(obs)
-    return features @ lstd_state["w_int"]
+    return features @ lstd_state["w"]
 
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -31,32 +31,19 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
+
+    if config['EPISODIC']: 
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
+        trace_fn = helpers._get_all_traces
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+    else: # continuing
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
+        trace_fn =helpers. _get_all_traces_continuing
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
     
-    GET_ALPHA_FN = lambda t: 1/10
-    GET_ALPHA_FN_b = lambda t: 1/10
+    alpha_fn = lambda t: 1/10
     GET_ALPHA_FN_cov = lambda t: jnp.maximum(1/10, 1/t)
 
-
-    def sigma_update(   sigma_state: Dict,
-                        transitions, # Explore_Transition
-                        features: jnp.ndarray,
-                        α: float
-        ):
-        
-        # Unpack state (Assuming these are RAW uncorrected EMAs)
-        S, t = sigma_state['S'], sigma_state['t']
-        batch_axes = tuple(range(transitions.done.ndim))
-        N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
-        # S_update (L, B, k, k)
-        S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
-        # Batch average
-        S_b = S_update.mean(axis=batch_axes)
-        # symmetrize
-        S_b = 0.5 * (S_b + S_b.T)
-        # EMA
-        S = (1-α) * S + α * S_b
-        return {'S': S, 'N': N, 't': t+1} # new sigma_state
-    
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
@@ -64,43 +51,39 @@ def make_train(config):
         rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
         return rho
     
-    def lstd_batch_update( 
-                        lstd_state: Dict,
-                        transitions, # Explore_Transition
-                        features: jnp.ndarray,
-                        next_features: jnp.ndarray,
-                        traces: jnp.ndarray,
-                        α: float,
-                        α_b: float,
-        ):
-        def lstd(traces, current_features, next_features, transition):
-            td_features = current_features - config['GAMMA'] * next_features
-            A_sample = jnp.outer(traces, td_features)
-            return A_sample
-        
-        # Unpack state (Assuming these are RAW uncorrected EMAs)
-        A, t = lstd_state['A'], lstd_state['t']
+    def lstd_batch_update(  lstd_state: Dict,
+                            transitions, # Explore_Transition
+                            features: jnp.ndarray,
+                            next_features: jnp.ndarray,
+                            traces: jnp.ndarray,
+        ):        
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
-        batch_lstd = jax.vmap(jax.vmap(lstd))
-        A_update = batch_lstd(traces, features, next_features, transitions) # (L, B, k, k)
+        t = lstd_state['t']
+        α = alpha_fn(lstd_state['t']) 
+        reward_scale = 1.0 / jnp.sqrt(N)
+        rho = transitions.intrinsic_reward / reward_scale
+        
+        # A: Cross Correlation Matrix (Cov(Trace, Feature Diff))
+        A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
         A_b = A_update.mean(axis=batch_axes)
-        # EMA
-        β = (1-α)
-        bc = 1-β**t
-        A = β * A + α * A_b
-        A_view = A + config['A_REGULARIZATION_PER_STEP'] * jnp.eye((A.shape[0]))
-        # A_view /=  (1-β**t)
-        rho = transitions.intrinsic_reward
-        # solve LSTD for intrinsic system A^{-1} x = b
+        
+        A, b = lstd_state['A'], lstd_state['b']
         b_int_sample = traces * rho[..., None] # Expand rho for broadcast
         b_b = b_int_sample.mean(axis=batch_axes)
-        b = (1-α_b) * lstd_state['b_int'] + α_b * b_b
-        βb = (1-α_b)
-        # b_view = b / (1-βb**t)
-        b_view = b
-        w_int = jnp.linalg.solve(A_view, b_view)
-        return {'A': A, 'b_int': b, 'w_int': w_int, 'N': N, 't': t+1}
+        
+        # EMAs
+        def EMA(α, x_start, x_sample):
+            return (1-α) * x_start + α * x_sample
+        
+        A = EMA(α, A, A_b)
+        b = EMA(α, b, b_b)
+
+        εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
+
+        w = jnp.linalg.solve(A + εI, b) * reward_scale
+        
+        return {'A': A, 'b': b, 'w': w, 'N': N, 't': t+1}
 
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -113,10 +96,12 @@ def make_train(config):
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
+        V_target = 1/(1-config['GAMMA'])
+
         initial_lstd_state = {
-            'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
-            'b_int': jnp.zeros(k), 
-            'w_int': jnp.zeros(k),
+            'A': jnp.eye(k) * config['A_REGULARIZATION'], 
+            'b': jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION']), # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
+            'w': jnp.zeros(k),
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -200,27 +185,25 @@ def make_train(config):
             # Intrinsic reward 
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
-            sigma_state = sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
 
             # Intrinsic Critic:
-            traces = helpers._get_all_traces_continuing(phi, config['GAMMA'], config['GAE_LAMBDA'])
+            traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update(
                 lstd_state,
                 traj_batch,
                 phi,
                 next_phi,
                 traces,
-                α=GET_ALPHA_FN(lstd_state['t']),
-                α_b=GET_ALPHA_FN_b(lstd_state['t']),
             )
 
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val = lstd_i_val(get_features_fn, last_obs, lstd_state)
-            gaes, targets = helpers.calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
 
