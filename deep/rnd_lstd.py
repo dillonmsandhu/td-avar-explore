@@ -67,8 +67,7 @@ def make_train(config):
         trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
 
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
-    ALPHA_B = 1/2
+    GET_ALPHA_FN = lambda t: 1/10
 
     def lstd_batch_update(  lstd_state: Dict,
                             transitions, # Explore_Transition
@@ -79,7 +78,7 @@ def make_train(config):
         # Unpack state
         A, t = lstd_state['A'], lstd_state['t']
         α = GET_ALPHA_FN(lstd_state['t'])
-        α_b = ALPHA_B
+        α_b =  GET_ALPHA_FN(lstd_state['t'])
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
         A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
