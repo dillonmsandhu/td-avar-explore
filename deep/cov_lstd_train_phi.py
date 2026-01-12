@@ -344,6 +344,9 @@ def make_train(config):
                 "v_e_pred": v_pred,
                 "fast_v_i_pred": v_i_pred_fast,
                 "slow_v_i_pred": v_i_pred_slow,
+                "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
+                "fast_i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred_fast)**2),
+                "slow_i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred_slow)**2)
             })
             runner_state = (train_state, lstd_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
