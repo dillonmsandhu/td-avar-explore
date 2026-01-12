@@ -17,6 +17,7 @@ ds_specific = {
 shared = {    
     "LR": 5e-4,
     "LR_END": 5e-4,
+    "RND_LR": 1e-5, # very slow - learns features
     "NUM_ENVS": 32,
     "NUM_STEPS": 128,
     "TOTAL_TIMESTEPS": 120_000, # will be adjusted up

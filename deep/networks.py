@@ -50,7 +50,8 @@ def initialize_actor_critic(rng, obs_shape, action_dim, config, n_heads: int):
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
 
-def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, target_params = None):
+def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, target_params=None):
+    # --- PPO Agent Scheduler & Optimizer ---
     total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
     lr_scheduler = optax.linear_schedule(
         init_value=config["LR"],
@@ -66,10 +67,19 @@ def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, t
         params=params,
         tx=tx,
     )
+
+    # --- RND Feature Learner Optimizer ---
+    # We use a separate, likely smaller, learning rate for the feature learner
+    rnd_lr = config.get("RND_LR", 1e-4) 
+    rnd_tx = optax.chain(
+        optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+        optax.adam(rnd_lr),
+    )
+    
     rnd_state = RNDTrainState.create(
         apply_fn=rnd_net.apply,
         params=rnd_params,
-        tx=tx,
+        tx=rnd_tx,
         target_params=target_params,
     )
     return train_state, rnd_state
