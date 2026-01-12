@@ -78,9 +78,7 @@ def make_train(config):
         
         A = EMA(α, A, A_b)
         b = EMA(α, b, b_b)
-
         εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
-
         w = jnp.linalg.solve(A + εI, b) * reward_scale
         
         return {'A': A, 'b': b, 'w': w, 'N': N, 't': t+1}

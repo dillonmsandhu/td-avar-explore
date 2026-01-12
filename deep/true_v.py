@@ -259,7 +259,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--save-checkpoint', action='store_true')
+    parser.add_argument('--save-checkpoint', action = 'store_true')
     parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
     args = parser.parse_args()
     
@@ -267,6 +267,7 @@ def main():
         config = mc_config.copy()
     elif args.base_config == 'ds':
         config = ds_config.copy()
+
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)

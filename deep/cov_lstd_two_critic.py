@@ -58,7 +58,14 @@ def make_train(config):
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
         trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
-    
+
+    k = config.get('RND_FEATURES', 128)
+    if config.get('OPTIMISTIC_INIT', False):
+        V_target = 1/(1-config['GAMMA'])
+        b_init = jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION'])
+    else: 
+        b_init = jnp.zeros(k)
+
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
@@ -105,14 +112,14 @@ def make_train(config):
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config)
-        _, target_params = initialize_rnd_network(target_rng, obs_shape, config)
+        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config, k)
+        _, target_params = initialize_rnd_network(target_rng, obs_shape, config, k)
             
         # initialize value and policy network
         network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
-        k = dummy_phi.shape[-1]
+        # k = dummy_phi.shape[-1]
 
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
@@ -130,7 +137,7 @@ def make_train(config):
 
         initial_lstd_state = {
             'A': jnp.eye(k) * config['A_REGULARIZATION'], 
-            'b_optimistic': jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION']), # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
+            'b_optimistic': b_init, # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
             'b_pessimistic': jnp.zeros(k), 
             'w_optimistic': jnp.zeros(k),
             'w_pessimistic': jnp.zeros(k),

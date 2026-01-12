@@ -31,8 +31,8 @@ def resolve_env_config(config):
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
-def initialize_rnd_network(rng, obs_shape, config):
-    model = RND_Net(network_type=config["NETWORK_TYPE"], k=128, normalize = config['NORMALIZE_FEATURES'])
+def initialize_rnd_network(rng, obs_shape, config, k=128):
+    model = RND_Net(network_type=config["NETWORK_TYPE"], k=k, normalize = config['NORMALIZE_FEATURES'])
     rng, init_rng = jax.random.split(rng)
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
