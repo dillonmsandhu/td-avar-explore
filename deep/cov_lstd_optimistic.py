@@ -83,7 +83,7 @@ def make_train(config):
         Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
         optionally takes either a feature extraction functino and obs, or just features
         """
-        N0 = 20 # hyperparameter... Number of effective visits until reverting entirely to LSTD.
+        N0 = 10 # hyperparameter... Number of effective visits until reverting entirely to LSTD.
         if phi is not None:
             features = phi
         elif phi_fn is not None and obs is not None:
@@ -93,8 +93,8 @@ def make_train(config):
         v_lstd = features @ lstd_state["w_optimistic"]
         ri_unscaled = ri / config['BONUS_SCALE']
         N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
-        V = c * v_lstd + (1 - c) * (ri / (1 - config['GAMMA']))
+        c = jnp.clip(N_eff / 10, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
+        V = c * v_lstd + (1 - c) * (1.0 / (1 - config['GAMMA']))
         return V
     
     def lstd_batch_update(  lstd_state: Dict,
@@ -299,7 +299,7 @@ def make_train(config):
             v_i_pred_fast = evaluator.get_value_grid(
                 lstd_i_val_fast(
                     lstd_state, 
-                    ri = jnp.ones(evaluator.obs_stack.shape[0]) * 100, 
+                    ri = jnp.ones(evaluator.obs_stack.shape[0]) * 0.001, 
                     phi_fn = get_features_fn, 
                     obs = evaluator.obs_stack
                     )
@@ -416,6 +416,7 @@ def main():
         fast_i_value_error = metrics['fast_i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['fast_i_value_error']
         slow_i_value_error = metrics['slow_i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['slow_i_value_error']
         e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
+        v_i_pred_opt = metrics['v_i_pred_opt'].mean(0) if config['N_SEEDS'] > 1 else metrics['v_i_pred_opt']
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage_mean')
@@ -424,6 +425,7 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, fast_i_value_error[1:], 'fast_i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, slow_i_value_error[1:], 'slow_i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, v_i_pred_opt[1:], 'v_i_pred_opt')
 
         # List of new value metrics to plot
         value_metrics = ["v_i", "v_e", "v_e_pred", "fast_v_i_pred", "slow_v_i_pred"]
