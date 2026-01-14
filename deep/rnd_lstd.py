@@ -1,7 +1,8 @@
-from utils import * 
+from utils import *
 import helpers
 import flax
 import networks
+
 SAVE_DIR = 'rnd_lstd'
 
 class Transition(NamedTuple):
@@ -29,9 +30,9 @@ def lstd_i_val(phi_fn, obs, lstd_state):
 @flax.struct.dataclass
 class RunningMeanStd:
     # keeps tra
-    mean: jnp.ndarray = jnp.array(0.0)
-    var: jnp.ndarray = jnp.array(1.0)
-    count: jnp.ndarray = jnp.array(1e-4)
+    mean: jnp.ndarray = flax.struct.field(default_factory=lambda: jnp.array(0.0))
+    var: jnp.ndarray = flax.struct.field(default_factory=lambda: jnp.array(1.0))
+    count: jnp.ndarray = flax.struct.field(default_factory=lambda: jnp.array(1e-4))
 
     def update(self, x):
         batch_mean = jnp.mean(x)
