@@ -3,7 +3,8 @@ mc_specific = {
     "NORMALIZE_OBS": True,
     "NORMALIZE_FEATURES": False,
     "WARMUP": 200, # warmup steps for running mean/std
-    "NETWORK_TYPE": 'mlp'
+    "NETWORK_TYPE": 'mlp',
+    "EFFECTIVE_VISITS_TO_REMAIN_OPT": 10,
 }
 
 ds_specific = {
@@ -29,7 +30,9 @@ min_specific = {
     "NORMALIZE_FEATURES": True,
     "NORMALIZE_OBS": False,
     "WARMUP": 2500, # warmup steps for running mean/std
-    "NETWORK_TYPE": 'cnn'
+    "NETWORK_TYPE": 'cnn',
+    "EFFECTIVE_VISITS_TO_REMAIN_OPT": 100,
+    "VMAX_INTERPOLATE_LINEAR": True,
 }
 
 shared = {    

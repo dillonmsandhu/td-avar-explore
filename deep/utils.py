@@ -1,22 +1,10 @@
 # This file contains helpers relating to logging, checkpointing, and loading the data.
-from typing import NamedTuple
-import jax.numpy as jnp
 import os
 import yaml
 import json
 import cloudpickle
 import matplotlib.pyplot as plt
-
-import jax
-import jax.numpy as jnp
-from typing import NamedTuple, Dict, Sequence, NamedTuple, Any
-import jax
-import jax.numpy as jnp
-import flax.linen as nn
-import numpy as np
-
 from networks import *
-import optax
 
 def parse_config_override(config_str):
     """Parse config override from command line argument."""
@@ -156,7 +144,9 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         'bonus_std': 'i_advantage_std',
         'intrinsic_rew_mean': 'intrinsic_rew_mean',
         'vi_pred': 'vi_pred', 
-        'v_i_pred_opt': 'v_i_pred_opt'
+        'v_i_pred_opt': 'v_i_pred_opt',
+        'v_e_pred': 'v_e_pred',
+        "mean_rew": "mean_rew",
     }
 
     for m_key, save_name in standard_plots.items():

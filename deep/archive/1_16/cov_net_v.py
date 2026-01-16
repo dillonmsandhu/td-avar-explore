@@ -1,10 +1,9 @@
-# Covariance-Based Intrinsic Reward, propegated by an intrinsic value net
-from imports import *
+# Covariance-Based Intrinsic Reward, propegated by an intrinsic value net.
+# For deepsea only, solves for the value function for debugging.
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_net'
-
+SAVE_DIR = 'cov_net_v'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -17,7 +16,7 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-    
+
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
@@ -25,28 +24,64 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
-
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
-
+    
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
     else:
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
-    # --- Setup Evaluator (Only if requested) ---
-    calc_true_values = config.get('CALC_TRUE_VALUES', False)
-    if calc_true_values:
-        evaluator = DeepSeaExactValue(
-            size=config['DEEPSEA_SIZE'], 
-            unscaled_move_cost=0.01, 
-            gamma=config['GAMMA'], 
-            episodic=config['EPISODIC']
-        )
+    
+    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma = config['GAMMA'], episodic = config['EPISODIC'])
+
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
         rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
         return rho
     
+    def interpolate_lstd_val_sqrt(lstd_state, ri, phi_fn=None, obs=None, phi=None):
+        """
+        phi: (..., k)
+        returns: (...)
+        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
+        optionally takes either a feature extraction functino and obs, or just features
+        """
+        if phi is not None:
+            features = phi
+        elif phi_fn is not None and obs is not None:
+            features = phi_fn(obs)
+        else:
+            assert 'must provide either phi function and obs or phi'
+        v_lstd = features @ lstd_state["w"]
+        ri_unscaled = ri / config['BONUS_SCALE']
+        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
+        ri_min = jnp.minimum(1.0, jnp.max(ri))
+        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
+        V = (1-eps) * v_lstd + eps * v_max
+        return V
+
+    def interpolate_lstd_val_linear(lstd_state, ri, phi_fn=None, obs=None, phi=None):
+        """
+        phi: (..., k)
+        returns: (...)
+        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
+        optionally takes either a feature extraction functino and obs, or just features
+        """
+        N0 = config.get('EFFECTIVE_VISITS_TO_REMAIN_OPT', 10) # hyperparameter... Number of effective visits until reverting entirely to LSTD.
+        if phi is not None:
+            features = phi
+        elif phi_fn is not None and obs is not None:
+            features = phi_fn(obs)
+        else:
+            assert 'must provide either phi function and obs or phi'
+        v_lstd = features @ lstd_state["w"]
+        ri_unscaled = ri / config['BONUS_SCALE']
+        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
+        c = jnp.clip(N_eff / N0, 0.0, 1.0) # newff = 10 -> r = 1/sqrt(10)
+        ri_min = jnp.minimum(1.0, jnp.max(ri))
+        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
+        return V
+
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
@@ -59,7 +94,8 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_sigma_state = {
-            'S': jnp.eye(k) * config['GRAM_REG'],
+            # 'S': jnp.eye(k) * config['GRAM_REG'],
+            'S': jnp.eye(k),
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -136,7 +172,7 @@ def make_train(config):
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
             phis = batch_get_features(traj_batch.obs)
-            sigma_state = helpers.sigma_update( sigma_state, traj_batch, phis, α=GET_ALPHA_FN(sigma_state['t']),)
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phis, α=GET_ALPHA_FN(sigma_state['t']),)
             # COMPUTE intrinsic reward:            
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             next_phi = batch_get_features(traj_batch.next_obs)
@@ -228,6 +264,13 @@ def make_train(config):
             # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
+            
+            # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
+            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
+            v_pred, v_i_pred = v_pred
+
+            e_value_error = jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2)
+            i_value_error = jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2)
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "i_value_loss": loss_info[1].mean(),
@@ -242,31 +285,16 @@ def make_train(config):
                 "lambda_ret_std": targets[0].std(),
                 "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
+                "intrinsic_v_mean": traj_batch.i_value.mean(),
+                "intrinsic_v_std": traj_batch.i_value.std(),
                 "mean_rew": traj_batch.reward.mean(),
+                "v_i": v_i,
+                "v_e": v_e,
+                "v_e_pred": v_pred,
+                "v_i_pred": v_i_pred,
+                "e_value_error": e_value_error,
+                "i_value_error": i_value_error
             })
-            # Branch: Expensive True Values vs. Cheap Proxies
-            # Branch: Expensive True Values vs. Cheap Proxies
-            if calc_true_values:
-                # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
-                v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
-                v_pred, v_i_pred = v_pred
-                ri_grid_vals = int_rew_from_features(batch_get_features(evaluator.obs_stack))
-                ri_grid = evaluator.get_value_grid(ri_grid_vals)
-
-                metric.update({
-                    "ri_grid": ri_grid,
-                    "vi_pred": v_i_pred,
-                    "v_i": v_i,
-                    "v_e": v_e,
-                    "v_e_pred": v_pred,
-                    "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
-                    "i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2),
-                })
-            else:
-                metric.update({
-                    "vi_pred": traj_batch.i_value.mean(),
-                    "v_e_pred": traj_batch.value.mean()
-                })
             runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
             # end update_step
@@ -282,11 +310,11 @@ def make_train(config):
     
 def main():
     import warnings; warnings.simplefilter('ignore')
-    from utils import evaluate, parse_config_override
+    import os
+    from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    import configs
-    
+    import configs    
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
@@ -296,51 +324,76 @@ def main():
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
     parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
-    # NEW: Argument to take a list of environments
-    parser.add_argument('--env_ids', nargs='+', default=[], 
-                       help='Optional list of envs to run sequentially. If provided, overrides the config ENV_NAME.')
-
     args = parser.parse_args()
     
-    # 1. Load Base Config
     if args.base_config == 'mc':
         config = configs.mc_config.copy()
-        # raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea') 
-        # (Commented out assertion just in case you want to try others)
+        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
     elif args.base_config == 'ds':
         config = configs.ds_config.copy()
     elif args.base_config  == 'min':
         config = configs.min_config.copy()
 
-    # 2. Apply Overrides (Global overrides applied to all envs)
+    # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
+    rng = jax.random.PRNGKey(config['SEED'])
+        
+    def evaluate(config, rng):
+        steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
+        run_fn = jax.jit(jax.vmap(make_train(config)))
+        rngs = jax.random.split(rng, config['N_SEEDS'])
+        out = run_fn(rngs)
+        metrics = out["metrics"]
 
-    # 3. Determine List of Environments to Run
-    # If --env_ids is passed, use that list. Otherwise use the single one from config.
-    env_list = args.env_ids if args.env_ids else [config['ENV_NAME']]
+        print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
+        print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-    # 4. Sequential Execution Loop
-    for i, env_name in enumerate(env_list):
-        print(f"\n{'='*50}")
-        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
-        print(f"{'='*50}")
+        run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
+        env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
-        # Create a fresh config copy for this environment
-        run_config = config.copy()
-        run_config['ENV_NAME'] = env_name
+        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(env_dir, exist_ok=True)
+        print(f"Saving {config['ENV_NAME']} results to {run_dir}")
+
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
         
-        # Generate RNG (fresh seed based on config to ensure reproducibility)
-        rng = jax.random.PRNGKey(run_config['SEED'])
+        mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
+        if config['ENV_NAME'] == "SparseMountainCar-v0":
+            mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
-        try:
-            evaluate(run_config, make_train, SAVE_DIR, args, rng)
-        except Exception as e:
-            print(f"!!! CRITICAL ERROR running {env_name} !!!")
-            print(e)
-            import traceback
-            traceback.print_exc()
-            print("Continuing to next environment...")
+        
+        bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        intrinsic_v_std = metrics['intrinsic_v_std'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_std']
+        intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
+        i_value_error = metrics['i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_value_error']
+        e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
+        
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_std[1:], 'intrinsic_v_std')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
+
+        # List of new value metrics to plot
+        value_metrics = ["v_i", "v_e", "v_e_pred", "v_i_pred"]
+
+        for key in value_metrics:
+            if key in metrics:
+                # 1. Handle Multi-Seed Averaging
+                data = metrics[key]
+                mean_data = data.mean(0) if config['N_SEEDS'] > 1 else data
+                initial_state_data = mean_data[:, 0, 0] # initial state is 0 0 on grid.
+                
+                # 2. Save Plot
+                # We slice [1:] to skip the initial untrained step, matching your other plots
+                save_plot(env_dir, config['ENV_NAME'], steps_per_pi, initial_state_data[1:], key)
+
+    evaluate(config, rng)
 
 if __name__ == '__main__':
     main()

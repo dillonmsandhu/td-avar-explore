@@ -1,7 +1,7 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
 # For deepsea only, solves for the value function for debugging.
 # Learns two intrisic value weights
-from utils import *
+from imports import *
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
@@ -160,14 +160,14 @@ def make_train(config):
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config, k)
-        _, target_params = initialize_rnd_network(target_rng, obs_shape, config, k)
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config, k)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config, k)
             
         # initialize value and policy network
-        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
         
         # Initialize Train States (including updated RND state with optimizer)
-        train_state, rnd_state = initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         # Helper wrappers
         get_target_features_fn = lambda obs: rnd_net.apply(rnd_state.target_params, obs)

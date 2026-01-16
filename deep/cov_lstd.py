@@ -1,7 +1,6 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
 # Consolidated version: Handles both standard training and ExactValue logging via config.
-
-from utils import *
+from imports import *
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
@@ -34,7 +33,6 @@ def make_train(config):
 
     alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
 
-    # --- Setup Evaluator (Only if requested) ---
     if calc_true_values:
         evaluator = DeepSeaExactValue(
             size=config['DEEPSEA_SIZE'], 
@@ -43,7 +41,6 @@ def make_train(config):
             episodic=config['EPISODIC']
         )
 
-    # --- Setup GAE and Traces ---
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
         trace_fn = helpers._get_all_traces
@@ -60,7 +57,6 @@ def make_train(config):
 
     k = config.get('RND_FEATURES', 128)
 
-    # --- Helper Functions ---
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
@@ -125,10 +121,10 @@ def make_train(config):
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config, k)
-        _, target_params = initialize_rnd_network(target_rng, obs_shape, config, k)
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config, k)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config, k)
             
-        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
@@ -306,6 +302,7 @@ def make_train(config):
                 metric.update({
                     "vi_pred": traj_batch.i_value_slow.mean(),
                     "v_i_pred_opt": traj_batch.i_value_fast.mean(),
+                    "v_e_pred": traj_batch.value.mean()
                 })
 
             runner_state = (train_state, lstd_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
@@ -322,7 +319,6 @@ def make_train(config):
     
 def main():
     import warnings; warnings.simplefilter('ignore')
-    import os
     from utils import parse_config_override, evaluate
     import datetime
     import argparse

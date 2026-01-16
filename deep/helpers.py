@@ -1,7 +1,5 @@
 # This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
-import jax.numpy as jnp
-import jax
-from typing import NamedTuple, Dict
+from imports import *
 from envs.sparse_mc import SparseMountainCar
 import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
