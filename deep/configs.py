@@ -12,7 +12,8 @@ ds_specific = {
     "NORMALIZE_FEATURES": True,
     "DEEPSEA_SIZE": 20,
     "WARMUP": 0, # warmup steps for running mean/std
-    "NETWORK_TYPE": 'cnn'
+    "NETWORK_TYPE": 'cnn',
+    "CALC_TRUE_VALUES": True
 }
 
 min_specific = {

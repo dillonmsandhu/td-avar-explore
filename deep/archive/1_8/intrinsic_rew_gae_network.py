@@ -1,11 +1,35 @@
-# Covariance-Based Intrinsic Reward, propegated by an intrinsic value net
 from utils import *
 import helpers
 import networks
-from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_net'
 
-
+DEFAULT_CONFIG = {
+    # "ENV_NAME": "SparseMountainCar-v0",
+    "ENV_NAME": "DeepSea-bsuite",
+    "LR": 5e-4,
+    "LR_END": 5e-4,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
+    "TOTAL_TIMESTEPS": 250_000,
+    "NUM_EPOCHS": 4,
+    "MINIBATCH_SIZE": 256,
+    "GAMMA": 0.99,
+    "GAE_LAMBDA": 0.6,
+    "CLIP_EPS": 0.2,
+    "VF_CLIP": 0.5,
+    "ENT_COEF": 0.003,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_OBS": False,
+    "NORMALIZE_FEATURES": False,
+    "BONUS_SCALE": 1.96,
+    "REGULARIZATION": 1e-4,
+    "PER_UPDATE_REGULARIZATION": 1e-4,
+    "SEED": 42,
+    "WARMUP": 200, # warmup steps for running mean/std
+    "N_SEEDS": 4,
+    "DEEPSEA_SIZE": 20,
+}
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -17,7 +41,31 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
+
+
+def sigma_update(   sigma_state: Dict,
+                    transitions, # Explore_Transition
+                    features: jnp.ndarray,
+                    eps: float,
+                    α: float
+    ):
     
+    # Unpack state (Assuming these are RAW uncorrected EMAs)
+    S, t = sigma_state['S'], sigma_state['t']
+    batch_axes = tuple(range(transitions.done.ndim))
+    N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
+    # S_update (L, B, k, k)
+    S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features)
+    # Batch average
+    S_b = S_update.mean(axis=batch_axes)
+    # regularize
+    S_b += eps * jnp.eye(S.shape[0])
+    # symmetrize
+    S_b = 0.5 * (S_b + S_b.T)
+    # EMA
+    S = (1-α) * S + α * S_b
+    return {'S': S, 'N': N, 't': t+1} # new sigma_state
+
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
@@ -25,24 +73,11 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
-
+    
     GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
 
-    if config['EPISODIC']: 
-        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
-    else:
-        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
-    # --- Setup Evaluator (Only if requested) ---
-    calc_true_values = config.get('CALC_TRUE_VALUES', False)
-    if calc_true_values:
-        evaluator = DeepSeaExactValue(
-            size=config['DEEPSEA_SIZE'], 
-            unscaled_move_cost=0.01, 
-            gamma=config['GAMMA'], 
-            episodic=config['EPISODIC']
-        )
     def get_int_rew(S, features, N):
-        Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
+        Sigma_inv = jnp.linalg.solve(S, jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
         rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
         return rho
@@ -59,7 +94,7 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_sigma_state = {
-            'S': jnp.eye(k) * config['GRAM_REG'],
+            'S': jnp.eye(k) * config['REGULARIZATION'],
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -132,20 +167,13 @@ def make_train(config):
             (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
-
-            # -------------------------------------------------------------
-            # --------- Update Sigma and compute intrinsic reward ---------
-            phis = batch_get_features(traj_batch.obs)
-            sigma_state = helpers.sigma_update( sigma_state, traj_batch, phis, α=GET_ALPHA_FN(sigma_state['t']),)
             # COMPUTE intrinsic reward:            
-            int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             next_phi = batch_get_features(traj_batch.next_obs)
-            
-            rho = int_rew_from_features(next_phi)
+            rho = get_int_rew(sigma_state['S'], next_phi, sigma_state['N'])
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Advantage
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = helpers.calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
 
             # UPDATE NETWORK
@@ -226,8 +254,26 @@ def make_train(config):
             )
             train_state, _, _, _, rng = update_state
             # -------------------------------
+            # --------- Update LSTD ---------
+            new_phi = batch_get_features(traj_batch.obs)
+            sigma_state = sigma_update(
+                sigma_state,
+                traj_batch,
+                new_phi,
+                config['PER_UPDATE_REGULARIZATION'],
+                α=GET_ALPHA_FN(sigma_state['t']),
+            )
+            # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
+            
+            # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
+            # v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, sigma_state, batch_get_features, get_int_rew)
+            # v_pred, v_i_pred = v_pred
+
+            # e_value_error = jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2)
+            # i_value_error = jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2)
+            
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "i_value_loss": loss_info[1].mean(),
@@ -242,29 +288,17 @@ def make_train(config):
                 "lambda_ret_std": targets[0].std(),
                 "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
+                "intrinsic_v_mean": traj_batch.i_value.mean(),
+                "intrinsic_v_std": traj_batch.i_value.std(),
+                "mean_rew": traj_batch.reward.mean(),
+                "mean_rew": traj_batch.reward.mean(),
+                # "v_i": v_i,
+                # "v_e": v_e,
+                # "v_e_pred": v_pred,
+                # "v_i_pred": v_i_pred,
+                # "e_value_error": e_value_error,
+                # "i_value_error": i_value_error
             })
-            # Branch: Expensive True Values vs. Cheap Proxies
-            # Branch: Expensive True Values vs. Cheap Proxies
-            if calc_true_values:
-                # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
-                v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
-                v_pred, v_i_pred = v_pred
-                ri_grid_vals = int_rew_from_features(batch_get_features(evaluator.obs_stack))
-                ri_grid = evaluator.get_value_grid(ri_grid_vals)
-
-                metric.update({
-                    "ri_grid": ri_grid,
-                    "vi_pred": v_i_pred,
-                    "v_i": v_i,
-                    "v_e": v_e,
-                    "v_e_pred": v_pred,
-                    "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
-                    "i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2),
-                })
-            else:
-                metric.update({
-                    "vi_pred": traj_batch.i_value.mean(),
-                })
             runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
             # end update_step
@@ -281,66 +315,72 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import evaluate, parse_config_override
+    from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    import configs
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
     parser.add_argument('--config', type=str, default=None,
                        help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
+                       help='saves to count_rew_net/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
-    
-    # NEW: Argument to take a list of environments
-    parser.add_argument('--env_ids', nargs='+', default=[], 
-                       help='Optional list of envs to run sequentially. If provided, overrides the config ENV_NAME.')
 
     args = parser.parse_args()
     
-    # 1. Load Base Config
-    if args.base_config == 'mc':
-        config = configs.mc_config.copy()
-        # raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea') 
-        # (Commented out assertion just in case you want to try others)
-    elif args.base_config == 'ds':
-        config = configs.ds_config.copy()
-    elif args.base_config  == 'min':
-        config = configs.min_config.copy()
+    # Start with default config
+    config = DEFAULT_CONFIG.copy()
 
-    # 2. Apply Overrides (Global overrides applied to all envs)
+    # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
+    # update the network type and learning rate based on the env.
+    config = resolve_env_config(config)
+    rng = jax.random.PRNGKey(config['SEED'])
+        
+    def evaluate(config, rng):
+        steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
+        run_fn = jax.jit(jax.vmap(make_train(config)))
+        rngs = jax.random.split(rng, config['N_SEEDS'])
+        out = run_fn(rngs)
+        metrics = out["metrics"]
 
-    # 3. Determine List of Environments to Run
-    # If --env_ids is passed, use that list. Otherwise use the single one from config.
-    env_list = args.env_ids if args.env_ids else [config['ENV_NAME']]
+        print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
+        print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
 
-    # 4. Sequential Execution Loop
-    for i, env_name in enumerate(env_list):
-        print(f"\n{'='*50}")
-        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
-        print(f"{'='*50}")
+        run_dir = os.path.join("results", f"count_rew_net/{args.run_suffix}")
+        env_dir = os.path.join(run_dir, config['ENV_NAME'])
         
-        # Create a fresh config copy for this environment
-        run_config = config.copy()
-        run_config['ENV_NAME'] = env_name
+        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(env_dir, exist_ok=True)
+        print(f"Saving {config['ENV_NAME']} results to {run_dir}")
+
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
         
-        # Generate RNG (fresh seed based on config to ensure reproducibility)
-        rng = jax.random.PRNGKey(run_config['SEED'])
+        mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
+        if config['ENV_NAME'] == "SparseMountainCar-v0":
+            mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
         
-        try:
-            evaluate(run_config, make_train, SAVE_DIR, args, rng)
-        except Exception as e:
-            print(f"!!! CRITICAL ERROR running {env_name} !!!")
-            print(e)
-            import traceback
-            traceback.print_exc()
-            print("Continuing to next environment...")
+        
+        bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
+        intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
+        intrinsic_v_constant_obs = metrics['i_val_const_obs'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_val_const_obs']
+        intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
+        i_value_error = metrics['i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_value_error']
+        e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
+        
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'i_val')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_constant_obs[1:], 'i_val_zero_obs')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
+
+    evaluate(config, rng)
 
 if __name__ == '__main__':
     main()

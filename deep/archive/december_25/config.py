@@ -1,0 +1,31 @@
+
+config = {
+    "ENV_NAME": "MountainCar-v0",
+    "LR": 5e-4,
+    "LR_END": 5e-5,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
+    "TOTAL_TIMESTEPS": 120_000,
+    "NUM_EPOCHS": 4, 
+    "MINIBATCH_SIZE": 256,
+    "GAMMA": 0.99,
+    "GAE_LAMBDA": 0.6,
+    "CLIP_EPS": 0.2,
+    "VF_CLIP": 0.5,
+    "ENT_COEF": 0.003,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "ACTIVATION": "relu",
+    "SEED": 42,
+    "WARMUP": 200, # warmup steps for running mean/std, 200 is one episode.
+    "N_SEEDS": 16,
+    "RND_TRAIN_FRAC": 0.5,
+    "REGULARIZATION": 1e-2,
+    "PER_UPDATE_REGULARIZATION": 1e-4,
+    "BONUS_SCALE": 1.0,
+    "ema_coeff_w": 0.9, #(not actually used)
+    "NORMALIZE_FEATURES": False,
+    "BINARY_REWARDS": False,
+    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_OBS": True,
+}
