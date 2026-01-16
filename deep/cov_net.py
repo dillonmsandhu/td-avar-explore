@@ -49,8 +49,7 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_sigma_state = {
-            # 'S': jnp.eye(k) * config['GRAM_REG'],
-            'S': jnp.eye(k),
+            'S': jnp.eye(k) * config['GRAM_REG'],
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -265,19 +264,20 @@ def main():
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
     args = parser.parse_args()
     
     if args.base_config == 'mc':
-        config = configs.mc_config.copy()    
+        config = configs.mc_config.copy()
+        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
     elif args.base_config == 'ds':
         config = configs.ds_config.copy()
+    elif args.base_config  == 'min':
+        config = configs.min_config.copy()
 
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
-    # update the network type and learning rate based on the env.
-    config = resolve_env_config(config)
     rng = jax.random.PRNGKey(config['SEED'])
         
     def evaluate(config, rng):
@@ -314,7 +314,7 @@ def main():
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'intrinsic_v_mean')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_mean[1:], 'vi_pred')
         
 
     evaluate(config, rng)

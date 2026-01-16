@@ -8,24 +8,6 @@ import distrax
 from typing import Any
 import math
 import optax
-# =====================================================
-# ---------------- ENV → NETWORK ----------------------
-# =====================================================
-
-ENV_REGISTRY = {
-    "DeepSea-bsuite": {
-        "NETWORK_TYPE": "cnn",
-        "LR": 2.5e-4,
-    },
-    "SparseMountainCar-v0": {
-        "NETWORK_TYPE": "mlp",
-        "LR": 5e-4,
-    },
-}
-
-def resolve_env_config(config):
-    env_cfg = ENV_REGISTRY[config["ENV_NAME"]]
-    return {**config, **env_cfg}
 
 # =====================================================
 # --------------- INITIALIZATION ----------------------
@@ -67,9 +49,6 @@ def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, t
         params=params,
         tx=tx,
     )
-
-    # --- RND Feature Learner Optimizer ---
-    # We use a separate, likely smaller, learning rate for the feature learner
     rnd_lr = config.get("RND_LR", 1e-4) 
     rnd_tx = optax.chain(
         optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),

@@ -291,7 +291,7 @@ def main():
     from utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    from configs import ds_config, mc_config
+    import configs
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
@@ -305,16 +305,17 @@ def main():
     args = parser.parse_args()
     
     if args.base_config == 'mc':
-        config = mc_config.copy()
+        config = configs.mc_config.copy()
+        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
     elif args.base_config == 'ds':
-        config = ds_config.copy()
+        config = configs.ds_config.copy()
+    elif args.base_config  == 'min':
+        config = configs.min_config.copy()
     
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
     rng = jax.random.PRNGKey(config['SEED'])
-    # update the network type and learning rate based on the env.
-    config = resolve_env_config(config)
         
     def evaluate(config, rng):
         steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
