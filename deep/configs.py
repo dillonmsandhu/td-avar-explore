@@ -6,10 +6,10 @@ mc_specific = {
     "NETWORK_TYPE": 'mlp',
     "EFFECTIVE_VISITS_TO_REMAIN_OPT": 10,
     "VMAX_INTERPOLATE_LINEAR": True,
-    "EPISODIC": False,
-    "EPISODIC_LSTD_A": False,
-    "EPISODIC_GAE": False,
-    "EPISODIC_TRACE": False,
+    "EPISODIC": True,
+    "EPISODIC_LSTD_A": True,
+    "EPISODIC_GAE": True,
+    "EPISODIC_TRACE": True,
     "NORMALIZE_REWARDS": False,
 }
 ds_specific = {

@@ -153,11 +153,14 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         data = get_metric(m_key, 1)
         if data is not None:
             # If we are in True Value mode, 'vi_pred' is a GRID, so we skip standard plotting
-            if run_config.get('CALC_TRUE_VALUES', False) and m_key in ['vi_pred', 'v_i_pred_opt']:
+            if run_config.get('CALC_TRUE_VALUES', False) and m_key in ['vi_pred', 'v_i_pred_opt', 'v_e', 'ri_grid']:
                     continue 
-            save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, data, save_name)
+            try:
+                save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, data, save_name)
+            except:
+                print('failed to save plot for', m_key)
 
-    # 3. Extended / True Value Plots
+    # 3. Extended / True Value Plots 
     if run_config.get('CALC_TRUE_VALUES', False):
         extended_metrics = ["v_i", "v_e", "v_e_pred", "vi_pred", "v_i_pred_opt", "e_value_error", "i_value_error"]
         for key in extended_metrics:
