@@ -20,15 +20,6 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-    
-
-def lstd_i_val_fast(phi_fn, obs, lstd_state):
-    """
-    phi: (..., k)
-    returns: (...)
-    """
-    features = phi_fn(obs)
-    return features @ lstd_state["w_optimistic"]
 
 def lstd_i_val_slow(phi_fn, obs, lstd_state):
     """
@@ -73,6 +64,39 @@ def make_train(config):
         bonus_sq /= jnp.maximum(1.0, N)
         rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
         return rho
+    
+    def interpolate_lstd_val(lstd_state, ri, phi_fn=None, obs=None, phi=None):
+        """
+        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value.
+        Math: V = weight_lstd * V_lstd + (1 - weight_lstd) * V_max
+        """
+        # --- 1. Common Setup ---
+        if phi is not None:
+            features = phi
+        elif phi_fn is not None and obs is not None:
+            features = phi_fn(obs)
+        else:
+            assert False, 'Must provide either phi function and obs OR phi'
+
+        v_lstd = features @ lstd_state["w"]
+        ri_unscaled = ri / config['BONUS_SCALE']
+        
+        # Calculate V_max
+        ri_min = jnp.minimum(1.0, jnp.max(ri))
+        default_vmax = ri_min / (1 - config['GAMMA'])
+        v_max = config.get('V_MAX', default_vmax)
+
+        if config.get('VMAX_INTERPOLATE_LINEAR', False):
+            N0 = config.get('EFFECTIVE_VISITS_TO_REMAIN_OPT', 10)
+            N_eff = 1.0 / (ri_unscaled ** 2 + 1e-8)
+            weight_lstd = jnp.clip(N_eff / N0, 0.0, 1.0)
+        else:
+            eps = jnp.clip(ri_unscaled, 0.0, 1.0)
+            weight_lstd = 1.0 - eps
+
+        # --- 3. Convex Combination ---
+        V = weight_lstd * v_lstd + (1.0 - weight_lstd) * v_max
+        return V
     
     def lstd_batch_update(lstd_state: Dict,
                           transitions, 
@@ -209,7 +233,7 @@ def make_train(config):
                 
                 phi_target = get_target_features_fn(last_obs)
                 # get i_val (dot product with LSTD state and Trainable features)
-                i_val_fast = lstd_i_val_fast(current_train_features_fn, last_obs, lstd_state)
+                i_val_fast = interpolate_lstd_val(current_train_features_fn, last_obs, lstd_state)
                 i_val_slow = lstd_i_val_slow(current_train_features_fn, last_obs, lstd_state)
 
 
@@ -265,7 +289,7 @@ def make_train(config):
 
             # --- Advantage Calculation ---
             _, last_val = network.apply(train_state.params, last_obs)
-            last_i_val_fast = lstd_i_val_fast(current_train_features_fn, last_obs, lstd_state)
+            last_i_val_fast = interpolate_lstd_val(current_train_features_fn, last_obs, lstd_state)
             gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
@@ -327,7 +351,7 @@ def make_train(config):
             v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_target_features, int_rew_from_features)
             
             # Evaluator uses LSTD on TRAINABLE features
-            v_i_pred_fast = evaluator.get_value_grid(lstd_i_val_fast(eval_train_features_fn, evaluator.obs_stack, lstd_state))
+            v_i_pred_fast = evaluator.get_value_grid(interpolate_lstd_val(eval_train_features_fn, evaluator.obs_stack, lstd_state))
             v_i_pred_slow = evaluator.get_value_grid(lstd_i_val_slow(eval_train_features_fn, evaluator.obs_stack, lstd_state))
             
             ri_grid = evaluator.get_value_grid(int_rew_from_features(batch_get_target_features(evaluator.obs_stack)))
@@ -376,7 +400,7 @@ def main():
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
     args = parser.parse_args()
     
     if args.base_config == 'mc':
@@ -384,12 +408,12 @@ def main():
         raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
     elif args.base_config == 'ds':
         config = configs.ds_config.copy()
-
+    elif args.base_config  == 'min':
+        config = configs.min_config.copy()
+    
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
-    # update the network type and learning rate based on the env.
-    config = resolve_env_config(config)
     rng = jax.random.PRNGKey(config['SEED'])
         
     def evaluate(config, rng):
