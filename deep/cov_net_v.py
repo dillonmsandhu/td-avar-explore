@@ -78,7 +78,7 @@ def make_train(config):
         v_lstd = features @ lstd_state["w"]
         ri_unscaled = ri / config['BONUS_SCALE']
         N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
+        c = jnp.clip(N_eff / N0, 0.0, 1.0) # newff = 10 -> r = 1/sqrt(10)
         ri_min = jnp.minimum(1.0, jnp.max(ri))
         V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
         return V
@@ -324,21 +324,20 @@ def main():
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
     args = parser.parse_args()
     
     if args.base_config == 'mc':
         config = configs.mc_config.copy()
         raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
-    
     elif args.base_config == 'ds':
         config = configs.ds_config.copy()
+    elif args.base_config  == 'min':
+        config = configs.min_config.copy()
 
     # Override with command line config
     config_override = parse_config_override(args.config)
     config.update(config_override)
-    # update the network type and learning rate based on the env.
-    config = resolve_env_config(config)
     rng = jax.random.PRNGKey(config['SEED'])
         
     def evaluate(config, rng):

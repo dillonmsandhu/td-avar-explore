@@ -3,7 +3,7 @@ mc_specific = {
     "NORMALIZE_OBS": True,
     "NORMALIZE_FEATURES": False,
     "WARMUP": 200, # warmup steps for running mean/std
-
+    "NETWORK_TYPE": 'mlp'
 }
 
 ds_specific = {
@@ -12,6 +12,23 @@ ds_specific = {
     "NORMALIZE_FEATURES": True,
     "DEEPSEA_SIZE": 20,
     "WARMUP": 0, # warmup steps for running mean/std
+    "NETWORK_TYPE": 'cnn'
+}
+
+min_specific = {
+    "ENV_NAME": "Breakout-MinAtar",
+    "LR": 2.5e-3,
+    "LR_END": 1e-5,
+    "NUM_ENVS": 128,
+    "NUM_STEPS": 64,
+    "GAE_LAMBDA": 0.8,
+    "CLIP_EPS": 0.1,
+    "VF_CLIP": 0.2,
+    "ENT_COEF": 0.001,
+    "NORMALIZE_FEATURES": True,
+    "NORMALIZE_OBS": False,
+    "WARMUP": 2500, # warmup steps for running mean/std
+    "NETWORK_TYPE": 'cnn'
 }
 
 shared = {    
@@ -52,3 +69,4 @@ shared = {
 
 mc_config = shared | mc_specific # | is the union op.
 ds_config = shared | ds_specific
+min_config = shared | min_specific
