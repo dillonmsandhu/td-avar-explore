@@ -54,7 +54,9 @@ def make_train(config):
         gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
     if config.get('EPISODIC_LSTD_A', False):
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
-
+    if config.get('EPISODIC_TRACE', False):
+        trace_fn = helpers._get_all_traces
+    
     k = config.get('RND_FEATURES', 128)
 
     def get_int_rew(S, features, N):

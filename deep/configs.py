@@ -5,8 +5,13 @@ mc_specific = {
     "WARMUP": 200, # warmup steps for running mean/std
     "NETWORK_TYPE": 'mlp',
     "EFFECTIVE_VISITS_TO_REMAIN_OPT": 10,
+    "VMAX_INTERPOLATE_LINEAR": True,
+    "EPISODIC": False,
+    "EPISODIC_LSTD_A": False,
+    "EPISODIC_GAE": False,
+    "EPISODIC_TRACE": False,
+    "NORMALIZE_REWARDS": False,
 }
-
 ds_specific = {
     "ENV_NAME": "DeepSea-bsuite",
     "NORMALIZE_OBS": False,
@@ -14,7 +19,9 @@ ds_specific = {
     "DEEPSEA_SIZE": 20,
     "WARMUP": 0, # warmup steps for running mean/std
     "NETWORK_TYPE": 'cnn',
-    "CALC_TRUE_VALUES": True
+    "CALC_TRUE_VALUES": True,
+    "EPISODIC": False,
+
 }
 
 min_specific = {
