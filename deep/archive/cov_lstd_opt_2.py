@@ -1,11 +1,11 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
 # Simple version that retains optimistic initialization 
-# uses a square root interpolation based on uncertainty decay
+# more complex to fix failure to converge to intrinsic
 from utils import *
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_lstd_v'
+SAVE_DIR = 'cov_lstd_opt_simple2'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -38,69 +38,10 @@ def make_train(config):
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
     else:
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
-        trace_fn =helpers._get_all_traces_continuing
+        trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
-    
-    if config.get('EPISODIC_GAE', False): # option to make just the GAE episodic
-        gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
-    if config.get('EPISODIC_LSTD_A', False): # option to make just the GAE episodic
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
-    if config.get('VMAX_INTERPOLATE_LINEAR', False) == True:
-        lstd_i_val_fast = interpolate_lstd_val_linear
-    elif config.get('VMAX_INTERPOLATE_LINEAR', False) == False:
-        lstd_i_val_fast = interpolate_lstd_val_sqrt
-    
+
     k = config.get('RND_FEATURES', 128)
-
-    def get_int_rew(S, features, N):
-        Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
-        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
-        bonus_sq /= jnp.maximum(1.0, N)
-        rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
-        return rho
-
-    def interpolate_lstd_val_sqrt(lstd_state, ri, phi_fn=None, obs=None, phi=None):
-        """
-        phi: (..., k)
-        returns: (...)
-        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
-        optionally takes either a feature extraction functino and obs, or just features
-        """
-        if phi is not None:
-            features = phi
-        elif phi_fn is not None and obs is not None:
-            features = phi_fn(obs)
-        else:
-            assert 'must provide either phi function and obs or phi'
-        v_lstd = features @ lstd_state["w"]
-        ri_unscaled = ri / config['BONUS_SCALE']
-        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
-        ri_min = jnp.minimum(1.0, jnp.max(ri))
-        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
-        V = (1-eps) * v_lstd + eps * v_max
-        return V
-
-    def interpolate_lstd_val_linear(lstd_state, ri, phi_fn=None, obs=None, phi=None):
-        """
-        phi: (..., k)
-        returns: (...)
-        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
-        optionally takes either a feature extraction functino and obs, or just features
-        """
-        N0 = config.get('EFFECTIVE_VISITS_TO_REMAIN_OPT', 10) # hyperparameter... Number of effective visits until reverting entirely to LSTD.
-        if phi is not None:
-            features = phi
-        elif phi_fn is not None and obs is not None:
-            features = phi_fn(obs)
-        else:
-            assert 'must provide either phi function and obs or phi'
-        v_lstd = features @ lstd_state["w"]
-        ri_unscaled = ri / config['BONUS_SCALE']
-        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
-        ri_min = jnp.minimum(1.0, jnp.max(ri))
-        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
-        return V
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
@@ -125,11 +66,10 @@ def make_train(config):
             assert 'must provide either phi function and obs or phi'
         v_lstd = features @ lstd_state["w"]
         ri_unscaled = ri / config['BONUS_SCALE']
-        # N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
+        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
+        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
         ri_min = jnp.minimum(1.0, jnp.max(ri))
-        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
-        V = (1-eps) * v_lstd + eps * v_max
+        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
         return V
     
     def lstd_batch_update(  lstd_state: Dict,
@@ -163,6 +103,7 @@ def make_train(config):
         εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
 
         w = jnp.linalg.solve(A + εI, b) * reward_scale
+        w = EMA(config.get('EMA_W_COEFF', 0.9), lstd_state['w'], w)
         
         return {'A': A, 'b': b, 'w': w, 'N': N, 't': t+1}
 
@@ -281,7 +222,15 @@ def make_train(config):
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val_fast = lstd_i_val_fast(lstd_state, rho[-1], phi = next_phi[-1])
             gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
-            advantages = gaes[0] + gaes[1]
+
+            gaes = jax.lax.cond(
+                config['I_GAE_STD'],
+                lambda x: jax.tree.map(lambda x: (x-x.mean()) / (x.std() + 1e-6), x), 
+                lambda x: x,
+                gaes,
+            )
+
+            advantages = gaes[0] + config.get('A_i_weight', 0.1) * gaes[1]
             extrinsic_target = targets[0]
 
             # UPDATE NETWORK
@@ -315,7 +264,8 @@ def make_train(config):
             
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-
+            # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
+            # v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
             v_i_pred_opt = evaluator.get_value_grid(
                 lstd_i_val_fast(
                     lstd_state, 
@@ -343,6 +293,7 @@ def make_train(config):
                 "mean_rew": traj_batch.reward.mean(),
                 "vi_pred": vi_pred,
                 "v_i_pred_opt": v_i_pred_opt,
+                # true value stats:
             })
             runner_state = (train_state, lstd_state,sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
@@ -418,7 +369,7 @@ def main():
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         bonus_std = metrics['bonus_std'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_std']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
-        
+
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_std[1:], 'i_advantage_std')

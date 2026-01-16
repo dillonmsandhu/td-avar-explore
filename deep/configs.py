@@ -39,6 +39,9 @@ shared = {
     "A_REGULARIZATION_PER_STEP": 1e-4,
     "A_REGULARIZATION": 1e-2,
     "GRAM_REG": 1e-3,
+    "EFFECTIVE_VISITS_TO_REMAIN_OPT": 100,
+    "VMAX_INTERPOLATE_LINEAR": True,
+    "A_i_weight": 1.0, # more complex for ending exploration
     # For LSTD Avar
     "PRIOR_N": 1_000, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
     "N_SEEDS": 4,

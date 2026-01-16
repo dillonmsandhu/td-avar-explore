@@ -1,11 +1,11 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
-# Simple version that retains optimistic initialization 
-# uses a square root interpolation based on uncertainty decay
+# For deepsea only, solves for the value function for debugging.
+# uses v_i = max(v_lstd, c ri) for optimistic initialisation, where c = min(1/1-gamma, mean(vi/ri))
 from utils import *
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_lstd_v'
+SAVE_DIR = 'cov_lstd_opt'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -20,6 +20,14 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
+def lstd_i_val_slow(phi_fn, obs, lstd_state):
+    """
+    phi: (..., k)
+    returns: (...)
+    """
+    features = phi_fn(obs)
+    return features @ lstd_state["w_pessimistic"]
+
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
@@ -28,7 +36,9 @@ def make_train(config):
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
 
-    alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
+    # alpha_fast_fn = lambda t: jnp.maximum(1/10, 1/(2*t))
+    alpha_fn = lambda t: 1/10
+    GET_ALPHA_FN_cov = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
 
     evaluator = DeepSeaExactValue(size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma = config['GAMMA'], episodic = config['EPISODIC'])
 
@@ -38,69 +48,15 @@ def make_train(config):
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
     else:
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
-        trace_fn =helpers._get_all_traces_continuing
+        trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
-    
-    if config.get('EPISODIC_GAE', False): # option to make just the GAE episodic
-        gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
-    if config.get('EPISODIC_LSTD_A', False): # option to make just the GAE episodic
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
-    if config.get('VMAX_INTERPOLATE_LINEAR', False) == True:
-        lstd_i_val_fast = interpolate_lstd_val_linear
-    elif config.get('VMAX_INTERPOLATE_LINEAR', False) == False:
-        lstd_i_val_fast = interpolate_lstd_val_sqrt
-    
+
     k = config.get('RND_FEATURES', 128)
-
-    def get_int_rew(S, features, N):
-        Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
-        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
-        bonus_sq /= jnp.maximum(1.0, N)
-        rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
-        return rho
-
-    def interpolate_lstd_val_sqrt(lstd_state, ri, phi_fn=None, obs=None, phi=None):
-        """
-        phi: (..., k)
-        returns: (...)
-        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
-        optionally takes either a feature extraction functino and obs, or just features
-        """
-        if phi is not None:
-            features = phi
-        elif phi_fn is not None and obs is not None:
-            features = phi_fn(obs)
-        else:
-            assert 'must provide either phi function and obs or phi'
-        v_lstd = features @ lstd_state["w"]
-        ri_unscaled = ri / config['BONUS_SCALE']
-        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
-        ri_min = jnp.minimum(1.0, jnp.max(ri))
-        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
-        V = (1-eps) * v_lstd + eps * v_max
-        return V
-
-    def interpolate_lstd_val_linear(lstd_state, ri, phi_fn=None, obs=None, phi=None):
-        """
-        phi: (..., k)
-        returns: (...)
-        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
-        optionally takes either a feature extraction functino and obs, or just features
-        """
-        N0 = config.get('EFFECTIVE_VISITS_TO_REMAIN_OPT', 10) # hyperparameter... Number of effective visits until reverting entirely to LSTD.
-        if phi is not None:
-            features = phi
-        elif phi_fn is not None and obs is not None:
-            features = phi_fn(obs)
-        else:
-            assert 'must provide either phi function and obs or phi'
-        v_lstd = features @ lstd_state["w"]
-        ri_unscaled = ri / config['BONUS_SCALE']
-        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
-        ri_min = jnp.minimum(1.0, jnp.max(ri))
-        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
-        return V
+    if config.get('OPTIMISTIC_INIT', False):
+        V_target = 1/(1-config['GAMMA'])
+        b_init = jnp.zeros(k).at[-1].set(V_target * config['A_REGULARIZATION'])
+    else: 
+        b_init = jnp.zeros(k)
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
@@ -123,13 +79,12 @@ def make_train(config):
             features = phi_fn(obs)
         else:
             assert 'must provide either phi function and obs or phi'
-        v_lstd = features @ lstd_state["w"]
+        v_lstd = features @ lstd_state["w_optimistic"]
         ri_unscaled = ri / config['BONUS_SCALE']
-        # N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
-        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
-        ri_min = jnp.minimum(1.0, jnp.max(ri))
-        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
-        V = (1-eps) * v_lstd + eps * v_max
+        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
+        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
+        ri_min = jnp.minimum(1.0, ri)
+        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
         return V
     
     def lstd_batch_update(  lstd_state: Dict,
@@ -149,7 +104,7 @@ def make_train(config):
         A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
         A_b = A_update.mean(axis=batch_axes)
         
-        A, b = lstd_state['A'], lstd_state['b']
+        A, b_optimistic, b_pessimistic = lstd_state['A'], lstd_state['b_optimistic'], lstd_state['b_pessimistic']
         b_int_sample = traces * rho[..., None] # Expand rho for broadcast
         b_b = b_int_sample.mean(axis=batch_axes)
         
@@ -158,13 +113,15 @@ def make_train(config):
             return (1-α) * x_start + α * x_sample
         
         A = EMA(α, A, A_b)
-        b = EMA(α, b, b_b)
+        b_optimistic = EMA(α, b_optimistic, b_b)
+        b_pessimistic = EMA(α, b_pessimistic, b_b)
 
         εI = config['A_REGULARIZATION_PER_STEP'] * jnp.eye(A.shape[0])
 
-        w = jnp.linalg.solve(A + εI, b) * reward_scale
+        w_optimistic = jnp.linalg.solve(A + εI, b_optimistic) * reward_scale
+        w_pessimistic = jnp.linalg.solve(A + εI, b_pessimistic) * reward_scale
         
-        return {'A': A, 'b': b, 'w': w, 'N': N, 't': t+1}
+        return {'A': A, 'b_optimistic': b_optimistic, 'b_pessimistic': b_pessimistic, 'w_optimistic': w_optimistic, 'w_pessimistic': w_pessimistic, 'N': N, 't': t+1}
 
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -174,6 +131,10 @@ def make_train(config):
             
         # initialize value and policy network
         network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
+        dummy_phi = rnd_net.apply(target_params, dummy_obs)
+        # k = dummy_phi.shape[-1]
+
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
@@ -183,11 +144,17 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        # initial_phi = get_features_fn(obsv)
+        # initial_rho = get_int_rew(S = jnp.eye(k), features = initial_phi, N=config['NUM_ENVS'])
+        V_target = 1/(1-config['GAMMA'])
+        # V_target = 1
 
         initial_lstd_state = {
             'A': jnp.eye(k) * config['A_REGULARIZATION'], 
-            'b': jnp.zeros(k), 
-            'w': jnp.zeros(k),
+            'b_optimistic': b_init, # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
+            'b_pessimistic': jnp.zeros(k), 
+            'w_optimistic': jnp.zeros(k),
+            'w_pessimistic': jnp.zeros(k),
             'N': 0, # number of samples
             't': 1, # number of updates
         }
@@ -238,6 +205,10 @@ def make_train(config):
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
+                # get i_val (dot product with LSTD state)
+                
+                i_val_slow = lstd_i_val_slow(get_features_fn, last_obs, lstd_state)
+                
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -246,10 +217,9 @@ def make_train(config):
                 )
                 # Record
                 intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
-                i_val = jnp.zeros_like(reward)
-                i_value_slow = jnp.zeros_like(reward)
+                i_val_fast = jnp.zeros_like(i_val_slow)
                 transition = Transition(
-                    done, action, value, i_val, i_value_slow, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                    done, action, value, i_val_fast, i_val_slow, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition
@@ -263,19 +233,18 @@ def make_train(config):
             # Intrinsic reward 
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
-            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, alpha_fn(sigma_state['t']))
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, GET_ALPHA_FN_cov(sigma_state['t']))
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             rho = int_rew_from_features(next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
 
-            # Intrinsic Critic:
+            # Intrinsic Critics:
             traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update( lstd_state, traj_batch, phi, next_phi, traces)
 
             # Intrinsic value (optimistic)
             vi = lstd_i_val_fast(lstd_state, rho, phi=phi)
-            vi_baseline = phi @ lstd_state["w"]
-            traj_batch = traj_batch._replace(i_value_fast=vi, i_value_slow=vi_baseline)
+            traj_batch = traj_batch._replace(i_value_fast=vi)
 
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
@@ -315,7 +284,16 @@ def make_train(config):
             
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-
+            # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
+            v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
+            v_i_pred_fast = evaluator.get_value_grid(
+                lstd_i_val_fast(
+                    lstd_state, 
+                    ri = jnp.ones(evaluator.obs_stack.shape[0]) * 0.001, 
+                    phi_fn = get_features_fn, 
+                    obs = evaluator.obs_stack
+                    )
+            ) # non-optimistic value
             v_i_pred_opt = evaluator.get_value_grid(
                 lstd_i_val_fast(
                     lstd_state, 
@@ -323,8 +301,7 @@ def make_train(config):
                     phi_fn = get_features_fn, 
                     obs = evaluator.obs_stack)
                 ) # value with the optimistic initialization
-            all_phi = get_features_fn(evaluator.obs_stack)
-            vi_pred = evaluator.get_value_grid(all_phi @ lstd_state['w'])
+            v_i_pred_slow = evaluator.get_value_grid(lstd_i_val_slow(get_features_fn, evaluator.obs_stack, lstd_state))
             ri_grid = evaluator.get_value_grid(int_rew_from_features(batch_get_features(evaluator.obs_stack)))
 
             metric.update({
@@ -341,8 +318,16 @@ def make_train(config):
                 "intrinsic_rew_terminal": traj_batch.intrinsic_reward.mean(),
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "mean_rew": traj_batch.reward.mean(),
-                "vi_pred": vi_pred,
+                "v_i": v_i,
+                "v_e": v_e,
+                "v_e_pred": v_pred,
+                "fast_v_i_pred": v_i_pred_fast,
+                "slow_v_i_pred": v_i_pred_slow,
                 "v_i_pred_opt": v_i_pred_opt,
+                "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
+                "fast_i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred_fast)**2),
+                "opt_i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred_opt)**2),
+                "slow_i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred_slow)**2)
             })
             runner_state = (train_state, lstd_state,sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
@@ -418,14 +403,20 @@ def main():
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
         bonus_std = metrics['bonus_std'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_std']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
+        fast_i_value_error = metrics['fast_i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['fast_i_value_error']
+        slow_i_value_error = metrics['slow_i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['slow_i_value_error']
+        e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_std[1:], 'i_advantage_std')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, fast_i_value_error[1:], 'fast_i_val_mse')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, slow_i_value_error[1:], 'slow_i_val_mse')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')
 
         # List of new value metrics to plot
-        value_metrics = ["v_i_pred", "v_i_pred_opt"]
+        value_metrics = ["v_i", "v_e", "v_e_pred", "fast_v_i_pred", "v_i_pred_opt"]
 
         for key in value_metrics:
             if key in metrics:

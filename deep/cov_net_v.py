@@ -40,6 +40,49 @@ def make_train(config):
         rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
         return rho
     
+    def interpolate_lstd_val_sqrt(lstd_state, ri, phi_fn=None, obs=None, phi=None):
+        """
+        phi: (..., k)
+        returns: (...)
+        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
+        optionally takes either a feature extraction functino and obs, or just features
+        """
+        if phi is not None:
+            features = phi
+        elif phi_fn is not None and obs is not None:
+            features = phi_fn(obs)
+        else:
+            assert 'must provide either phi function and obs or phi'
+        v_lstd = features @ lstd_state["w"]
+        ri_unscaled = ri / config['BONUS_SCALE']
+        eps = jnp.clip(ri_unscaled, 0, 1) # 1/sqrt(n)
+        ri_min = jnp.minimum(1.0, jnp.max(ri))
+        v_max = config.get('V_MAX', ( ri_min / (1 - config['GAMMA'])))
+        V = (1-eps) * v_lstd + eps * v_max
+        return V
+
+    def interpolate_lstd_val_linear(lstd_state, ri, phi_fn=None, obs=None, phi=None):
+        """
+        phi: (..., k)
+        returns: (...)
+        Returns a convex combination of the LSTD solution and a maximal possible intrinsic value
+        optionally takes either a feature extraction functino and obs, or just features
+        """
+        N0 = config.get('EFFECTIVE_VISITS_TO_REMAIN_OPT', 10) # hyperparameter... Number of effective visits until reverting entirely to LSTD.
+        if phi is not None:
+            features = phi
+        elif phi_fn is not None and obs is not None:
+            features = phi_fn(obs)
+        else:
+            assert 'must provide either phi function and obs or phi'
+        v_lstd = features @ lstd_state["w"]
+        ri_unscaled = ri / config['BONUS_SCALE']
+        N_eff = 1/(ri_unscaled ** 2) # ri = sqrt(1/n) -> n = 1/ri^2
+        c = jnp.clip(N_eff / N0, 0.0, 1.0) # neff = 10 -> r = 1/sqrt(10)
+        ri_min = jnp.minimum(1.0, jnp.max(ri))
+        V = c * v_lstd + (1 - c) * ( ri_min / (1 - config['GAMMA']))
+        return V
+
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
@@ -326,13 +369,14 @@ def main():
         
         
         bonus_mean = metrics['bonus_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['bonus_mean']
-        intrinsic_v_mean = metrics['intrinsic_v_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_mean']
+        intrinsic_v_std = metrics['intrinsic_v_std'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_v_std']
         intrinsic_rew_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
         i_value_error = metrics['i_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['i_value_error']
         e_value_error = metrics['e_value_error'].mean(0) if config['N_SEEDS'] > 1 else metrics['e_value_error']
         
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, bonus_mean[1:], 'i_advantage')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_v_std[1:], 'intrinsic_v_std')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, intrinsic_rew_mean[1:], 'intrinsic_rew_mean')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_value_error[1:], 'i_val_mse')
         save_plot(env_dir, config['ENV_NAME'], steps_per_pi, e_value_error[1:], 'e_val_mse')

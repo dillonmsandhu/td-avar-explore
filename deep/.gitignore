@@ -1,3 +1,4 @@
 slurm/logs/
 results/
 *__pycache__*
+figures/
