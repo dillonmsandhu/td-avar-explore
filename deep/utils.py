@@ -1,22 +1,10 @@
 # This file contains helpers relating to logging, checkpointing, and loading the data.
-from typing import NamedTuple
-import jax.numpy as jnp
 import os
 import yaml
 import json
 import cloudpickle
 import matplotlib.pyplot as plt
-
-import jax
-import jax.numpy as jnp
-from typing import NamedTuple, Dict, Sequence, NamedTuple, Any
-import jax
-import jax.numpy as jnp
-import flax.linen as nn
-import numpy as np
-
 from networks import *
-import optax
 
 def parse_config_override(config_str):
     """Parse config override from command line argument."""
@@ -107,3 +95,82 @@ def load_run_data(run_folder_name, env_name, results_base_path="../results"):
     
     
     return config, results
+
+def evaluate(run_config, make_train, SAVE_DIR, args, rng):
+    # Setup specific to this run_config
+    steps_per_pi = run_config["NUM_ENVS"] * run_config["NUM_STEPS"]
+    
+    # JIT the train function for this specific config (important if env changes)
+    run_fn = jax.jit(jax.vmap(make_train(run_config)))
+    
+    rngs = jax.random.split(rng, run_config['N_SEEDS'])
+    out = run_fn(rngs)
+    metrics = out["metrics"]
+
+    print(f"[{run_config['ENV_NAME']}] Mean return: {jnp.mean(metrics['returned_episode_returns']):.4f}")
+    print(f"[{run_config['ENV_NAME']}] Max return:  {jnp.max(metrics['returned_episode_returns']):.4f}")
+
+    # Directory structure: results/cov_lstd/timestamp/EnvName/
+    run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
+    env_dir = os.path.join(run_dir, run_config['ENV_NAME'])
+    
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(env_dir, exist_ok=True)
+    print(f"Saving {run_config['ENV_NAME']} results to {env_dir}")
+
+    if args.save_checkpoint:
+        save_results(out, run_config, run_config['ENV_NAME'], env_dir)
+    else:
+        save_results(metrics, run_config, run_config['ENV_NAME'], env_dir)
+    
+    # --- Helper for Metrics extraction ---
+    def get_metric(name, slice_idx=0):
+        if name not in metrics: return None
+        data = metrics[name]
+        data = data.mean(0) if run_config['N_SEEDS'] > 1 else data
+        return data[slice_idx:]
+
+    # 1. Main Return Plot
+    mean_rets = get_metric('returned_episode_returns', 0)
+    if run_config['ENV_NAME'] == "SparseMountainCar-v0":
+            mean_rets = get_metric('returned_discounted_episode_returns', 0)
+    
+    if mean_rets is not None: 
+        save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+    
+    # 2. Standard Diagnostic Plots
+    standard_plots = {
+        'bonus_mean': 'i_advantage_mean',
+        'bonus_std': 'i_advantage_std',
+        'intrinsic_rew_mean': 'intrinsic_rew_mean',
+        'vi_pred': 'vi_pred', 
+        'v_i_pred_opt': 'v_i_pred_opt',
+        'v_e_pred': 'v_e_pred',
+        "mean_rew": "mean_rew",
+    }
+
+    for m_key, save_name in standard_plots.items():
+        data = get_metric(m_key, 1)
+        if data is not None:
+            # If we are in True Value mode, 'vi_pred' is a GRID, so we skip standard plotting
+            if run_config.get('CALC_TRUE_VALUES', False) and m_key in ['vi_pred', 'v_i_pred_opt', 'v_e', 'ri_grid']:
+                    continue 
+            try:
+                save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, data, save_name)
+            except:
+                print('failed to save plot for', m_key)
+
+    # 3. Extended / True Value Plots 
+    if run_config.get('CALC_TRUE_VALUES', False):
+        extended_metrics = ["v_i", "v_e", "v_e_pred", "vi_pred", "v_i_pred_opt", "e_value_error", "i_value_error"]
+        for key in extended_metrics:
+            if key in metrics:
+                data = metrics[key]
+                mean_data = data.mean(0) if run_config['N_SEEDS'] > 1 else data
+                
+                if "error" in key:
+                        save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, mean_data[1:], key)
+                else:
+                    # Values are Grids (DeepSea), plot initial state (0,0)
+                    initial_state_data = mean_data[:, 0, 0] 
+                    save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, initial_state_data[1:], key)
