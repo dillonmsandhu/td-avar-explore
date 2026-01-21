@@ -30,7 +30,7 @@ class EnvParams(environment.EnvParams):
     goal_velocity: float = 0.0
     force: float = 0.001
     gravity: float = 0.0025
-    max_steps_in_episode: int = 200
+    max_steps_in_episode: int = 200_000
 
 
 class MountainCar(environment.Environment[EnvState, EnvParams]):

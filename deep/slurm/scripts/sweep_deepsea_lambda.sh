@@ -14,6 +14,9 @@ LOGDIR=slurm/logs/${SLURM_ARRAY_JOB_ID}
 mkdir -p "$LOGDIR"
 
 FILE=$1
+EPISODIC=$2
+LIN=$3
+
 DATE=$(date +%Y-%m-%d)
 N=20
 NUM_EPISODES=50000

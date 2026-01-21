@@ -4,16 +4,17 @@ from imports import *
 import helpers
 import networks
 from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_lstd'
+
+SAVE_DIR = 'cov_lstd_learned_feats'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray 
-    i_value_fast: jnp.ndarray
-    i_value_slow: jnp.ndarray
+    i_value: jnp.ndarray
     reward: jnp.ndarray
     intrinsic_reward: jnp.ndarray 
+    intrinsic_reward_unscaled: jnp.ndarray 
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
@@ -31,12 +32,8 @@ def make_train(config):
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
 
-    alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
-    alpha_fn_lstd = lambda t:jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/(t+1))
-    if config['DECAY_BETA']: 
-        beta_fn = helpers.make_beta_schedule(config)
-    else:
-        beta_fn = lambda n: config['BONUS_SCALE']
+    alpha_fn_cov = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
+    alpha_fn_LSTD = lambda t: config.get('MIN_LSTD_LR', 1/10)
 
     if calc_true_values:
         evaluator = DeepSeaExactValue(
@@ -47,23 +44,30 @@ def make_train(config):
         )
 
     if config['EPISODIC']: 
-        gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
-        trace_fn = helpers._get_all_traces
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
+        trace_fn = helpers._get_all_traces # continuing due to setting phi' = 0 when done = True. 
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
     else:
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
         trace_fn = helpers._get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
-
+    
+    if config.get('EPISODIC_GAE', False):
+        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
+    if config.get('EPISODIC_LSTD_A', False):
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+    if config.get('EPISODIC_TRACE', False):
+        trace_fn = helpers._get_all_traces
+    
     k = config.get('RND_FEATURES', 128)
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
         bonus_sq /= jnp.maximum(1.0, N)
-        rho = beta_fn(N) * jnp.sqrt(bonus_sq)
+        rho = config['BONUS_SCALE'] * jnp.sqrt(bonus_sq)
         return rho
-    
+
     def interpolate_lstd_val(lstd_state, ri, phi_fn=None, obs=None, phi=None):
         """
         Returns a convex combination of the LSTD solution and a maximal possible intrinsic value.
@@ -76,24 +80,10 @@ def make_train(config):
             assert False, 'Must provide either phi function and obs OR phi'
 
         v_lstd = features @ lstd_state["w"]
-        if config.get('OPTIMISTIC', True) == False:
-            return v_lstd
-
-        ri_unscaled = ri / beta_fn(lstd_state['N'])
+        ri_unscaled = ri / config['BONUS_SCALE']
         
-        max_ri = jnp.max(ri)
-        
-        # if config.get('CLIP_RI_FOR_VMAX', True):
-        #     ri_base = jnp.minimum(1.0, max_ri)
-        # else:
-        #     ri_base = max_ri
-
-        if config.get('OPTIMISTIC_PER_STATE', True):
-            ri_base = ri
-        else:
-            ri_base = max_ri
-
-        default_vmax = ri_base / (1 - config['GAMMA'])
+        ri_max = jnp.max(ri)
+        default_vmax = ri_max / (1 - config['GAMMA'])
         v_max = config.get('V_MAX', default_vmax)
 
         if config.get('VMAX_INTERPOLATE_LINEAR', False):
@@ -111,7 +101,7 @@ def make_train(config):
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']
         t = lstd_state['t']
-        α = alpha_fn_lstd(lstd_state['t']) 
+        α = alpha_fn_LSTD(lstd_state['t'])
         reward_scale = 1.0 / jnp.sqrt(N)
         rho = transitions.intrinsic_reward / reward_scale
         
@@ -138,7 +128,7 @@ def make_train(config):
         rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config, k)
         _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config, k)
             
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
@@ -188,7 +178,7 @@ def make_train(config):
                 train_state, rnd_state, env_state, last_obs, rng = env_scan_state
 
                 rng, _rng = jax.random.split(rng)
-                pi, value = network.apply(train_state.params, last_obs)
+                pi, value, _ = network.apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
@@ -200,9 +190,8 @@ def make_train(config):
                 
                 intrinsic_reward = jnp.zeros_like(reward)
                 i_val = jnp.zeros_like(reward)
-                i_value_slow = jnp.zeros_like(reward)
                 transition = Transition(
-                    done, action, value, i_val, i_value_slow, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                    done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition
@@ -213,26 +202,34 @@ def make_train(config):
             )
             
             # Intrinsic reward 
+            # zero out final features for S_{T+1}
+            # the final transition is from S_{T-1} to S_T
             next_phi = batch_get_features(traj_batch.next_obs)
             phi = batch_get_features(traj_batch.obs)
-            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, alpha_fn(sigma_state['t']))
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phi, alpha_fn_cov(sigma_state['t']))
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
-            rho = int_rew_from_features(phi)
-            traj_batch = traj_batch._replace(intrinsic_reward=rho)
+
+            rho = jax.lax.cond(config['REW_BASED_ON']=='phi', 
+                lambda x: int_rew_from_features(phi),
+                lambda x: int_rew_from_features(next_phi),
+                operand=None
+            )
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)     
 
             # Intrinsic Critic
             traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces)
 
             # Intrinsic value (optimistic)
-            vi = interpolate_lstd_val(lstd_state, rho, phi=phi)
-            vi_baseline = phi @ lstd_state["w"]
-            traj_batch = traj_batch._replace(i_value_fast=vi, i_value_slow=vi_baseline)
+
+            # Intrinsic value (optimistic)
+            vi = interpolate_lstd_val(lstd_state, int_rew_from_features(phi), phi=phi)
+            traj_batch = traj_batch._replace(i_value=vi)
 
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
-            last_i_val_fast = interpolate_lstd_val(lstd_state, rho[-1], phi=next_phi[-1])
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
+            last_i_val = interpolate_lstd_val(lstd_state, rho[-1], phi=phi[-1])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
 
@@ -315,8 +312,8 @@ def make_train(config):
             else:
                 # Use batch means as fast proxies
                 metric.update({
-                    "vi_pred": traj_batch.i_value_slow.mean(),
-                    "v_i_pred_opt": traj_batch.i_value_fast.mean(),
+                    "vi_pred": traj_batch.i_value.mean(),
+                    "v_i_pred_opt": traj_batch.i_value.mean(),
                     "v_e_pred": traj_batch.value.mean()
                 })
 

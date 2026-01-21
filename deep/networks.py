@@ -206,6 +206,7 @@ class ActorCritic2Head(nn.Module):
                 jnp.linalg.norm(features, axis=-1, keepdims=True) + 1e-8
             )
         return features
+        
 
     def value(self, x):
         return self.v_head(self.get_value_features(x)).squeeze(-1)

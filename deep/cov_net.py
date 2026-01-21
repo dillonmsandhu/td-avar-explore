@@ -25,8 +25,12 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
-
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    
+    alpha_fn_cov = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
+    if config.get('DECAY_BONUS', True):
+        beta_fn = lambda n: config['BONUS_SCALE'] * (1 - (n / config['TOTAL_TIMESTEPS']))
+    else:
+        beta_fn = lambda n: config['BONUS_SCALE']
 
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
@@ -44,7 +48,7 @@ def make_train(config):
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
-        rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+        rho = beta_fn(N) * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
         return rho
     
     def train(rng):
@@ -59,6 +63,7 @@ def make_train(config):
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
         initial_sigma_state = {
+            'S_long': jnp.eye(k) * config['GRAM_REG'],
             'S': jnp.eye(k) * config['GRAM_REG'],
             'N': 0, # number of samples
             't': 1, # number of updates
@@ -136,13 +141,14 @@ def make_train(config):
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
             phis = batch_get_features(traj_batch.obs)
-            sigma_state = helpers.sigma_update( sigma_state, traj_batch, phis, α=GET_ALPHA_FN(sigma_state['t']),)
+            sigma_state = helpers.sigma_update(sigma_state, traj_batch, phis, α=alpha_fn_cov(sigma_state['t']),)
+            
             # COMPUTE intrinsic reward:            
             int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'])
             next_phi = batch_get_features(traj_batch.next_obs)
+            rho = int_rew_from_features(batch_get_features(traj_batch.obs))
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)     
             
-            rho = int_rew_from_features(next_phi)
-            traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Advantage
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
             gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])

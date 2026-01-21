@@ -301,7 +301,7 @@ def main():
                        help=f'saves to {SAVE_DIR}/args.run_suffix/' )
     parser.add_argument('--n-seeds', type=int, default=1)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
     args = parser.parse_args()
     
     if args.base_config == 'mc':

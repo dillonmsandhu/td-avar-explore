@@ -50,14 +50,16 @@ def sigma_update(   sigma_state: Dict,
                     α: float,
                     
     ):
-    S, t = sigma_state['S'], sigma_state['t']
+    S_long, S, t = sigma_state['S_long'], sigma_state['S'], sigma_state['t']
     batch_axes = tuple(range(transitions.done.ndim))
     N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
     S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
-    S_b = S_update.mean(axis=batch_axes) # Batch average
+    S_b = S_update.sum(axis=batch_axes) # Batch average
     S_b = 0.5 * (S_b + S_b.T) # symmetrize
+    S_long += S_b
+    S_b /= N
     S = (1-α) * S + α * S_b # EMA
-    return {'S': S, 'N': N, 't': t+1} # new sigma_state
+    return {'S_long': S_long, 'S': S, 'N': N, 't': t+1} # new sigma_state
 
 # def _get_all_traces(traj_batch, features, γ, λ):
 #     """Get all traces for a batch of trajectories.
@@ -81,21 +83,38 @@ def sigma_update(   sigma_state: Dict,
 #     return traces.transpose(1,0,2)
 
 def _get_all_traces(traj_batch, features, γ, λ):
-    """Get all traces for a batch of trajectories.
-    Returns: L x B x k, where B is batch size, L is trajectory length, and k is number of features.
-    """
-    def get_lambda_traces(phis_s, traj_batch, γ, λ):
-        def _step_trace(trace, inputs):
+    def get_lambda_traces(phis_s, dones, γ, λ):
+        def _step_trace(trace_prev, inputs):
             phi, done = inputs
-            trace = trace * (1-done) * γ * λ + phi
-            return trace, trace
-        # end step_trace
-        init_traces = jnp.zeros_like(phis_s[-1])  # (k,)
-        _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, traj_batch.done))
-        return traces # L x k
-    # end get_lambda_traces
-    traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(features, traj_batch, γ, λ)
-    return traces.transpose(1,0,2) # L x B x k (vmap puts batch axis (B) first)
+            trace_current = trace_prev * γ * λ + phi
+            trace_next = trace_current * (1.0 - done)
+            return trace_next, trace_current
+
+        init_traces = jnp.zeros_like(phis_s[0])
+        _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, dones))
+        return traces
+
+    traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(
+        features, traj_batch.done, γ, λ
+    )
+    return traces.transpose(1, 0, 2)
+
+# def _get_all_traces(traj_batch, features, γ, λ):
+#     """Get all traces for a batch of trajectories.
+#     Returns: L x B x k, where B is batch size, L is trajectory length, and k is number of features.
+#     """
+#     def get_lambda_traces(phis_s, traj_batch, γ, λ):
+#         def _step_trace(trace, inputs):
+#             phi, done = inputs
+#             trace = trace * (1-done) * γ * λ + phi
+#             return trace, trace
+#         # end step_trace
+#         init_traces = jnp.zeros_like(phis_s[-1])  # (k,)
+#         _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, traj_batch.done))
+#         return traces # L x k
+#     # end get_lambda_traces
+#     traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(features, traj_batch, γ, λ)
+#     return traces.transpose(1,0,2) # L x B x k (vmap puts batch axis (B) first)
 
 def _get_all_traces_continuing(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
@@ -384,3 +403,30 @@ def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i
         unroll=16,
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+def make_beta_schedule(config):
+    """
+    Returns a function beta_fn(t) that:
+    1. Holds BONUS_SCALE constant until 'decay_start_pct' of training is done.
+    2. Linearly decays to 0.0 over the remaining updates.
+    """
+    bonus_scale = config["BONUS_SCALE"]
+    
+    # Configurable: When to start the decay?
+    # 0.8 means: Explore with full curiosity for 80% of time, then mature in the last 20%.
+    decay_start_pct = config.get("BETA_DECAY_START_PCT", 0.9) 
+
+    def beta_fn(n):
+        # Calculate current progress (0.0 -> 1.0)
+        progress = n / config['TOTAL_TIMESTEPS']
+        
+        # Calculate the decay factor.
+        # Logic: 
+        # - If progress < start_pct, the fraction is > 1.0, so it clips to 1.0.
+        # - If progress == 1.0, the numerator is 0.0, so it becomes 0.0.
+        decay_phase_len = 1.0 - decay_start_pct
+        multiplier = jnp.clip((1.0 - progress) / decay_phase_len, 0.0, 1.0)
+        
+        return bonus_scale * multiplier
+
+    return beta_fn

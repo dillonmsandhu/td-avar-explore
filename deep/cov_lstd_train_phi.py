@@ -295,46 +295,69 @@ def make_train(config):
             extrinsic_target = targets[0]
 
             # --- UPDATE NETWORKS ---        
+            # UPDATE NETWORK
             def _update_epoch(update_state, unused):
-                
-                def _update_minbatch(scan_state, batch_info):
-                    train_state, rnd_state = scan_state
-                    # Unpack: batch_info contains PPO data, Trace Targets, AND Old Features
-                    traj_batch_mini, advantages_mini, targets_mini, target_traces_mini, old_features_mini = batch_info
-                    
-                    # 1. Update PPO Agent
-                    grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    (total_loss, _), grads = grad_fn(
-                        train_state.params, network, traj_batch_mini, advantages_mini, targets_mini, config
+                def _update_minbatch(train_state, batch_info):
+                    traj_batch, advantages, targets = batch_info
+
+                    def _loss_fn(params, traj_batch, gae, targets):
+                        targets, i_targets = targets
+                        # RERUN NETWORK
+                        pi, value, i_val = network.apply(params, traj_batch.obs)
+                        log_prob = pi.log_prob(traj_batch.action)
+                        
+                        # Extrinsic VALUE LOSS
+                        value_pred_clipped = traj_batch.value + (
+                            value - traj_batch.value
+                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+                        value_losses = jnp.square(value - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+                        
+                        # Intrinsic VALUE LOSS
+                        value_pred_clipped = traj_batch.i_value + (
+                            i_val - traj_batch.i_value
+                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+                        value_losses = jnp.square(i_val - i_targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - i_targets)
+                        i_value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+
+                        # CALCULATE ACTOR LOSS
+                        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+                        loss_actor1 = ratio * gae
+                        loss_actor2 = (
+                            jnp.clip(
+                                ratio,
+                                1.0 - config["CLIP_EPS"],
+                                1.0 + config["CLIP_EPS"],
+                            )
+                            * gae
+                        )
+                        loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+                        loss_actor = loss_actor.mean()
+                        entropy = pi.entropy().mean()
+
+                        total_loss = (
+                            loss_actor
+                            + config["VF_COEF"] * value_loss
+                            + config["VF_COEF"] * i_value_loss
+                            - config["ENT_COEF"] * entropy
+                        )
+                        return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+
+                    # --- UPDATE PPO ---
+                    grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    (total_loss, (i_value_loss, value_loss, loss_actor, entropy)), grads = grad_fn(
+                        train_state.params, traj_batch, advantages, targets
                     )
                     train_state = train_state.apply_gradients(grads=grads)
                     
-                    # 2. Update RND Features (Feature Learning) with CLIPPING
-                    rnd_grad_fn = jax.value_and_grad(rnd_feature_loss)
-                    rnd_loss, rnd_grads = rnd_grad_fn(
-                        rnd_state.params, 
-                        rnd_net, 
-                        traj_batch_mini.obs, 
-                        target_traces_mini,
-                        old_features_mini # <--- old features for clipping
-                    )
-                    rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
-
-                    return (train_state, rnd_state), (total_loss, rnd_loss)
-                # end _update_minibatch
-                
-                train_state, rnd_state, traj_batch, advantages, targets, target_traces, rng = update_state
-                rng, _rng = jax.random.split(rng)
-                
-                # Bundle the 'old_features' (traj_batch.phi_train) into the batch
-                batch = (traj_batch, advantages, targets, target_traces, traj_batch.phi_train)
-                minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                
-                (train_state, rnd_state), (ppo_loss, rnd_feat_loss) = jax.lax.scan(_update_minbatch, (train_state, rnd_state), minibatches)
-                
-                update_state = (train_state, rnd_state, traj_batch, advantages, targets, target_traces, rng)
-                return update_state, (ppo_loss, rnd_feat_loss)
-            # end _update_epoch
+                    return train_state, (total_loss, i_value_loss, value_loss, loss_actor, entropy)
 
             initial_update_state = (train_state, rnd_state, traj_batch, advantages, extrinsic_target, target_traces, rng)
             update_state, (ppo_losses, rnd_losses) = jax.lax.scan(

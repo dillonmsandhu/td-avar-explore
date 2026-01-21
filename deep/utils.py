@@ -147,6 +147,8 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         'v_i_pred_opt': 'v_i_pred_opt',
         'v_e_pred': 'v_e_pred',
         "mean_rew": "mean_rew",
+        "w_unreg_norm": "w_unreg_norm",
+        "w_norm": "w_norm",
     }
 
     for m_key, save_name in standard_plots.items():

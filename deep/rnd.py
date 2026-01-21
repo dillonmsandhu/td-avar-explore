@@ -315,7 +315,7 @@ def main():
     parser.add_argument('--run_suffix', type=str, default=run_timestamp,
                        help='saves to rnd/{args.run_suffix}' )
     parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
     args = parser.parse_args()
     
     if args.base_config == 'mc':
