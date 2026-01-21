@@ -1,5 +1,5 @@
 # root/networks.py
-from imports import *
+from core.imports import *
 import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
@@ -13,15 +13,20 @@ import math
 def initialize_rnd_network(rng, obs_shape, config, k=128):
     model = RND_Net(network_type=config["NETWORK_TYPE"], k=k, normalize = config['NORMALIZE_FEATURES'])
     rng, init_rng = jax.random.split(rng)
+    print('obs shape is ', obs_shape)
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
 
-def initialize_actor_critic(rng, obs_shape, action_dim, config, n_heads: int):
-
+def initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads: int):
+    # Detect if continuous
+    from gymnax.environments import spaces
+    is_continuous = isinstance(env.action_space(env_params), spaces.Box)
+    action_dim = env.action_space(env_params).shape[0] if is_continuous else env.action_space(env_params).n
+    
     if n_heads == 2:
-        model = ActorCritic2Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"])
+        model = ActorCritic2Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"], is_continuous=is_continuous)
     elif n_heads == 3:
-        model = ActorCritic3Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"])
+        model = ActorCritic3Head(action_dim=action_dim, network_type=config["NETWORK_TYPE"], is_continuous=is_continuous)
     else:
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
@@ -93,10 +98,10 @@ class CNNTorso(nn.Module):
         """
         x: (..., H, W, C)
         """
+        
         H, W = x.shape[-3], x.shape[-2]
-        assert H == W, "CNNTorso assumes square inputs"
-
-        num_downsamples = max(0, math.ceil(math.log2(H / 4)))
+        smaller_dim = min(H, W)
+        num_downsamples = max(0, math.ceil(math.log2(smaller_dim / 4)))
         channels = self.base_channels
 
         for i in range(num_downsamples):
@@ -179,6 +184,22 @@ class RND_Net(nn.Module):
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------
 # =====================================================
+class PolicyHead(nn.Module):
+    action_dim: int
+    is_continuous: bool = False
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.relu(x)
+        if not self.is_continuous:
+            # Discrete: Output Logits
+            logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(x)
+            return distrax.Categorical(logits=logits)
+        else:
+            # Continuous: Output Mean and Log Std
+            loc = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(x)
+            log_std = self.param("log_std", nn.initializers.zeros, (self.action_dim,))
+            return distrax.MultivariateNormalDiag(loc=loc, scale_diag=jnp.exp(log_std))
 
 class ActorCritic2Head(nn.Module):
     """
@@ -186,18 +207,18 @@ class ActorCritic2Head(nn.Module):
     """
     action_dim: int
     network_type: str
+    is_continuous: bool = False
     normalize_value_features: bool = False
-
+    
     def setup(self):
         self.actor_torso = make_torso(self.network_type, out_dim=64)
         self.critic_torso = make_torso(self.network_type, out_dim=64)
         
-        self.pi_head = nn.Sequential([nn.relu, nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))])
+        self.pi_head = PolicyHead(action_dim=self.action_dim, is_continuous=self.is_continuous)
         self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
 
     def policy(self, x):
-        logits = self.pi_head(self.actor_torso(x))
-        return distrax.Categorical(logits=logits)
+            return self.pi_head(self.actor_torso(x))
 
     def get_value_features(self, x):
         features = self.critic_torso(x)
@@ -224,6 +245,7 @@ class ActorCritic3Head(nn.Module):
     """
     action_dim: int
     network_type: str
+    is_continuous: bool = False
     normalize_value_features: bool = False
 
     def setup(self):
@@ -231,15 +253,12 @@ class ActorCritic3Head(nn.Module):
         self.critic_ext = make_torso(self.network_type, out_dim=64)
         self.critic_int = make_torso(self.network_type, out_dim=64)
         
-        self.pi_head = nn.Sequential([nn.relu, nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))])
+        self.pi_head = PolicyHead(action_dim=self.action_dim, is_continuous=self.is_continuous)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
         self.v_int_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
     # ---------------- Policy ----------------
-
     def policy(self, x):
-        logits = self.pi_head(self.actor_torso(x))
-        return distrax.Categorical(logits=logits)
-
+        return self.pi_head(self.actor_torso(x))
     # ---------------- Value -----------------
 
     def get_value_features(self, x):

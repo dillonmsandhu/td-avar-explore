@@ -5,6 +5,18 @@ from gymnax.environments import spaces
 from gymnax.wrappers.purerl import GymnaxWrapper
 from typing import Any
 
+class ClipAction(GymnaxWrapper):
+    def __init__(self, env, low=-1.0, high=1.0):
+        super().__init__(env)
+        self.low = low
+        self.high = high
+
+    def step(self, key, state, action, params=None):
+        """TODO: In theory the below line should be the way to do this."""
+        # action = jnp.clip(action, self.env.action_space.low, self.env.action_space.high)
+        action = jnp.clip(action, self.low, self.high)
+        return self._env.step(key, state, action, params)
+
 # --- Running Mean/Std Utilities ---
 @struct.dataclass
 class RunningMeanStdState:

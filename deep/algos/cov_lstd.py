@@ -1,8 +1,8 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
 # Consolidated version: Handles both standard training and ExactValue logging via config.
-from imports import *
-import helpers
-import networks
+from core.imports import *
+import core.helpers as helpers
+import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
 SAVE_DIR = 'cov_lstd'
 
@@ -28,10 +28,9 @@ def make_train(config):
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
 
     env, env_params = helpers.make_env(config)
-    n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
 
-    alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
+    alpha_fn = helpers.get_alpha_schedule(config)
 
     if calc_true_values:
         evaluator = DeepSeaExactValue(
@@ -54,10 +53,9 @@ def make_train(config):
         gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
     if config.get('EPISODIC_LSTD_A', False):
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
-    if config.get('EPISODIC_TRACE', False):
-        trace_fn = helpers._get_all_traces
-    
+
     k = config.get('RND_FEATURES', 128)
+
 
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
@@ -125,8 +123,7 @@ def make_train(config):
         target_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config, k)
         _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config, k)
-            
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
@@ -318,67 +315,7 @@ def make_train(config):
         return {"runner_state": runner_state, "metrics": metrics}
 
     return train
-    
-def main():
-    import warnings; warnings.simplefilter('ignore')
-    from utils import parse_config_override, evaluate
-    import datetime
-    import argparse
-    import configs
-    
-    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
-    parser.add_argument('--config', type=str, default=None,
-                       help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
-    parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
-    parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
-    parser.add_argument('--env_ids', nargs='+', default=[], 
-                       help='Optional list of envs to run sequentially. If provided, overrides the config ENV_NAME.')
-
-    args = parser.parse_args()
-    
-    # 1. Load Base Config
-    if args.base_config == 'mc':
-        config = configs.mc_config.copy()
-        # raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea') 
-        # (Commented out assertion just in case you want to try others)
-    elif args.base_config == 'ds':
-        config = configs.ds_config.copy()
-    elif args.base_config  == 'min':
-        config = configs.min_config.copy()
-
-    # 2. Apply Overrides (Global overrides applied to all envs)
-    config_override = parse_config_override(args.config)
-    config.update(config_override)
-
-    # 3. Determine List of Environments to Run
-    # If --env_ids is passed, use that list. Otherwise use the single one from config.
-    env_list = args.env_ids if args.env_ids else [config['ENV_NAME']]
-
-    # 4. Sequential Execution Loop
-    for i, env_name in enumerate(env_list):
-        print(f"\n{'='*50}")
-        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
-        print(f"{'='*50}")
-        
-        # Create a fresh config copy for this environment
-        run_config = config.copy()
-        run_config['ENV_NAME'] = env_name
-        
-        # Generate RNG (fresh seed based on config to ensure reproducibility)
-        rng = jax.random.PRNGKey(run_config['SEED'])
-        
-        try:
-            evaluate(run_config, make_train, SAVE_DIR, args, rng)
-        except Exception as e:
-            print(f"!!! CRITICAL ERROR running {env_name} !!!")
-            print(e)
-            import traceback
-            traceback.print_exc()
-            print("Continuing to next environment...")
 
 if __name__ == '__main__':
-    main()
+    from core.utils import run_experiment_main
+    run_experiment_main(make_train, SAVE_DIR)

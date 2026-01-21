@@ -1,4 +1,4 @@
-from utils import *
+from core.utils import *
 from envs.sparse_mc import SparseMountainCar
 
 # PPO
@@ -466,7 +466,7 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
     

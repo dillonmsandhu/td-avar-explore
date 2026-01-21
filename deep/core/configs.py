@@ -21,7 +21,6 @@ ds_specific = {
     "NETWORK_TYPE": 'cnn',
     "CALC_TRUE_VALUES": True,
     "EPISODIC": False,
-
 }
 
 min_specific = {
@@ -75,9 +74,67 @@ shared = {
     "N_SEEDS": 4,
     "EPISODIC": False,
     "OPTIMISTIC_INIT": True,
-    "RND_FEATURES": 128
+    "RND_FEATURES": 128,
+    "NETWORK_TYPE": 'mlp',
+    "NORMALIZE_FEATURES": True,
+    "NORMALIZE_OBS": False,
+    "WARMUP": 200,
+    "ALPHA_SCHEDULE": 'inv_t'
 }
 
-mc_config = shared | mc_specific # | is the union op.
+visual = {
+    'NETWORK_TYPE': 'cnn',
+    "FOURROOMS_SIZE": 21
+}
+continuous = {
+    "LR": 1e-3,
+    "LR_END": 5e-4,
+}
+
+mc_config = shared | mc_specific # | is the union op. last dict's key takes precedence
 ds_config = shared | ds_specific
 min_config = shared | min_specific
+visual = shared | visual
+
+# CONFIG_REGISTRY = {
+#     # maps from config name to all envs that we can run that use that config.
+#     "shared": {"config_dict": shared, 
+#                "envs": [
+#                         "DiscountingChain-bsuite", 
+#                         "BernoulliBandit-misc", 
+#                         "GaussianBandit-misc",
+#                         "MetaMaze-misc", 
+#                         "CartPole-v1",
+#                         "Acrobot-v1", 
+#                         "UmbrellaChain-bsuite",
+#                         "Reacher-misc",
+#                         "PointRobot-misc",
+#                         "Swimmer-misc"]},
+#     "visual": {"config_dict": visual, 
+#                 "envs": [
+#                     "Pong-misc", 
+#                     "FourRooms-misc", 
+#                     "MNISTBandit-bsuite", 
+#                     "Catch-bsuite"]},
+#     "mc":     {"config_dict": mc_config, 
+#                 "envs": ["SparseMountainCar-v0"]},
+#     "ds":     {"config_dict": ds_config, 
+#                 "envs": ["DeepSea-bsuite"]},
+#     "min":    {"config_dict": min_config, 
+#                 "envs": 
+#                 ["SpaceInvaders-MinAtar", 
+#                 "Breakout-MinAtar", 
+#                 "Freeway-MinAtar", 
+#                 "Asterix-MinAtar"]}
+# }
+
+
+
+CONFIG_REGISTRY = {
+    # maps from config name to all envs that we can run that use that config.
+    "shared": {"config_dict": shared, 
+               "envs": ["CartPole-v1",
+                        "Swimmer-misc"]},
+    "mc":     {"config_dict": mc_config, 
+                "envs": ["SparseMountainCar-v0"]},
+}

@@ -1,6 +1,6 @@
-from utils import *
-import helpers
-import networks
+from core.utils import *
+import core.helpers as helpers
+import core.networks as networks
 
 DEFAULT_CONFIG = {
     # "ENV_NAME": "SparseMountainCar-v0",
@@ -315,7 +315,7 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
     

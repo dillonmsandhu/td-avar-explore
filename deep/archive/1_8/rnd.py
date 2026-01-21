@@ -7,8 +7,8 @@ import optax
 import gymnax
 from deep.envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper
 from gymnax.wrappers.purerl import FlattenObservationWrapper, LogWrapper
-from networks import Two_Head_ActorCritic, RND_Net
-from networks import ActorCritic
+from core.networks import Two_Head_ActorCritic, RND_Net
+from core.networks import ActorCritic
 from typing import NamedTuple, Any
 
 class Transition(NamedTuple):
@@ -342,7 +342,7 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
     

@@ -1,0 +1,113 @@
+# run_all.py
+from core.configs import CONFIG_REGISTRY
+import subprocess
+import datetime
+import argparse
+import datetime
+import argparse
+import os
+import jax.numpy as jnp
+import pandas as pd
+from core.utils import load_run_data
+from notebooks.mail import email_results_file
+
+def run_experiment():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--script", type=str, default="algos/cov_lstd.py")
+    parser.add_argument("--suffix", type=str, default=None)
+    args = parser.parse_args()
+
+    batch_id = args.suffix if args.suffix else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Determine result root based on script name (e.g., results/cov_lstd)
+    script_base = os.path.basename(args.script).replace(".py", "")
+    results_root = os.path.join("results", script_base)
+
+    print(f"🚀 Starting Batch Run: {batch_id}")
+    module_path = args.script.replace(".py", "").replace("/", ".")
+    
+    for config_name, details in CONFIG_REGISTRY.items():
+        envs = details["envs"]
+        print(f"\n# Running {config_name} group: {envs}")
+        
+        cmd = [
+            "python", "-m", module_path,
+            "--base-config", config_name,
+            "--run_suffix", batch_id,
+            "--env_ids"
+        ] + envs
+        
+        print(f"Executing: {' '.join(cmd)}")
+        subprocess.run(cmd)
+
+    # --- IMMEDIATE AGGREGATION ---
+    print("\n" + "="*50)
+    print(f"📊 GENERATING SUMMARY FOR BATCH: {batch_id}")
+    print("="*50)
+    
+    # Importing here to ensure the logic above finished
+    df = summarize_batch(batch_id, results_root)
+    
+    if df is not None and not df.empty:
+        # Sort for a clean table
+        df = df.sort_values(["Group", "Mean_Ret"], ascending=[True, False])
+        
+        print(df.to_string(index=False))
+        
+        # Save results to the same batch folder
+        summary_path = os.path.join(results_root, batch_id, "batch_summary.csv")
+        df.to_csv(summary_path, index=False)
+        print(f"\nSaved summary table to: {summary_path}")
+        try:
+            email_results_file(summary_path)
+        except:
+            print('failed to email')
+    else:
+        print("No data found to aggregate.")
+
+if __name__ == "__main__":
+    # Ensure summarize_batch is accessible
+    from run_all import summarize_batch # or just define it above run_experiment
+    run_experiment()
+
+def summarize_batch(batch_id, results_root):
+    all_data = []
+    batch_path = os.path.join(results_root, batch_id)
+    
+    if not os.path.exists(batch_path):
+        return None
+
+    envs_found = [d for d in os.listdir(batch_path) if os.path.isdir(os.path.join(batch_path, d))]
+
+    for env_name in envs_found:
+        try:
+            # We assume results_root is the parent of the batch_id folder
+            config, out = load_run_data(
+                run_folder_name=batch_id,
+                env_name=env_name,
+                results_base_path=results_root,
+            )
+            
+            # Metric: Average return of last 20 evaluation points across seeds
+            # Adjust key name if your out.pkl uses 'metrics' nesting
+            rets = out.get("returned_episode_returns", out.get("metrics", {}).get("returned_episode_returns"))
+            
+            if rets is not None:
+                final_performance = rets[:, -20:].mean()
+                std_performance = rets[:, -20:].mean(-1).std()
+            else:
+                final_performance, std_performance = 0, 0
+
+            # Map back to Config Group for better readability
+            group = next((g for g, d in CONFIG_REGISTRY.items() if env_name in d["envs"]), "other")
+
+            all_data.append({
+                "Group": group,
+                "Environment": env_name,
+                "Mean_Ret": round(float(final_performance), 2),
+                "Std_Ret": round(float(std_performance), 2),
+                "Steps": config.get("TOTAL_TIMESTEPS", "n/a")
+            })
+        except Exception as e:
+            print(f"Could not process {env_name}: {e}")
+
+    return pd.DataFrame(all_data)

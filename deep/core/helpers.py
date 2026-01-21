@@ -1,29 +1,66 @@
+# helpers.py
 # This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
-from imports import *
+from core.imports import *
 from envs.sparse_mc import SparseMountainCar
+from envs.fourrooms_custom import FourRooms
 import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction
+from gymnax.environments import spaces
+
+def load_config(args):
+    import core.configs as configs
+    from core.utils import parse_config_override
+    # 1. Look up registry by the --base-config flag
+    registry_item = configs.CONFIG_REGISTRY.get(args.base_config)
+    
+    if registry_item:
+        config = registry_item["config_dict"].copy()
+    else:
+        # Fallback to shared if the name isn't in the registry
+        config = configs.shared.copy()
+
+    # 2. Apply command-line JSON overrides
+    if args.config:
+        config_override = parse_config_override(args.config)
+        config.update(config_override)
+        
+    return config
 
 def make_env(config):
-    if config['ENV_NAME'] == "SparseMountainCar-v0":
+    if config['ENV_NAME'] == "FourRooms-misc" and config['NETWORK_TYPE'] == 'cnn':
+        N = config['FOURROOMS_SIZE']
+        env = FourRooms(N=N, use_visual_obs=True)
+        env_params = env.default_params
+    elif config['ENV_NAME'] == "SparseMountainCar-v0":
         env = SparseMountainCar()
         env_params = env.default_params
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
         env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
     else:
         env, env_params = gymnax.make(config["ENV_NAME"])
-    env = LogWrapper(env)      # Log REAL returns (possibly sparse)
+        print('Env:', config['ENV_NAME'])
+        print('Network:', config['NETWORK_TYPE'])
+        print('Default Obs Shape:', env.observation_space(env_params).shape)
+    
+    env = LogWrapper(env)
+    
+    if isinstance(env.action_space(env_params), spaces.Box):
+        env = ClipAction(env) # Ensures sampled actions are within [low, high]
+    
     if config["NETWORK_TYPE"] == "mlp":
         env = FlattenObservationWrapper(env)
     if config["NETWORK_TYPE"] == "cnn":
         if len(env.observation_space(env_params).shape) < 3:
-            env = AddChannelWrapper(env)
+            env = AddChannelWrapper(env) # add an empty channel to the end if 2d input
     if config["NORMALIZE_REWARDS"]:
         env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) 
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
+    
+    print('Obs Shape:', env.observation_space(env_params).shape)
+    print('Action Shape:', env.action_space(env_params).shape)
     return env, env_params
 
 def cross_cov(traces, current_features, next_features, done, γ):
@@ -384,3 +421,70 @@ def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i
         unroll=16,
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
+    targets, i_targets = targets
+    # RERUN NETWORK
+    pi, value, i_val = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    
+    # Extrinsic VALUE LOSS
+    value_pred_clipped = traj_batch.value + (
+        value - traj_batch.value
+    ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+    value_losses = jnp.square(value - targets)
+    value_losses_clipped = jnp.square(value_pred_clipped - targets)
+    value_loss = (
+        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+    )
+    
+    # Intrinsic VALUE LOSS
+    value_pred_clipped = traj_batch.i_value + (
+        i_val - traj_batch.i_value
+    ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+    value_losses = jnp.square(i_val - i_targets)
+    value_losses_clipped = jnp.square(value_pred_clipped - i_targets)
+    i_value_loss = (
+        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+    )
+
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = (
+        loss_actor
+        + config["VF_COEF"] * value_loss
+        + config["VF_COEF"] * i_value_loss
+        - config["ENT_COEF"] * entropy
+    )
+    return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+
+def get_alpha_schedule(config):
+    """Returns a function that calculates alpha based on the update step t."""
+    min_lr = config.get('MIN_COV_LR', 0.1)
+    a_schedule = config.get('ALPHA_SCHEDULE', None)
+    assert a_schedule is not None
+    
+    if a_schedule == 'inv_t':
+        def alpha_fn(t):
+            return jnp.maximum(min_lr, 1.0 / (t + 1e-8))
+    
+    elif a_schedule == 'constant':
+        def alpha_fn(t):
+            return jnp.maximum(min_lr, 1.0 / (t + 1e-8))
+    else:
+        assert f'a_schedule={a_schedule} not recognized.'
+    return alpha_fn

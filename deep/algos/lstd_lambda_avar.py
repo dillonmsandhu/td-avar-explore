@@ -1,7 +1,7 @@
-from utils import *
-from helpers import _calculate_gae, _get_all_traces, Explore_Transition, _loss_fn
-import helpers
-import networks
+from core.utils import *
+from core.helpers import _calculate_gae, _get_all_traces, Explore_Transition, _loss_fn
+import core.helpers as helpers
+import core.networks as networks
 SAVE_DIR = 'lstd_lambda_avar'
 
 def compute_bonus(features, lstd_state, config=None):
@@ -284,10 +284,10 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    from configs import ds_config, mc_config
+    from core.configs import ds_config, mc_config
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')

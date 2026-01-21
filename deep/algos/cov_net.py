@@ -1,7 +1,7 @@
 # Covariance-Based Intrinsic Reward, propegated by an intrinsic value net
-from imports import *
-import helpers
-import networks
+from core.imports import *
+import core.helpers as helpers
+import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
 SAVE_DIR = 'cov_net'
 
@@ -23,10 +23,9 @@ def make_train(config):
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     env, env_params = helpers.make_env(config)
-    n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
 
-    GET_ALPHA_FN = lambda t: jnp.maximum(1/10, 1/t)
+    GET_ALPHA_FN = helpers.get_alpha_schedule(config)
 
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
@@ -54,7 +53,7 @@ def make_train(config):
         _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config)
             
         # initialize value and policy network
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=3)
         dummy_obs = jnp.zeros(env.observation_space(env_params).shape)
         dummy_phi = rnd_net.apply(target_params, dummy_obs)
         k = dummy_phi.shape[-1]
@@ -80,7 +79,6 @@ def make_train(config):
             rng, _rng = jax.random.split(rng)
             rng_action = jax.random.split(_rng, config["NUM_ENVS"])
             action = jax.vmap(env.action_space(env_params).sample)(rng_action)
-            
             # Step env (wrappers will update their internal mean/std stats automatically)
             rng, _rng = jax.random.split(rng)
             rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -152,61 +150,13 @@ def make_train(config):
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
-
-                    def _loss_fn(params, traj_batch, gae, targets):
-                        targets, i_targets = targets
-                        # RERUN NETWORK
-                        pi, value, i_val = network.apply(params, traj_batch.obs)
-                        log_prob = pi.log_prob(traj_batch.action)
-                        
-                        # Extrinsic VALUE LOSS
-                        value_pred_clipped = traj_batch.value + (
-                            value - traj_batch.value
-                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
-                        value_losses = jnp.square(value - targets)
-                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
-                        value_loss = (
-                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-                        )
-                        
-                        # Intrinsic VALUE LOSS
-                        value_pred_clipped = traj_batch.i_value + (
-                            i_val - traj_batch.i_value
-                        ).clip(-config["VF_CLIP"], config["VF_CLIP"])
-                        value_losses = jnp.square(i_val - i_targets)
-                        value_losses_clipped = jnp.square(value_pred_clipped - i_targets)
-                        i_value_loss = (
-                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-                        )
-
-                        # CALCULATE ACTOR LOSS
-                        ratio = jnp.exp(log_prob - traj_batch.log_prob)
-                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-                        loss_actor1 = ratio * gae
-                        loss_actor2 = (
-                            jnp.clip(
-                                ratio,
-                                1.0 - config["CLIP_EPS"],
-                                1.0 + config["CLIP_EPS"],
-                            )
-                            * gae
-                        )
-                        loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
-                        loss_actor = loss_actor.mean()
-                        entropy = pi.entropy().mean()
-
-                        total_loss = (
-                            loss_actor
-                            + config["VF_COEF"] * value_loss
-                            + config["VF_COEF"] * i_value_loss
-                            - config["ENT_COEF"] * entropy
-                        )
-                        return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
-
+                    
+                    
                     # --- UPDATE PPO ---
-                    grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    # def _loss_fn_intrisic_v(params, network, traj_batch, gae, targets, config):
+                    grad_fn = jax.value_and_grad(helpers._loss_fn_intrinsic_v, has_aux=True)
                     (total_loss, (i_value_loss, value_loss, loss_actor, entropy)), grads = grad_fn(
-                        train_state.params, traj_batch, advantages, targets
+                        train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
                     
@@ -279,68 +229,7 @@ def make_train(config):
         return {"runner_state": runner_state, "metrics": metrics}
 
     return train
-    
-def main():
-    import warnings; warnings.simplefilter('ignore')
-    from utils import evaluate, parse_config_override
-    import datetime
-    import argparse
-    import configs
-    
-    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
-    parser.add_argument('--config', type=str, default=None,
-                       help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
-    parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help=f'saves to {SAVE_DIR}/args.run_suffix/' )
-    parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds', 'min'])
-    # NEW: Argument to take a list of environments
-    parser.add_argument('--env_ids', nargs='+', default=[], 
-                       help='Optional list of envs to run sequentially. If provided, overrides the config ENV_NAME.')
-
-    args = parser.parse_args()
-    
-    # 1. Load Base Config
-    if args.base_config == 'mc':
-        config = configs.mc_config.copy()
-        # raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea') 
-        # (Commented out assertion just in case you want to try others)
-    elif args.base_config == 'ds':
-        config = configs.ds_config.copy()
-    elif args.base_config  == 'min':
-        config = configs.min_config.copy()
-
-    # 2. Apply Overrides (Global overrides applied to all envs)
-    config_override = parse_config_override(args.config)
-    config.update(config_override)
-
-    # 3. Determine List of Environments to Run
-    # If --env_ids is passed, use that list. Otherwise use the single one from config.
-    env_list = args.env_ids if args.env_ids else [config['ENV_NAME']]
-
-    # 4. Sequential Execution Loop
-    for i, env_name in enumerate(env_list):
-        print(f"\n{'='*50}")
-        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
-        print(f"{'='*50}")
-        
-        # Create a fresh config copy for this environment
-        run_config = config.copy()
-        run_config['ENV_NAME'] = env_name
-        
-        # Generate RNG (fresh seed based on config to ensure reproducibility)
-        rng = jax.random.PRNGKey(run_config['SEED'])
-        
-        try:
-            evaluate(run_config, make_train, SAVE_DIR, args, rng)
-        except Exception as e:
-            print(f"!!! CRITICAL ERROR running {env_name} !!!")
-            print(e)
-            import traceback
-            traceback.print_exc()
-            print("Continuing to next environment...")
 
 if __name__ == '__main__':
-    main()
+    from core.utils import run_experiment_main
+    run_experiment_main(make_train, SAVE_DIR)

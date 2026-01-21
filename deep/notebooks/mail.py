@@ -2,6 +2,60 @@ import subprocess
 import os
 import base64
 
+
+import subprocess
+import os
+import base64
+
+def email_results_file(filename, recipient='ds541@cs.duke.edu'):
+    if not os.path.exists(filename):
+        print(f"❌ File {filename} not found!")
+        return False
+    
+    file_size = os.path.getsize(filename) / 1024
+    base_name = os.path.basename(filename)
+    
+    try:
+        with open(filename, 'rb') as f:
+            data = f.read()
+        b64_data = base64.b64encode(data).decode()
+        b64_formatted = '\n'.join([b64_data[i:i+76] for i in range(0, len(b64_data), 76)])
+        
+        boundary = "batch_results_boundary"
+        subject = f"Experiment Results: {base_name}"
+        
+        # Determine Content-Type
+        content_type = "text/csv" if filename.endswith('.csv') else "application/pdf"
+
+        email_content = f"""To: {recipient}
+From: {recipient}
+Subject: {subject}
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="{boundary}"
+
+--{boundary}
+Content-Type: text/plain; charset=UTF-8
+
+Your batch run is complete.
+File: {base_name}
+Size: {file_size:.1f} KB
+
+--{boundary}
+Content-Type: {content_type}
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="{base_name}"
+
+{b64_formatted}
+--{boundary}--
+"""
+        cmd = ['/sbin/sendmail', recipient]
+        subprocess.run(cmd, input=email_content, text=True, capture_output=True)
+        print(f"📧 Results emailed to {recipient}")
+        return True
+    except Exception as e:
+        print(f"❌ Email failed: {e}")
+        return False
+
 def email_pdf(pdf_filename='figures/is-ppo-training.pdf', recipient='ds541@cs.duke.edu'):
     """
     Simple function to email PDF using sendmail with proper MIME encoding

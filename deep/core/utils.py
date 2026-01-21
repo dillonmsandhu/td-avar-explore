@@ -4,7 +4,59 @@ import yaml
 import json
 import cloudpickle
 import matplotlib.pyplot as plt
-from networks import *
+from core.networks import *
+
+
+def run_experiment_main(make_train, SAVE_DIR):
+    import argparse
+    import datetime
+    import traceback
+    import core.helpers as helpers
+    import core.configs as configs
+    # import warnings; warnings.simplefilter('ignore')
+    
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default=None)
+    parser.add_argument('--run_suffix', type=str, default=run_timestamp)
+    parser.add_argument('--n-seeds', type=int, default=0)
+    parser.add_argument('--save-checkpoint', action='store_true')
+    parser.add_argument('--base-config', type=str, default='shared', 
+                        choices=['shared','mc', 'ds', 'min', 'visual'])
+    parser.add_argument('--env_ids', nargs='+', default=[])
+
+    args = parser.parse_args()
+    config = helpers.load_config(args)
+
+    # Priority: CLI env_ids > Registry Defaults > Config ENV_NAME
+    if args.env_ids:
+        env_list = args.env_ids
+    else:
+        registry_item = configs.CONFIG_REGISTRY.get(args.base_config, {})
+        env_list = registry_item.get("envs", [config.get('ENV_NAME')])
+
+    for i, env_name in enumerate(env_list):
+        print(f"\n{'='*50}")
+        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
+        print(f"Network: {config.get('NETWORK_TYPE')}")
+        print(f"{'='*50}")
+        
+        run_config = config.copy()
+        run_config['ENV_NAME'] = env_name
+        
+        # Override seeds if passed via CLI
+        if args.n_seeds > 0:
+            run_config['N_SEEDS'] = args.n_seeds
+            
+        rng = jax.random.PRNGKey(run_config['SEED'])
+        
+        try:
+            evaluate(run_config, make_train, SAVE_DIR, args, rng)
+        except Exception as e:
+            print(f"!!! CRITICAL ERROR running {env_name} !!!")
+            traceback.print_exc()
+            print("Continuing to next environment...")
+
 
 def parse_config_override(config_str):
     """Parse config override from command line argument."""
@@ -147,6 +199,7 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         'v_i_pred_opt': 'v_i_pred_opt',
         'v_e_pred': 'v_e_pred',
         "mean_rew": "mean_rew",
+        "raw_intrinsic_rew_mean": "raw_intrinsic_rew_mean"
     }
 
     for m_key, save_name in standard_plots.items():

@@ -1,34 +1,10 @@
 # RND: RND intrinsic reward propagated by a value net.
-from utils import * 
-import helpers
-import networks
+from core.utils import * 
+import core.helpers as helpers
+import core.networks as networks
 import flax
-DEFAULT_CONFIG = {
-    "ENV_NAME": "SparseMountainCar-v0",
-    # "ENV_NAME": "DeepSea-bsuite",
-    "LR": 5e-4,
-    "LR_END": 5e-4,
-    "NUM_ENVS": 32,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 120_000,
-    "NUM_EPOCHS": 4,
-    "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
-    "GAE_LAMBDA": 0.6,
-    "CLIP_EPS": 0.2,
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.003,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "NORMALIZE_REWARDS": False,
-    "NORMALIZE_OBS": False,
-    "NORMALIZE_FEATURES": False,
-    "SEED": 42,
-    "WARMUP": 200, # warmup steps for running mean/std
-    "N_SEEDS": 4,
-    "RND_TRAIN_FRAC": 0.5,
-    "DEEPSEA_SIZE": 20,
-}
+SAVE_DIR = 'rnd'
+
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -69,9 +45,9 @@ def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] 
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
+    k = config.get('RND_FEATURES', 128)
     
     env, env_params = helpers.make_env(config)
-    n_actions = env.action_space(env_params).n
     obs_shape = env.observation_space(env_params).shape
     
     if config['EPISODIC']: 
@@ -83,12 +59,11 @@ def make_train(config):
         # initialize rnd networks
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = initialize_rnd_network(rnd_rng, obs_shape, config)
-        _, target_params = initialize_rnd_network(target_rng, obs_shape, config)
-            
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config, k)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config, k)
+        
         # initialize value and policy network
-        network, network_params = initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=3)
-        # train state stores the paramters, network call function, and optimizer state.
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=3)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         # INIT Running Statistics for Intrinsic Reward
@@ -283,8 +258,11 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "rnd_return_mean_est": rnd_ret_rms.mean,
                 "rnd_return_std_est": jnp.sqrt(rnd_ret_rms.var),
-                "ia_mean": gaes[1].mean(),
-                "i val mean":  traj_batch.i_value.mean()
+                "bonus_mean": gaes[1].mean(),
+                "bonus_std": gaes[1].std(),
+                "bonus_max": gaes[1].max(),
+                "vi_pred": traj_batch.i_value.mean(),
+                "v_e_pred": traj_batch.value.mean()
             })
             # Pass new state (rms) forward
             runner_state = (train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms, idx+1)
@@ -300,70 +278,6 @@ def make_train(config):
 
     return train
 
-def main():
-    import warnings; warnings.simplefilter('ignore')
-    import os
-    from utils import save_results, save_plot, parse_config_override
-    import datetime
-    import argparse
-    import configs
-
-    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
-    parser.add_argument('--config', type=str, default=None,
-                       help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
-    parser.add_argument('--run_suffix', type=str, default=run_timestamp,
-                       help='saves to rnd/{args.run_suffix}' )
-    parser.add_argument('--n-seeds', type=int, default=0)
-    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
-    args = parser.parse_args()
-    
-    if args.base_config == 'mc':
-        config = configs.mc_config.copy()
-        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
-    elif args.base_config == 'ds':
-        config = configs.ds_config.copy()
-    elif args.base_config  == 'min':
-        config = configs.min_config.copy()
-
-    # Override with command line config
-    config_override = parse_config_override(args.config)
-    config.update(config_override)
-    rng = jax.random.PRNGKey(config['SEED'])
-        
-    def evaluate(config, rng):
-        steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
-        run_fn = jax.jit(jax.vmap(make_train(config)))
-        rngs = jax.random.split(rng, config['N_SEEDS'])
-        out = run_fn(rngs)
-        metrics = out["metrics"]
-
-        print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
-        print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
-
-        run_dir = os.path.join("results", f"rnd/{args.run_suffix}")
-        env_dir = os.path.join(run_dir, config['ENV_NAME'])
-        
-        os.makedirs(run_dir, exist_ok=True)
-        os.makedirs(env_dir, exist_ok=True)
-        print(f"Saving {config['ENV_NAME']} results to {run_dir}")
-
-        save_results(metrics, config, config['ENV_NAME'], env_dir)
-        mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
-        if config['ENV_NAME'] == "SparseMountainCar-v0":
-            mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
-        
-        ia_mean = metrics['ia_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['ia_mean']
-        i_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
-        rnd_loss = metrics['rnd_loss'].mean(0) if config['N_SEEDS'] > 1 else metrics['rnd_loss']
-
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, ia_mean, 'Intrinsic_Adv')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_mean, 'Intrinsic_Rew')
-        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, rnd_loss, 'rnd_loss')
-
-    
-    evaluate(config, rng)
-
 if __name__ == '__main__':
-    main()
+    from core.utils import run_experiment_main
+    run_experiment_main(make_train, SAVE_DIR)
