@@ -75,7 +75,10 @@ shared = {
     "WARMUP": 20_000,
     "ALPHA_SCHEDULE": 'constant',
     "MIN_LSTD_LR": 1/10,
-    "MIN_COV_LR": 1/20
+    "MIN_COV_LR": 1/20,
+    "STANDARDIZE_RHO": False,
+    "STANDARDIZE_I_GAE": True,
+    "STANDARDIZE_E_GAE": False
 }
 
 visual = {

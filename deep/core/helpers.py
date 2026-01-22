@@ -278,8 +278,11 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
-def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ):
+def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, λi=None):
     """Episodic Intrinsic TD Target"""
+    if λi is None:
+        λi = λ 
+
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value = (
