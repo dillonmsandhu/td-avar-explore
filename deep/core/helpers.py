@@ -80,7 +80,6 @@ def cosine_similarity(a, b):
     mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
     return dot/mag
 
-
 def sigma_update(   sigma_state: Dict,
                     transitions, # Explore_Transition
                     features: jnp.ndarray,
@@ -96,43 +95,43 @@ def sigma_update(   sigma_state: Dict,
     S = (1-α) * S + α * S_b # EMA
     return {'S': S, 'N': N, 't': t+1} # new sigma_state
 
-# def _get_all_traces(traj_batch, features, γ, λ):
-#     """Get all traces for a batch of trajectories.
-#     Returns: L x B x k
-#     """
-#     def get_lambda_traces(phis_s, dones, γ, λ,):
-#         # We need to manage the carry (prev trace) separate from current trace output
-#         def _step_trace(trace_prev, inputs):
-#             phi, done = inputs
-#             trace_current = trace_prev * γ * λ + phi
-#             trace_next = trace_current * (1.0 - done)
-#             # Return: (carry, out)
-#             return trace_next, trace_current
-#         init_traces = jnp.zeros_like(phis_s[0]) 
-#         _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, dones))
-#         return traces 
-#     # Fix: Ensure dones are passed correctly to the inner function
-#     traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(
-#         features, traj_batch.done, γ, λ
-#     )
-#     return traces.transpose(1,0,2)
-
 def _get_all_traces(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
-    Returns: L x B x k, where B is batch size, L is trajectory length, and k is number of features.
+    Returns: L x B x k
     """
-    def get_lambda_traces(phis_s, traj_batch, γ, λ):
-        def _step_trace(trace, inputs):
+    def get_lambda_traces(phis_s, dones, γ, λ,):
+        # We need to manage the carry (prev trace) separate from current trace output
+        def _step_trace(trace_prev, inputs):
             phi, done = inputs
-            trace = trace * (1-done) * γ * λ + phi
-            return trace, trace
-        # end step_trace
-        init_traces = jnp.zeros_like(phis_s[-1])  # (k,)
-        _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, traj_batch.done))
-        return traces # L x k
-    # end get_lambda_traces
-    traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(features, traj_batch, γ, λ)
-    return traces.transpose(1,0,2) # L x B x k (vmap puts batch axis (B) first)
+            trace_current = trace_prev * γ * λ + phi
+            trace_next = trace_current * (1.0 - done)
+            # Return: (carry, out)
+            return trace_next, trace_current
+        init_traces = jnp.zeros_like(phis_s[0]) 
+        _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, dones))
+        return traces 
+    # Fix: Ensure dones are passed correctly to the inner function
+    traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(
+        features, traj_batch.done, γ, λ
+    )
+    return traces.transpose(1,0,2)
+
+# def _get_all_traces(traj_batch, features, γ, λ):
+#     """Get all traces for a batch of trajectories.
+#     Returns: L x B x k, where B is batch size, L is trajectory length, and k is number of features.
+#     """
+#     def get_lambda_traces(phis_s, traj_batch, γ, λ):
+#         def _step_trace(trace, inputs):
+#             phi, done = inputs
+#             trace = trace * (1-done) * γ * λ + phi
+#             return trace, trace
+#         # end step_trace
+#         init_traces = jnp.zeros_like(phis_s[-1])  # (k,)
+#         _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, traj_batch.done))
+#         return traces # L x k
+#     # end get_lambda_traces
+#     traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(features, traj_batch, γ, λ)
+#     return traces.transpose(1,0,2) # L x B x k (vmap puts batch axis (B) first)
 
 def _get_all_traces_continuing(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
@@ -472,19 +471,16 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     )
     return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
 
-def get_alpha_schedule(config):
+def get_alpha_schedule(a_schedule, min_lr=0.1):
     """Returns a function that calculates alpha based on the update step t."""
-    min_lr = config.get('MIN_COV_LR', 0.1)
-    a_schedule = config.get('ALPHA_SCHEDULE', None)
-    assert a_schedule is not None
-    
+
     if a_schedule == 'inv_t':
         def alpha_fn(t):
             return jnp.maximum(min_lr, 1.0 / (t + 1e-8))
     
     elif a_schedule == 'constant':
         def alpha_fn(t):
-            return jnp.maximum(min_lr, 1.0 / (t + 1e-8))
+            return min_lr
     else:
         assert f'a_schedule={a_schedule} not recognized.'
     return alpha_fn

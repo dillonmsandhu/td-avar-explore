@@ -66,8 +66,8 @@ def make_train(config):
         trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
 
-    GET_ALPHA_FN = helpers.get_alpha_schedule(config)
-
+    GET_ALPHA_FN = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
+    
     def lstd_batch_update(  lstd_state: Dict,
                             transitions, # Explore_Transition
                             features: jnp.ndarray,
@@ -109,8 +109,6 @@ def make_train(config):
         
         # initialize value and policy network
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
-        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
-
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
         # INIT Running Statistics for Intrinsic Reward
@@ -227,7 +225,7 @@ def make_train(config):
                     rnd_grad_fn = jax.value_and_grad(rnd_loss_fn, has_aux=True)
                     mask = jax.random.bernoulli(mask_rng, p=config['RND_TRAIN_FRAC'], shape=(traj_batch.obs.shape[0],))
                     
-                    (rnd_loss, _), rnd_grads = rnd_grad_fn(rnd_state.params, traj_batch.embedding, mask, traj_batch.obs)
+                    (rnd_loss, _), rnd_grads = rnd_grad_fn(rnd_state.params, traj_batch.embedding, mask, traj_batch.next_obs)
                     rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
                     
                     return (train_state, rnd_state, mask_rng), (total_loss, rnd_loss)

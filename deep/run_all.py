@@ -43,26 +43,25 @@ def run_experiment():
     print("\n" + "="*50)
     print(f"📊 GENERATING SUMMARY FOR BATCH: {batch_id}")
     print("="*50)
-    
-    # Importing here to ensure the logic above finished
+
     df = summarize_batch(batch_id, results_root)
-    
+
     if df is not None and not df.empty:
-        # Sort for a clean table
         df = df.sort_values(["Group", "Mean_Ret"], ascending=[True, False])
-        
         print(df.to_string(index=False))
         
-        # Save results to the same batch folder
-        summary_path = os.path.join(results_root, batch_id, "batch_summary.csv")
+        # NEW: Name the CSV after the algorithm run
+        summary_filename = f"{script_base}_summary.csv"
+        summary_path = os.path.join(results_root, batch_id, summary_filename)
+        
         df.to_csv(summary_path, index=False)
         print(f"\nSaved summary table to: {summary_path}")
+        
         try:
+            # The filename in the email attachment will now be 'cov_lstd_summary.csv'
             email_results_file(summary_path)
-        except:
-            print('failed to email')
-    else:
-        print("No data found to aggregate.")
+        except Exception as e:
+            print(f'failed to email: {e}')
 
 if __name__ == "__main__":
     # Ensure summarize_batch is accessible

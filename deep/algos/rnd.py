@@ -14,6 +14,7 @@ class Transition(NamedTuple):
     intrinsic_reward: jnp.ndarray 
     log_prob: jnp.ndarray
     obs: jnp.ndarray
+    next_obs: jnp.ndarray
     embedding: jnp.ndarray 
     info: jnp.ndarray
 
@@ -126,7 +127,7 @@ def make_train(config):
                 intrinsic_reward = intrinsic_reward_raw / (jnp.sqrt(rnd_ret_rms.var) + 1e-8)                
 
                 transition = Transition(
-                    done, action, value, i_value, reward, intrinsic_reward, log_prob, last_obs, target_embedding, info
+                    done, action, value, i_value, reward, intrinsic_reward, log_prob, last_obs, obsv, target_embedding, info
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng, rnd_ret_rms)
                 return runner_state, transition
@@ -226,7 +227,7 @@ def make_train(config):
                     mask = jax.random.bernoulli(mask_rng, p=config['RND_TRAIN_FRAC'], shape=(traj_batch.obs.shape[0],))
                     
                     # Pass obs to rnd_loss_fn so we can clip it there too
-                    (rnd_loss, _), rnd_grads = rnd_grad_fn(rnd_state.params, traj_batch.embedding, mask, traj_batch.obs)
+                    (rnd_loss, _), rnd_grads = rnd_grad_fn(rnd_state.params, traj_batch.embedding, mask, traj_batch.next_obs)
                     rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
                     
                     return (train_state, rnd_state, mask_rng), (total_loss, rnd_loss)

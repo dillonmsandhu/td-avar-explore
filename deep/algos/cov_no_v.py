@@ -3,8 +3,7 @@ from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
-SAVE_DIR = 'cov_net'
-
+SAVE_DIR = 'cov_no_v'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -53,7 +52,7 @@ def make_train(config):
         _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config)
             
         # initialize value and policy network
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=3)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
 
         initial_sigma_state = {
@@ -105,7 +104,7 @@ def make_train(config):
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
-                pi, value, i_val = network.apply(train_state.params, last_obs)
+                pi, value = network.apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
@@ -118,6 +117,7 @@ def make_train(config):
                 
                 # Record
                 intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
+                i_val = jnp.zeros_like(reward)  # placeholder, will be filled later
                 transition = Transition(
                     done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
                 )
@@ -147,39 +147,36 @@ def make_train(config):
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             
             # Advantage
-            _, last_val, last_i_val = network.apply(train_state.params, last_obs)
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            _, last_val = network.apply(train_state.params, last_obs)
+            gaes, targets = gae_fn(traj_batch, last_val, jnp.zeros_like(last_val), config["GAMMA"], 1.0)
             advantages = gaes[0] + gaes[1]
+            extrinsic_target = targets[0]
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
-                    
-                    
-                    # --- UPDATE PPO ---
-                    # def _loss_fn_intrisic_v(params, network, traj_batch, gae, targets, config):
-                    grad_fn = jax.value_and_grad(helpers._loss_fn_intrinsic_v, has_aux=True)
-                    (total_loss, (i_value_loss, value_loss, loss_actor, entropy)), grads = grad_fn(
+                    grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
+                    (total_loss, _), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    
-                    return train_state, (total_loss, i_value_loss, value_loss, loss_actor, entropy)
+                    return train_state, total_loss
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                train_state, losses = jax.lax.scan(_update_minbatch, train_state, minibatches)
+                train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
                 update_state = (train_state, traj_batch, advantages, targets, rng)
-                return update_state, losses
-            # --------- Train the network ---------
-            initial_update_state = (train_state, traj_batch, advantages, targets, rng)
+                return update_state, total_loss
+
+            initial_update_state = (train_state, traj_batch, advantages, extrinsic_target, rng)
             update_state, loss_info = jax.lax.scan(
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, _, rng = update_state
+            
             # -------------------------------
             # --------- Update metrics ------
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
