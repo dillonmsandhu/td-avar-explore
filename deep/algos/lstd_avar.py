@@ -25,7 +25,7 @@ def lstd_batch_update(
     # Fix 1: Add 'current_features' as argument
     def lstd(traces, current_features, next_features, transition):
         # Now current_features is (k,) thanks to vmap
-        td_features = current_features - config['GAMMA'] * (1 - transition.done) * next_features
+        td_features = current_features - config['GAMMA_i'] * (1 - transition.done) * next_features
         # A += z * (φ - γφ')^T
         A_sample = jnp.outer(traces, td_features)
         return A_sample
@@ -228,7 +228,7 @@ def make_train(config):
             # --------- Update LSTD ---------
             new_phi = batch_get_features(rnd_state.target_params, traj_batch.obs)
             new_phi_prime = batch_get_features(rnd_state.target_params, traj_batch.next_obs)
-            traces = _get_all_traces(traj_batch, new_phi, config['GAMMA'], config['GAE_LAMBDA'])
+            traces = _get_all_traces(traj_batch, new_phi, config['GAMMA'], config['GAE_LAMBDA'], γi = config["GAMMA_i"])
             lstd_state = lstd_batch_update(
                 lstd_state,
                 traj_batch,

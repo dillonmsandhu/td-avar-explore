@@ -158,7 +158,7 @@ def make_train(config):
             
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
-            gaes, targets = gae_fn(traj_batch, last_val, jnp.zeros_like(last_val), config["GAMMA"], config['GAE_LAMBDA'], λi=1.0)
+            gaes, targets = gae_fn(traj_batch, last_val, jnp.zeros_like(last_val), config["GAMMA"], config['GAE_LAMBDA'], λi=1.0, γi = config["GAMMA_i"]) #REINFORCE
             e_gae, i_gae = gaes
                         
             i_gae = jax.lax.cond(config['STANDARDIZE_I_GAE'],

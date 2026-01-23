@@ -48,12 +48,12 @@ def make_train(config):
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
         trace_fn = helpers._get_all_traces # continuing due to setting phi' = 0 when done = True. 
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA_i'])
     else:
         assert 'only episodic!!!!! '
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
         trace_fn = helpers._get_all_traces_continuing
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA_i'])
 
     if config.get('RESETTING_TRACE', False):
         def trace_fn(traj_batch, features, γ, λ):
@@ -233,7 +233,7 @@ def make_train(config):
             traj_batch = traj_batch._replace(intrinsic_reward=rho)     
 
             # Intrinsic Critic
-            traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
+            traces = trace_fn(traj_batch, phi, config['GAMMA_i'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces)
 
             # Intrinsic value (optimistic)
@@ -243,7 +243,7 @@ def make_train(config):
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val = interpolate_lstd_val(lstd_state, int_rew_from_features(next_phi[-1]), phi=next_phi[-1])
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], γi = config["GAMMA_i"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
 

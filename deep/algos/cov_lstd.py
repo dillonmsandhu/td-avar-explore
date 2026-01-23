@@ -49,13 +49,12 @@ def make_train(config):
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_i_and_e_gae_two_critic_episodic
         trace_fn = helpers._get_all_traces
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA_i'])
     else:
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
         trace_fn = helpers._get_all_traces_continuing
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA_i'])
             
-
     def get_int_rew(S, features, N):
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
         bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
@@ -82,7 +81,7 @@ def make_train(config):
         
         max_ri = jnp.max(ri)
 
-        default_vmax = max_ri / (1 - config['GAMMA'])
+        default_vmax = max_ri / (1 - config['GAMMA_i'])
         v_max = config.get('V_MAX', default_vmax)
 
         if config.get('VMAX_INTERPOLATE_LINEAR', False):
@@ -230,7 +229,7 @@ def make_train(config):
             traj_batch = traj_batch._replace(intrinsic_reward=rho)    
 
             # Intrinsic Critic
-            traces = trace_fn(traj_batch, phi, config['GAMMA'], config['GAE_LAMBDA'])
+            traces = trace_fn(traj_batch, phi, config['GAMMA_i'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces, mean_rho, std_rho)
 
             # Intrinsic value (optimistic)
@@ -241,7 +240,7 @@ def make_train(config):
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val_fast = interpolate_lstd_val(lstd_state, int_rew_from_features(next_phi[-1]), phi=next_phi[-1])
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val_fast, config["GAMMA"], config["GAE_LAMBDA"], γi = config['GAMMA_i'])
             e_gae, i_gae = gaes
                         
             i_gae = jax.lax.cond(config['STANDARDIZE_I_GAE'],

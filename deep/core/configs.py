@@ -45,7 +45,8 @@ shared = {
     "TOTAL_TIMESTEPS": 250_000, # will be adjusted up
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
+    "GAMMA": 0.999, # extrinsic Gamma
+    "GAMMA_i": 0.99, # Intrinsic Gamma
     "GAE_LAMBDA": 0.9,
     "CLIP_EPS": 0.2,
     "VF_CLIP": 0.5,
@@ -69,7 +70,7 @@ shared = {
     # For LSTD Avar
     "PRIOR_N": 1, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
     "N_SEEDS": 4,
-    "EPISODIC": True,
+    "EPISODIC": False,
     "RND_FEATURES": 128,
     "NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,

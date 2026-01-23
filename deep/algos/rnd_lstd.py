@@ -60,11 +60,11 @@ def make_train(config):
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
         trace_fn = helpers._get_all_traces
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA_i'])
     else: # continuing
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
         trace_fn =helpers. _get_all_traces_continuing
-        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA'])
+        cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA_i'])
 
     GET_ALPHA_FN = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
     
@@ -196,7 +196,7 @@ def make_train(config):
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
             last_i_val = lstd_i_val(get_rnd_features, last_obs, lstd_state)
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], γi = config["GAMMA_i"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
             
@@ -253,7 +253,7 @@ def make_train(config):
             # LSTD update:
             new_phi = batch_get_features(traj_batch.obs)
             new_phi_prime = batch_get_features(traj_batch.next_obs)
-            traces = trace_fn(traj_batch, new_phi, config['GAMMA'], config['GAE_LAMBDA'])
+            traces = trace_fn(traj_batch, new_phi, config['GAMMA_i'], config['GAE_LAMBDA'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, new_phi, new_phi_prime, traces)
             # Metrics
             metric = {k: v.mean() for k, v in traj_batch.info.items()} 

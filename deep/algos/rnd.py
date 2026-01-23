@@ -143,7 +143,7 @@ def make_train(config):
             # CALCULATE ADVANTAGE
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
 
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], γi = config["GAMMA_i"])
             # Combine advantages
             advantages = gaes[0] + gaes[1] 
 

@@ -248,8 +248,14 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     )
     return total_loss, (value_loss, loss_actor, entropy)
 
-def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ):
+def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ, γi=None, λi=None):
     """Continuing Intrinsic TD Target"""
+    if γi==None:
+        γi = γ
+    
+    if λi==None:
+        λi = λ
+
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value = (
@@ -264,8 +270,8 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
         gae = delta + (γ * λ * (1 - done) * gae)
         
         # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γ * i_next_value - i_value 
-        i_gae = i_delta + (γ * λ * i_gae)
+        i_delta = i + γi * i_next_value - i_value 
+        i_gae = i_delta + (γi * λi * i_gae)
         
         return (gae, i_gae, value, i_value), (gae, i_gae)
 
@@ -278,10 +284,13 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
-def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, λi=None):
+def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, γi=None, λi=None):
     """Episodic Intrinsic TD Target"""
     if λi is None:
         λi = λ 
+
+    if γi==None:
+        γi = γ
 
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
@@ -299,8 +308,8 @@ def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_
         gae = delta + (γ * λ * not_done * gae)
         
         # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γ * not_done * i_next_value - i_value 
-        i_gae = i_delta + (γ * λ * not_done * i_gae )
+        i_delta = i + γi * not_done * i_next_value - i_value 
+        i_gae = i_delta + (γi * λi * not_done * i_gae )
         
         return (gae, i_gae, value, i_value), (gae, i_gae)
 
@@ -313,12 +322,18 @@ def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
-def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, λ):
+def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, λ, γi = None, λi=None):
     """
     Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
     A = Q_fast - V_slow
     Value Target = Q_fast
     """
+    if λi is None:
+        λi = λ 
+
+    if γi is None:
+        γi = γ
+
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value_fast, i_value_slow = (
@@ -334,8 +349,8 @@ def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, 
         gae = delta + (γ * λ * (1 - done) * gae)
         
         # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γ * i_next_value - i_value_slow 
-        i_gae = i_delta + (γ * λ * i_gae)
+        i_delta = i + γi * i_next_value - i_value_slow 
+        i_gae = i_delta + (γi * λi * i_gae)
         
         return (gae, i_gae, value, i_value_fast), (gae, i_gae)
 
@@ -349,12 +364,18 @@ def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, 
     
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value_slow)
 
-def calculate_i_and_e_gae_two_critic_episodic(traj_batch, last_val, last_i_val_fast, γ, λ):
+def calculate_i_and_e_gae_two_critic_episodic(traj_batch, last_val, last_i_val_fast, γ, λ, γi=None, λi=None):
     """
     Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
     A = Q_fast - V_slow
     Value Target = Q_fast
     """
+    if λi is None:
+        λi = λ 
+
+    if γi is None:
+        γi = γ
+
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value_fast, i_value_slow = (
@@ -372,8 +393,8 @@ def calculate_i_and_e_gae_two_critic_episodic(traj_batch, last_val, last_i_val_f
         gae = delta + (γ * λ * not_done * gae)
         
         # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γ * i_next_value * not_done- i_value_slow 
-        i_gae = i_delta + (γ * λ * not_done * i_gae)
+        i_delta = i + γi * i_next_value * not_done- i_value_slow 
+        i_gae = i_delta + (γi * λi * not_done * i_gae)
         
         return (gae, i_gae, value, i_value_fast), (gae, i_gae)
 
@@ -396,7 +417,14 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
     minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
 
-def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i_val, γ, λ):
+def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i_val, γ, λ, γi = None, λi = None):
+
+    if λi is None:
+        λi = λ 
+
+    if γi is None:
+        γi = γ
+        
     def _get_advantages(gae_and_next_value, transition):
         gae, i_gae, next_value, i_next_value = gae_and_next_value
         done, value, reward, i, i_value = (
@@ -410,8 +438,8 @@ def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i
         delta = reward + γ * next_value * (1 - done) - value
         gae = delta + (γ * λ * (1 - done) * gae)
         
-        i_delta = i + γ * i_next_value * (1 - done) - i_value 
-        i_gae = i_delta + (γ * λ * i_gae)
+        i_delta = i + γi * i_next_value * (1 - done) - i_value 
+        i_gae = i_delta + (γi * λi * i_gae)
         
         return (gae, i_gae, value, i_value), (gae, i_gae)
 
