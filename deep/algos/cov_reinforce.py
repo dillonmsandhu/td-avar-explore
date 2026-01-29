@@ -160,7 +160,7 @@ def make_train(config):
             _, last_val = network.apply(train_state.params, last_obs)
             gaes, targets = gae_fn(traj_batch, last_val, jnp.zeros_like(last_val), config["GAMMA"], config['GAE_LAMBDA'], λi=1.0, γi = config["GAMMA_i"]) #REINFORCE
             e_gae, i_gae = gaes
-                        
+            i_gae -= i_gae.mean() # subtract out baseline to reduce variance. True REINFORCE would use intrinisc and extrinsic TD returns.
             i_gae = jax.lax.cond(config['STANDARDIZE_I_GAE'],
                                lambda x: standardize(x),
                                lambda x: x,
@@ -169,7 +169,13 @@ def make_train(config):
             # Average Return across this timestep across all batches ~ V
             gaes = (e_gae, i_gae)
             advantages = i_gae + e_gae
+            advantages = jax.lax.cond(config['STANDARDIZE_I_GAE'],
+                               lambda x: standardize(x),
+                               lambda x: x,
+                               operand = i_gae,
+                               )
             extrinsic_target = targets[0]
+
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):

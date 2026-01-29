@@ -91,11 +91,32 @@ continuous = {
     "LR": 1e-3,
     "LR_END": 5e-4,
 }
+chain={
+    'ENV_NAME': 'Chain',
+    'RND_NETWORK_TYPE': 'identity',
+    'NORMALIZE_OBS': False,
+    'NORMALIZE_FEATURES': False,
+    "RND_FEATURES": 200,
+    "CHAIN_LENGTH": 200,
+    "CALC_TRUE_VALUES": True,
+    "BIAS": False,
+    "ALPHA_SCHEDULE": 'constant',
+    "MIN_COV_LR": 1/10,
+    "MIN_LSTD_LR": 1/10,
+    "MIN_LSTD_LR_RI": 1/10,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 512,
+    "OPTIMISTIC": False,
+    "VMAX_INTERPOLATE_LINEAR": False,
+    "EFFECTIVE_VISITS_TO_REMAIN_OPT": 0,
+    "STAGGERED_STARTS": True
+}
 
 mc_config = shared | mc_specific # | is the union op. last dict's key takes precedence
 ds_config = shared | ds_specific
 min_config = shared | min_specific
 visual = shared | visual
+chain = shared | chain
 
 CONFIG_REGISTRY = {
     # maps from config name to all envs that we can run that use that config.
@@ -126,5 +147,6 @@ CONFIG_REGISTRY = {
                 ["SpaceInvaders-MinAtar", 
                 "Breakout-MinAtar", 
                 "Freeway-MinAtar", 
-                "Asterix-MinAtar"]}
+                "Asterix-MinAtar"],}, 
+    'chain':    {"config_dict": chain, "envs": ['Chain']}
 }

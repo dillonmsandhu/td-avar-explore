@@ -2,10 +2,10 @@
 # This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
 from core.imports import *
 from envs.sparse_mc import SparseMountainCar
-from envs.fourrooms_custom import FourRooms
 import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
+from envs.long_chain import LongChain
 from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction
 from gymnax.environments import spaces
 
@@ -29,15 +29,21 @@ def load_config(args):
     return config
 
 def make_env(config):
+
     if config['ENV_NAME'] == "FourRooms-misc" and config['NETWORK_TYPE'] == 'cnn':
-        N = config['FOURROOMS_SIZE']
-        env = FourRooms(N=N, use_visual_obs=True)
+        env, env_params = gymnax.make(config["ENV_NAME"], use_visual_obs = True)
+    
+    elif config['ENV_NAME'] == "Chain":
+        env = LongChain(config.get('CHAIN_LENGTH', 100))
         env_params = env.default_params
+
     elif config['ENV_NAME'] == "SparseMountainCar-v0":
         env = SparseMountainCar()
         env_params = env.default_params
+    
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
         env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+    
     else:
         env, env_params = gymnax.make(config["ENV_NAME"])
         print('Env:', config['ENV_NAME'])
@@ -284,12 +290,11 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
-def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, γi=None, λi=None):
+def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, λi=None, γi=None):
     """Episodic Intrinsic TD Target"""
     if λi is None:
         λi = λ 
-
-    if γi==None:
+    if γi is None:
         γi = γ
 
     def _get_advantages(gae_and_next_value, transition):
