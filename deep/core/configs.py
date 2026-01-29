@@ -70,7 +70,7 @@ shared = {
     # For LSTD Avar
     "PRIOR_N": 1, # strength of prior: number of transitions where the "prior" (max) td error was "observed".
     "N_SEEDS": 4,
-    "EPISODIC": False,
+    "EPISODIC": True,
     "RND_FEATURES": 128,
     "NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,
@@ -109,7 +109,8 @@ chain={
     "OPTIMISTIC": False,
     "VMAX_INTERPOLATE_LINEAR": False,
     "EFFECTIVE_VISITS_TO_REMAIN_OPT": 0,
-    "STAGGERED_STARTS": True
+    "STAGGERED_STARTS": True,
+    "EPISODIC": True,
 }
 
 mc_config = shared | mc_specific # | is the union op. last dict's key takes precedence
