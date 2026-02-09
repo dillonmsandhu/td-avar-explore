@@ -19,7 +19,7 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     fail_prob: float = 0.0
     resample_init_pos: bool = False
-    max_steps_in_episode: int = 100_000
+    max_steps_in_episode: int = 1e12
 
 
 class LongChain(environment.Environment[EnvState, EnvParams]):
@@ -89,7 +89,6 @@ class LongChain(environment.Environment[EnvState, EnvParams]):
         """
         Return One-Hot observation.
         """
-        # self.chain_length is a python int, so jax is happy to compile this shape.
         return jax.nn.one_hot(state.pos, num_classes=self.chain_length)
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
@@ -265,6 +264,11 @@ class LongChainExactValue:
         v_i = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
         return v_e, v_i, v_net_tuple
+    
+    def get_value_grid(self, x: jax.Array) -> jax.Array:
+        """Identity"""
+        return x
+    
 
     def plot(self, v_e, v_i, v_pred_tuple):
         """ Visualizes the Value Functions along the 1D Chain.

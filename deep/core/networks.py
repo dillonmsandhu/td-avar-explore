@@ -127,9 +127,10 @@ class CNNTorso1D(nn.Module):
         """
         x: (Batch, Length, 1) or (Batch, Length)
         """
-        if x.ndim == 2:
+        
+        if x.ndim <= 2:
             x = x[..., None]
-
+        
         # Layer 1: 200 -> 100 (Stride 2)
         x = nn.Conv(features=4, kernel_size=(3,), strides=(2,), padding="SAME")(x)
         x = nn.relu(x)
