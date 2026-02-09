@@ -54,7 +54,7 @@ def make_train(config):
 
         initial_sigma_state = {
             'S': jnp.eye(k) * config['GRAM_REG'],
-            'N': 0, # number of samples
+            'N': 1, # number of samples
             't': 1, # number of updates
         }
 
@@ -109,15 +109,19 @@ def make_train(config):
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
             int_rew_from_features = lambda phi: get_scale_free_bonus(sigma_state['S'], phi) 
-            traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
-            
+            # traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
+            rho = int_rew_from_features(batch_get_features(traj_batch.next_obs))
+            rho = rho - rho.min()
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Scale rho
-            beta = helpers.update_beta(beta, 
-                               traj_batch.i_value, 
-                               traj_batch.value, 
-                               progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], 
-                               update=config['ADAPTIVE_BETA']
-            )
+            # beta = helpers.update_beta(beta, 
+            #                    traj_batch.i_value, 
+            #                    traj_batch.value, 
+            #                    progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], 
+            #                    update=config['ADAPTIVE_BETA']
+            # )
+            # linear decay of beta based on learning schedule.
+            beta = helpers.schedule_extrinsic_to_intrinsic_ratio(sigma_state['N'] / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
             # Final scale of r_i is unscaled rho times 1/sqrt(N) times beta
             rho_scale = beta / jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))
 
@@ -158,6 +162,9 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, _, rng = update_state
+
+            # UPDATE Covariance
+            _, sigma_state, _ = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
             # -------------------------------
             # --------- Update metrics ------
 

@@ -136,7 +136,7 @@ def make_train(config):
             'b': jnp.zeros(k), 'w': jnp.zeros(k),
             'N': 0, 't': 1, 'Beta': config['BONUS_SCALE'], 'V_max': 1/(1-config['GAMMA_i']),
         }
-        initial_sigma_state = {'S': jnp.eye(k) * config['GRAM_REG'], 'N': 0, 't': 1, }
+        initial_sigma_state = {'S': jnp.eye(k) * config['GRAM_REG'], 'N': 1, 't': 1, }
         
         # TRAIN LOOP
         def _update_step(runner_state, unused):
@@ -173,20 +173,25 @@ def make_train(config):
             # Done gathering environment steps
             # Post-Processing to Compute Intrinsic Rewards
             int_rew_from_features = lambda phi: get_scale_free_bonus(sigma_state['S'], phi) 
-            traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
-            # --- 4. Optimistic Initialization and Rescaling of beta ---
+            # traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
+            rho = int_rew_from_features(batch_get_features(traj_batch.next_obs))
+            rho = rho - rho.min()
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)
+            # --- 4. Optimistic Initialization---
             phi = batch_get_features(traj_batch.obs)
             rho_current = int_rew_from_features(phi) / jnp.sqrt(sigma_state['N'])  # corresponds to estimated standard deviation of least squares estimate at phi (for example, least squares reward prediction)
             PRIOR_SAMPLES = config.get('LSTD_PRIOR_SAMPLES', 1.0)
             scaled_uncertainty = PRIOR_SAMPLES * (rho_current**2)
+            
             # Per-State precision-based ratio: 1 / (1 + data_precision / prior_precision)
             lambda_s = scaled_uncertainty / (1.0 + scaled_uncertainty)
+            
             # Update LSTD
             traces = trace_fn(traj_batch, phi, config['GAMMA_i'], config['GAE_LAMBDA_i'])
             next_phi = batch_get_features(traj_batch.next_obs)
             lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces, lambda_s)
 
-            # Compute Values for GAE and beta scaling.
+            # Compute Values for GAE.
             _, last_val = network.apply(train_state.params, last_obs)
             last_phi = batch_get_features(last_obs)
             v_i = phi @ lstd_state['w']
@@ -194,16 +199,19 @@ def make_train(config):
             lstd_state['V_max'] = jnp.maximum(jnp.max(v_i), jnp.max(last_i_val)) # unscaled maximum value.
             
             # Adaptive beta (scaling of ri and vi)
-            lstd_state['Beta'] = helpers.update_beta(lstd_state['Beta'], v_i, traj_batch.value, progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], update=config['ADAPTIVE_BETA'])
-            # Final scale of r_i is unscaled rho times 1/sqrt(N) times beta
-            rho_scale = lstd_state['Beta'] / jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))
+            sqrt_n = jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))
 
-            # Scale vi and ri
+            lstd_state['Beta'] = helpers.schedule_extrinsic_to_intrinsic_ratio(sigma_state['N'] / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
+            # lstd_state['Beta'] = helpers.update_beta(lstd_state['Beta'], v_i / sqrt_n, traj_batch.value, progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], update=config['ADAPTIVE_BETA'])
+            # Final scale of r_i is unscaled rho times 1/sqrt(N) times beta
+            rho_scale = lstd_state['Beta'] / sqrt_n
+
+            # Scale vi and ri in traj_batch for GAE.
             v_i *= rho_scale
             last_i_val *= rho_scale
             traj_batch = traj_batch._replace(i_value=v_i, intrinsic_reward=rho * rho_scale)
 
-            # --- 4. ADVANTAGE CALCULATION ---            
+            # --- 4. ADVANTAGE CALCULATION (Scaled) ---            
             gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], config['GAE_LAMBDA_i'], config["GAMMA_i"])
             advantages = gaes[0] + gaes[1]
             extrinsic_target = targets[0]
@@ -232,7 +240,9 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, _, rng = update_state
-            
+            # UPDATE Covariance
+            _, sigma_state, _ = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
+
             # --------- Metrics ---------
             metric = {k: v.mean() for k, v in traj_batch.info.items()}
             

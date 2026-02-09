@@ -171,7 +171,7 @@ def make_train(config):
             'V_max': 1/(1-config['GAMMA_i']),
             "Beta": config['BONUS_SCALE'],
         }
-        initial_sigma_state = {'S': jnp.eye(k) * config['GRAM_REG'], 'N': 0, 't': 1,}
+        initial_sigma_state = {'S': jnp.eye(k) * config['GRAM_REG'], 'N': 1, 't': 1,}
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
@@ -209,33 +209,20 @@ def make_train(config):
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
 
-            # --- 1. Update EMA of Gram Matrix ---
-            phi = batch_get_features(traj_batch.obs)          # Contains s_0 and Reset states
-            next_phi = batch_get_features(traj_batch.next_obs)# Contains s_T (Terminal)
-            terminal_phi = next_phi * traj_batch.done[..., None]
-            all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
-
-            # Update Sigma (using the mask to ignore the zeroed-out non-terminals)
-            mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+            # --- 1. Compute intrinsic rewards in batch ---
+            phi = batch_get_features(traj_batch.obs)
+            next_phi = batch_get_features(traj_batch.next_obs)
             
-            sigma_state = helpers.sigma_update_masked(
-                sigma_state, 
-                all_phi_sigma, 
-                mask_sigma,
-                alpha_fn(sigma_state['t'])
-            )
-
-            # --- 3. INTRINSIC REWARD & OPTIMISM ---
             int_rew_from_features = lambda phi: get_scale_free_bonus(sigma_state['S'], phi) 
+            # traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
             rho = int_rew_from_features(next_phi)
             rho = rho - rho.min()
-            traj_batch = traj_batch._replace(intrinsic_reward=rho) # used by LSTD estimate
+            traj_batch = traj_batch._replace(intrinsic_reward=rho)
             
-            # --- 4. LAMBDA CALCULATION ---
-            rho_current = int_rew_from_features(phi) / jnp.sqrt(sigma_state['N'])  # corresponds to estimated standard deviation of least squares estimate at phi (for example, least squares reward prediction)
+            # --- 4. Optimistic Initialization---
+            std = int_rew_from_features(phi) / jnp.sqrt(sigma_state['N'])  # corresponds to estimated standard deviation of least squares estimate at phi (for example, least squares reward prediction)
             PRIOR_SAMPLES = config.get('LSTD_PRIOR_SAMPLES', 1.0)
-            scaled_uncertainty = PRIOR_SAMPLES * (rho_current**2)
-            # Per-State precision-based ratio: 1 / (1 + data_precision / prior_precision)
+            scaled_uncertainty = PRIOR_SAMPLES * (std**2)
             lambda_s = scaled_uncertainty / (1.0 + scaled_uncertainty)
         
             # ------------------------------------------------------------
@@ -256,16 +243,18 @@ def make_train(config):
             lstd_state['V_max'] = jnp.maximum(jnp.max(v_i), jnp.max(last_val_i)) # unscaled maximum value.
 
             # set beta adaptively
-            lstd_state['Beta'] = helpers.update_beta(lstd_state['Beta'], v_i, traj_batch.value, progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], update=config['ADAPTIVE_BETA'])
+            # lstd_state['Beta'] = helpers.update_beta(lstd_state['Beta'], v_i, traj_batch.value, progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], update=config['ADAPTIVE_BETA'])
+            lstd_state['Beta'] = helpers.schedule_extrinsic_to_intrinsic_ratio(sigma_state['N'] / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
             rho_scale = lstd_state['Beta'] / jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))            
             
             # --- 4. ADVANTAGE CALCULATION ---             
+            # scale the intrinsic value and reward before computing advantages.
             last_val_i *= rho_scale
-            traj_batch = traj_batch._replace(value=v_e, i_value= v_i * rho_scale, intrinsic_reward=rho * rho_scale)
+            traj_batch = traj_batch._replace(value=v_e, i_value=v_i * rho_scale, intrinsic_reward=rho * rho_scale)
             # Compute GAEs
             gaes, targets = gae_fn(traj_batch,
                 last_val_e,
-                last_val_i*rho_scale,
+                last_val_i,
                 config["GAMMA"],
                 config["GAE_LAMBDA"],
                 config["GAE_LAMBDA_i"],
@@ -301,13 +290,11 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, rng = update_state
+
+            # Update sigma state:
+            _, sigma_state, _ = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
             
-            # --- 6. METRICS ---
-            total_loss_mean = loss_info[0].mean()
-            actor_loss_mean = loss_info[1][0].mean()
-            entropy_mean = loss_info[1][1].mean()
-            
-            # --------- Metrics ---------
+            # METRICS ---
             metric = {k: v.mean() for k, v in traj_batch.info.items()}
             
             # Common Metrics
@@ -344,6 +331,7 @@ def make_train(config):
                 get_ve = lambda obs: batch_get_features(obs) @ lstd_state['w_e']
                 
                 metric = helpers.add_values_to_metric(config, metric, int_rew_from_state, evaluator, lstd_state['Beta'], network, train_state, traj_batch, get_vi, get_ve)
+            # end metrics
             
             runner_state = (train_state, lstd_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric

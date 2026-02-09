@@ -47,8 +47,10 @@ class RunningMeanStd:
         M2 = m_a + m_b + jnp.square(delta) * self.count * batch_count / tot_count
         new_var = M2 / tot_count
         return self.replace(mean=new_mean, var=new_var, count=tot_count)
-
 def make_train(config):
+    # Ensure necessary configs are present
+    config.setdefault("GAMMA_i", 0.99)
+    
     k = config.get('RND_FEATURES', 128)
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] 
@@ -66,7 +68,8 @@ def make_train(config):
         trace_fn =helpers. _get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA_i'])
 
-    GET_ALPHA_FN = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
+    alpha_fn_lstd = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
+    alpha_fn_lstd_bi = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR_RI'])
     
     def lstd_batch_update(  lstd_state: Dict,
                             transitions, # Explore_Transition
@@ -76,8 +79,8 @@ def make_train(config):
         ):
         # Unpack state
         A, t = lstd_state['A'], lstd_state['t']
-        α = GET_ALPHA_FN(lstd_state['t'])
-        α_b =  GET_ALPHA_FN(lstd_state['t'])
+        α = alpha_fn_lstd(lstd_state['t'])
+        α_b =  alpha_fn_lstd_bi(lstd_state['t'])
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state['N']  # total number of samples seen so far
         A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done) # (L, B, k, k)
@@ -111,8 +114,12 @@ def make_train(config):
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
         
-        # INIT Running Statistics for Intrinsic Reward
+        # INIT Running Statistics for Intrinsic Return
         rnd_ret_rms = RunningMeanStd()
+        
+        # NEW: Initialize the running return (Reward Forward Filter state)
+        rnd_return = jnp.zeros(config["NUM_ENVS"])
+
         # Helper to get embedding
         get_rnd_features = lambda obs: rnd_state.apply_fn(target_params, obs)
         batch_get_features = jax.vmap(get_rnd_features)
@@ -121,7 +128,7 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
-
+        (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
         initial_lstd_state = {
             'A': jnp.eye(k) * config['A_REGULARIZATION'],  # Regularization for numerical stability
             'b_int': jnp.zeros(k), # The bias feature gets set so the optimistic weights start with a bias of 1/(1-gamma)
@@ -130,32 +137,15 @@ def make_train(config):
             't': 1, # number of updates
         }
 
-        # WARMUP (Standard env warmup, no changes needed here)
-        def _warmup_step(runner_state, unused):
-            env_state, last_obs, rng = runner_state
-            rng, _rng = jax.random.split(rng)
-            rng_action = jax.random.split(_rng, config["NUM_ENVS"])
-            action = jax.vmap(env.action_space(env_params).sample)(rng_action)
-            rng, _rng = jax.random.split(rng)
-            rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-            obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
-                rng_step, env_state, action, env_params
-            )
-            return (env_state, obsv, rng), None
-
-        warmup_runner_state = (env_state, obsv, rng)
-        (env_state, obsv, rng), _ = jax.lax.scan(
-            _warmup_step, warmup_runner_state, None, config["WARMUP"]
-        )
-
+        
         # TRAIN LOOP
         def _update_step(runner_state, unused):
-            # unpack runner state
-            train_state, rnd_state, lstd_state, env_state, last_obs, rng, rnd_ret_rms, idx = runner_state
+            
+            train_state, rnd_state, lstd_state, env_state, last_obs, rng, rnd_ret_rms, rnd_return, idx = runner_state
             
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms = env_scan_state
+                train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms, rnd_return = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -163,7 +153,9 @@ def make_train(config):
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
                 
+                # Note: Assuming lstd_i_val is defined in global scope or helpers
                 i_val = lstd_i_val(get_rnd_features, jnp.clip(last_obs, -5, 5), lstd_state)
+                
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, config["NUM_ENVS"])
@@ -176,28 +168,35 @@ def make_train(config):
                 target_embedding = rnd_state.apply_fn(target_params, rnd_obs)
                 target_embedding = jax.lax.stop_gradient(target_embedding) # Explicit stop grad
                 pred = rnd_state.apply_fn(rnd_state.params, rnd_obs)
-                # Normalize intrinsic reward
+                # Intrinsic reward
                 intrinsic_reward_raw = jnp.mean((pred - target_embedding)**2, axis=-1)
-                rnd_ret_rms = rnd_ret_rms.update(intrinsic_reward_raw)
+                # batch stats:
+                rnd_return = rnd_return * config["GAMMA_i"] + intrinsic_reward_raw
+                rnd_ret_rms = rnd_ret_rms.update(rnd_return)
                 intrinsic_reward = intrinsic_reward_raw / (jnp.sqrt(rnd_ret_rms.var) + 1e-8)                
-                # intrinsic value (dot product with LSTD weights)
                 
                 transition = Transition(
                     done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, target_embedding, info
                 )
-                runner_state = (train_state, rnd_state, env_state, obsv, rng, rnd_ret_rms)
+                runner_state = (train_state, rnd_state, env_state, obsv, rng, rnd_ret_rms, rnd_return)
                 return runner_state, transition
             
-
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms)
-            (train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms), traj_batch = jax.lax.scan(
+            env_step_state = (train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms, rnd_return)
+            (train_state, rnd_state, env_state, last_obs, rng, rnd_ret_rms, rnd_return), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
+            N = idx *traj_batch.done.shape[0] * traj_batch.done.shape[1]
+            beta = helpers.schedule_extrinsic_to_intrinsic_ratio( N / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
+            beta = jnp.where(config['ADAPTIVE_BETA'], beta, config['BONUS_SCALE'])
+            
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
+            
             last_i_val = lstd_i_val(get_rnd_features, last_obs, lstd_state)
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], γi = config["GAMMA_i"])
-            advantages = gaes[0] + gaes[1]
+            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"], config["GAE_LAMBDA_i"], config["GAMMA_i"])
+            
+            # Combine advantages (removed Beta)
+            advantages = gaes[0] + beta * gaes[1]
             extrinsic_target = targets[0]
             
             # UPDATE NETWORK
@@ -272,11 +271,13 @@ def make_train(config):
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
             })
-            runner_state = (train_state, rnd_state, lstd_state, env_state, last_obs, rng, rnd_ret_rms, idx+1)
+            # Pack new state (RMS, RND Return)
+            runner_state = (train_state, rnd_state, lstd_state, env_state, last_obs, rng, rnd_ret_rms, rnd_return, idx+1)
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, rnd_state, initial_lstd_state, env_state, obsv, _rng, rnd_ret_rms, 0)
+        # Init runner_state with rnd_return
+        runner_state = (train_state, rnd_state, initial_lstd_state, env_state, obsv, _rng, rnd_ret_rms, rnd_return, 0)
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
