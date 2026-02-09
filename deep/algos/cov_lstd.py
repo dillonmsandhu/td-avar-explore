@@ -33,7 +33,7 @@ def make_train(config):
     alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
     alpha_fn_lstd = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
     alpha_fn_lstd_b = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR_RI'])
-    
+    evaluator = None    
     if calc_true_values:
         if config['ENV_NAME'] == 'DeepSea-bsuite':
             evaluator = DeepSeaExactValue(

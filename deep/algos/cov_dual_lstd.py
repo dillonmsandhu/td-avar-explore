@@ -5,7 +5,7 @@ import core.helpers as helpers
 import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
 from envs.long_chain import LongChainExactValue
-SAVE_DIR = 'cov_lstd_dual_soft_rmax_schedule_beta'
+SAVE_DIR = 'cov_dual_lstd'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -18,9 +18,6 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-
-def EMA(coeff, x_old, x_new):
-    return (1 - coeff) * x_old + coeff * x_new
 
 def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -35,7 +32,7 @@ def make_train(config):
     alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
     alpha_fn_lstd = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR'])
     alpha_fn_lstd_bi = helpers.get_alpha_schedule(config['ALPHA_SCHEDULE'], config['MIN_LSTD_LR_RI'])
-
+    evaluator = None
     if calc_true_values:
         if config['ENV_NAME'] == 'DeepSea-bsuite':
             evaluator = DeepSeaExactValue(
@@ -91,11 +88,11 @@ def make_train(config):
         A_i_batch = A_i_update.mean(axis=batch_axes)
         weighted_gram_batch = jnp.einsum('bt, bti, btj->ij', lambda_s, features, features) / transitions.done.size
         A_batch_rmax = A_i_batch + weighted_gram_batch
-        A_i_view = EMA(α,lstd_state['A_i'], A_batch_rmax) 
+        A_i_view = helpers.EMA(α,lstd_state['A_i'], A_batch_rmax) 
         
         # for storage (note having two LSTD A's is redundant - they should be the same.):
-        A_i = EMA(α, lstd_state["A_i"], A_batch)
-        A_e = EMA(α, lstd_state["A_e"], A_batch)
+        A_i = helpers.EMA(α, lstd_state["A_i"], A_batch)
+        A_e = helpers.EMA(α, lstd_state["A_e"], A_batch)
         
         ## feature-reward vector
         b_e_sample = traces * rew[..., None]
@@ -105,11 +102,11 @@ def make_train(config):
         b_i_sample_view = (1-lambda_s)[..., None] * b_i_sample  + lambda_s[...,None] * lstd_state['V_max'] * features
         # b_i_sample_view = b_i_sample
         b_i_view = b_i_sample_view.mean(axis=batch_axes)
-        b_i_view = EMA(alpha_fn_lstd_bi(t), lstd_state["b_i"], b_i_view)
+        b_i_view = helpers.EMA(alpha_fn_lstd_bi(t), lstd_state["b_i"], b_i_view)
         
         # for storage:
-        b_i = EMA(alpha_fn_lstd_bi(t), lstd_state["b_i"], b_i_sample.mean(axis=batch_axes))
-        b_e = EMA(α, lstd_state["b_e"], b_e_batch)
+        b_i = helpers.EMA(alpha_fn_lstd_bi(t), lstd_state["b_i"], b_i_sample.mean(axis=batch_axes))
+        b_e = helpers.EMA(α, lstd_state["b_e"], b_e_batch)
 
         # ------------------------------------------------------------
         # 6. Solve linear systems
@@ -132,26 +129,15 @@ def make_train(config):
         }
 
     # Custom PPO Loss (Actor Only)
-    def actor_only_loss(params, apply_fn, minibatch, advantages):
-        # We don't need targets here, as we aren't training a value head
-        traj_batch = minibatch
-        
-        # Rerun network to get current log_probs (and entropy)
-        # Note: Network is Actor-only or we ignore value head
+    def actor_only_loss(params, apply_fn, traj_batch, advantages):
         pi, _ = apply_fn(params, traj_batch.obs)
         log_prob = pi.log_prob(traj_batch.action)
-
-        # PPO Ratio
         ratio = jnp.exp(log_prob - traj_batch.log_prob)
-        
-        # Clipped Loss
         clip_eps = config["CLIP_EPS"]
         loss_actor1 = -ratio * advantages
         loss_actor2 = -jnp.clip(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
         loss_actor = jnp.maximum(loss_actor1, loss_actor2).mean()
-        
         entropy = pi.entropy().mean()
-        
         total_loss = loss_actor - config["ENT_COEF"] * entropy
         return total_loss, (loss_actor, entropy)
 

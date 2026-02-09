@@ -28,7 +28,7 @@ def make_train(config):
     k = config.get('RND_FEATURES', 128)
     alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
-
+    evaluator = None
     if calc_true_values and config['ENV_NAME'] == 'DeepSea-bsuite':
         evaluator = DeepSeaExactValue(
             size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma=config['GAMMA'], episodic=config['EPISODIC']
