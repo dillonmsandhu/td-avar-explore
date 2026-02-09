@@ -115,20 +115,37 @@ class NormalizeRewardWrapper(GymnaxWrapper):
         )
         return obs, NormalizeRewardEnvState(mean_std, 0.0, state)
 
-    def step(self, key, state, action, params=None):
-        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
+    # def step(self, key, state, action, params=None):
+    #     obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
         
-        # 1. Update running return (discounted)
-        # If done, we reset the running return to 0 (effectively handled by (1-done))
-        # Note: In PPO we technically want to normalize based on return variance, not reward variance.
-        new_return_val = state.return_val * self.gamma * (1 - done) + reward
+    #     # 1. Update running return (discounted)
+    #     # If done, we reset the running return to 0 (effectively handled by (1-done))
+    #     # Note: In PPO we technically want to normalize based on return variance, not reward variance.
+    #     new_return_val = state.return_val * self.gamma * (1 - done) + reward
         
-        # 2. Update stats based on the *return*, not the immediate reward
-        new_mean_std = update_running_mean_std(state.mean_std, new_return_val)
+    #     # 2. Update stats based on the *return*, not the immediate reward
+    #     new_mean_std = update_running_mean_std(state.mean_std, new_return_val)
         
-        # 3. Normalize Reward (scale only, do not shift mean)
-        # We divide by the std of the *returns*
-        norm_reward = jnp.clip(reward / jnp.sqrt(new_mean_std.var + 1e-8), -10.0, 10.0)
+    #     # 3. Normalize Reward (scale only, do not shift mean)
+    #     # We divide by the std of the *returns*
+    #     norm_reward = jnp.clip(reward / jnp.sqrt(new_mean_std.var + 1e-8), -10.0, 10.0)
 
-        return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
+    #     return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
     
+
+    def step(self, key, state, action, params=None):
+            obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
+            
+            # 1. Update Return Logic (Corrected per previous discussion)
+            current_return = state.return_val * self.gamma + reward
+            new_mean_std = update_running_mean_std(state.mean_std, current_return)
+            
+            # 2. Calculate Scale
+            scale = jnp.sqrt(new_mean_std.var + 1e-8)
+            # 3. Normalize & Clip
+            norm_reward = jnp.clip(reward / scale, -10.0, 10.0)
+
+            # 4. Mask for next step
+            new_return_val = current_return * (1.0 - done)
+
+            return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info

@@ -111,7 +111,7 @@ def make_train(config):
             int_rew_from_features = lambda phi: get_scale_free_bonus(sigma_state['S'], phi) 
             # traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
             rho = int_rew_from_features(batch_get_features(traj_batch.next_obs))
-            rho = rho - rho.min()
+            # rho = rho - rho.min()
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             # Scale rho
             # beta = helpers.update_beta(beta, 
@@ -120,7 +120,7 @@ def make_train(config):
             #                    progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], 
             #                    update=config['ADAPTIVE_BETA']
             # )
-            # linear decay of beta based on learning schedule.
+            # linear decay of beta based on
             beta = helpers.schedule_extrinsic_to_intrinsic_ratio(sigma_state['N'] / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
             # Final scale of r_i is unscaled rho times 1/sqrt(N) times beta
             rho_scale = beta / jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))
@@ -131,11 +131,10 @@ def make_train(config):
             gae_e, target_e = helpers._calculate_gae(traj_batch, last_val, config["GAMMA"], config["GAE_LAMBDA"])
             # B. Intrinsic GAE (Unit Scale)
             gae_i, target_i = helpers._calculate_gae(traj_batch, last_i_val, config["GAMMA_i"], config["GAE_LAMBDA_i"])
-            
             # C. Combine using Beta
             # Total Advantage = Adv_Extrinsic + (Beta * Adv_Intrinsic)
-            targets = (target_e, rho_scale * target_i) 
-            advantages = gae_e + (rho_scale * gae_i)
+            targets = (target_e, target_i) # unscaled target
+            advantages = gae_e + (rho_scale * gae_i) # scale the gae.
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):

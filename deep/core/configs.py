@@ -1,16 +1,14 @@
-NORMALIZE_FEATURES = True
-EPISODIC = True # RND episodic. RND LSTD try both. 
-BIAS = True
-
+NORMALIZE_FEATURES = True # for LSTD.
+EPISODIC = True # RND continuous. RND LSTD try both. 
+BIAS = True # for LSTD 
+NORMALIZE_REWARDS = True
 # for RND: bias, episodic, and normalize feawtures are all false.
 # for covariance based: all true
 
 mc_specific = {
     "ENV_NAME": "SparseMountainCar-v0",
     "NORMALIZE_FEATURES": NORMALIZE_FEATURES,
-    "NORMALIZE_REWARDS": False,
-    "BONUS_SCALE": 1.96,
-    "ALPHA_SCHEDULE": 'inv_t',
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
 }
 
 ds_specific = {
@@ -23,8 +21,8 @@ ds_specific = {
     "NETWORK_TYPE": 'cnn',
     "RND_NETWORK_TYPE": 'cnn',
     "CALC_TRUE_VALUES": False,
-    "BONUS_SCALE": 1.96,
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "N_SEEDS": 4,
 }
 
 min_specific = {
@@ -39,18 +37,19 @@ min_specific = {
     "VF_CLIP": 0.2,
     "NORMALIZE_FEATURES": NORMALIZE_FEATURES,
     "NORMALIZE_OBS": False,
-    "WARMUP": 200, # warmup steps for running mean/std
+    "WARMUP": 20_000, # warmup steps for running mean/std
     "NETWORK_TYPE": 'cnn',
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "N_SEEDS": 4,
 }
 
 shared = {    
     "LR": 5e-4,
     "LR_END": 5e-4,
     "RND_LR": 5e-5,
-    "NUM_ENVS": 128,
-    "NUM_STEPS": 128,
-    "TOTAL_TIMESTEPS": 250_000, # will be adjusted up
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 256,
+    "TOTAL_TIMESTEPS": 500_000, # will be adjusted up
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99, # extrinsic Gamma
@@ -67,9 +66,9 @@ shared = {
     "RND_TRAIN_FRAC": 0.5,
     "NORMALIZE_FEATURES": NORMALIZE_FEATURES,
     "NORMALIZE_OBS": True,
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     # FOR Covariance Based Reward
-    "BONUS_SCALE": 1.96,
+    "BONUS_SCALE": 1.0,
     "A_REGULARIZATION_PER_STEP": 1e-8,
     "A_REGULARIZATION": 1e-3,
     "GRAM_REG": 1e-3,
@@ -79,13 +78,13 @@ shared = {
     "NETWORK_TYPE": 'mlp',
     "RND_NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,
-    "ALPHA_SCHEDULE": 'inv_t',
+    "ALPHA_SCHEDULE": 'constant',
     "MIN_COV_LR": 1/20,
     "MIN_LSTD_LR": 1/20,
     "MIN_LSTD_LR_RI": 1/10, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
     "ADAPTIVE_BETA": True,
     "LSTD_PRIOR_SAMPLES": 100.0,
-    "STAGGERED_STARTS": True,
+    "STAGGERED_STARTS": False,
     "BIAS": BIAS,
 }
 
@@ -111,7 +110,6 @@ chain={
     "BIAS": False,
     "EPISODIC": EPISODIC,
     "STAGGERED_STARTS": True,
-    "WARMUP": 0,
 }
 
 if chain['RND_NETWORK_TYPE'] == 'identity':
@@ -153,5 +151,5 @@ CONFIG_REGISTRY = {
                 "Breakout-MinAtar", 
                 "Freeway-MinAtar", 
                 "Asterix-MinAtar"],}, 
-    'chain':    {"config_dict": chain, "envs": ['Chain']}
+    
 }

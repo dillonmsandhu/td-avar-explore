@@ -68,6 +68,7 @@ if __name__ == "__main__":
     from run_all import summarize_batch # or just define it above run_experiment
     run_experiment()
 
+
 def summarize_batch(batch_id, results_root):
     all_data = []
     batch_path = os.path.join(results_root, batch_id)
@@ -79,31 +80,44 @@ def summarize_batch(batch_id, results_root):
 
     for env_name in envs_found:
         try:
-            # We assume results_root is the parent of the batch_id folder
             config, out = load_run_data(
                 run_folder_name=batch_id,
                 env_name=env_name,
                 results_base_path=results_root,
             )
             
-            # Metric: Average return of last 20 evaluation points across seeds
-            # Adjust key name if your out.pkl uses 'metrics' nesting
-            rets = out.get("returned_episode_returns", out.get("metrics", {}).get("returned_episode_returns"))
+            # Helper to safely get metrics whether they are at root or inside 'metrics'
+            def get_metric(key):
+                return out.get(key, out.get("metrics", {}).get(key))
+
+            # --- 1. Undiscounted Returns ---
+            rets = get_metric("returned_episode_returns")
             
             if rets is not None:
-                final_performance = rets[:, -20:].mean()
-                std_performance = rets[:, -20:].mean(-1).std()
+                final_mean = rets[:, -20:].mean()
+                final_std = rets[:, -20:].mean(-1).std()
             else:
-                final_performance, std_performance = 0, 0
+                final_mean, final_std = 0, 0
 
-            # Map back to Config Group for better readability
+            # --- 2. Discounted Returns ---
+            disc_rets = get_metric("returned_discounted_episode_returns")
+            
+            if disc_rets is not None:
+                disc_mean = disc_rets[:, -20:].mean()
+                disc_std = disc_rets[:, -20:].mean(-1).std()
+            else:
+                disc_mean, disc_std = 0, 0
+
+            # Map back to Config Group
             group = next((g for g, d in CONFIG_REGISTRY.items() if env_name in d["envs"]), "other")
 
             all_data.append({
                 "Group": group,
                 "Environment": env_name,
-                "Mean_Ret": round(float(final_performance), 2),
-                "Std_Ret": round(float(std_performance), 2),
+                "Mean_Ret": round(float(final_mean), 2),
+                "Std_Ret": round(float(final_std), 2),
+                "Mean_Disc_Ret": round(float(disc_mean), 2), # New
+                "Std_Disc_Ret": round(float(disc_std), 2),   # New
                 "Steps": config.get("TOTAL_TIMESTEPS", "n/a")
             })
         except Exception as e:

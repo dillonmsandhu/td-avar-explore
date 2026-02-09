@@ -561,12 +561,10 @@ def get_alpha_schedule(a_schedule, min_lr=0.1):
     return alpha_fn
 
 def schedule_extrinsic_to_intrinsic_ratio(percent, ratio_e_to_i = 1.0):
-    # Phase 1: Warmup (0% -> 10%) 
-    # Phase 2: Plateau (10% -> 80%)
+    # Phase 1: Flat at 1 (0% -> 80%)
     # Phase 3: Decay (80% -> 100%)
-    warmup = jnp.minimum(1.0, percent / 0.05)
-    decay = jnp.clip((1.0 - percent) / 0.2, 0.0, 1.0)
-    return ratio_e_to_i * warmup * decay
+    decay = jnp.clip((1.0 - percent) / 0.5, 0.0, 1.0)
+    return ratio_e_to_i * decay
 
 def warmup_env(rng, env, env_params, config):
     """
@@ -767,7 +765,9 @@ def update_beta(old_beta, i_values, e_values, progress, update=True):
     c_t = schedule_extrinsic_to_intrinsic_ratio(progress) # ratio of i_value to e_value, equal to 1 for most of learnings 
     vi_mag = jnp.mean(jnp.abs(i_values))
     ve_mag = jnp.mean(jnp.abs(e_values))
-    target_mag = jnp.maximum(ve_mag, 1.0) # Floor for extrinsic scale
-    beta = c_t * (target_mag / vi_mag)
-    beta = jnp.minimum(beta, 1000.0)
+    target_mag = jnp.maximum(ve_mag, 0.1) # Floor for extrinsic scale
+    beta = c_t * target_mag / (vi_mag + 1e-8)
+    # will get v_i / vi_mag times c_t times target mag.
+    # beta = EMA(0.95, old_beta, beta)
+    # beta = jnp.minimum(beta, 1000.0)
     return beta

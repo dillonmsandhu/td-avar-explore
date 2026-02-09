@@ -20,22 +20,40 @@ def aggregate_all_summaries(results_dir="results"):
         batch_id = csv_path.parent.name
         
         # Load the CSV
-        df = pd.read_csv(csv_path)
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            print(f"Skipping corrupt or unreadable file {csv_path}: {e}")
+            continue
+            
+        # Define the base name for this run
+        base_col_name = f"{algo_name} ({batch_id})"
         
-        # We only need Environment and Mean_Ret for the comparison
-        # We rename Mean_Ret to include the algo and timestamp for uniqueness
-        column_name = f"{algo_name} ({batch_id})"
-        df = df[["Environment", "Mean_Ret"]].rename(columns={"Mean_Ret": column_name})
+        # Determine which columns to keep and how to rename them
+        # We check if Mean_Disc_Ret exists to support older summary files that might not have it
+        cols_to_keep = ["Environment", "Mean_Ret"]
+        rename_map = {"Mean_Ret": f"{base_col_name} [Ret]"}
+        
+        if "Mean_Disc_Ret" in df.columns:
+            cols_to_keep.append("Mean_Disc_Ret")
+            rename_map["Mean_Disc_Ret"] = f"{base_col_name} [Disc]"
+            
+        # Select and Rename
+        df = df[cols_to_keep].rename(columns=rename_map)
         
         # Set index to Environment for easier joining
         df.set_index("Environment", inplace=True)
         all_dfs.append(df)
 
+    if not all_dfs:
+        print("No valid data found to aggregate.")
+        return None
+
     # Join all dataframes on the 'Environment' index
     # 'outer' join ensures we keep all environments found across all files
     comparison_df = pd.concat(all_dfs, axis=1, join="outer")
     
-    # Fill missing values (envs not run in a specific batch) with NaN or 0
+    # Sort by Environment name
     comparison_df = comparison_df.sort_index()
     
     return comparison_df
@@ -44,9 +62,11 @@ if __name__ == "__main__":
     df_comparison = aggregate_all_summaries()
     
     if df_comparison is not None:
-        print("\n=== Cross-Run Comparison (Mean Returns) ===")
+        print("\n=== Cross-Run Comparison (Returns & Discounted Returns) ===")
+        # Using to_string() makes sure pandas prints the whole table without truncating
         print(df_comparison.to_string())
         
         # Save the master comparison
-        df_comparison.to_csv("results/master_comparison.csv")
-        print("\nSaved master comparison to results/master_comparison.csv")
+        output_path = "results/master_comparison.csv"
+        df_comparison.to_csv(output_path)
+        print(f"\nSaved master comparison to {output_path}")
