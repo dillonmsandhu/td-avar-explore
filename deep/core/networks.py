@@ -5,13 +5,14 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 import distrax
 import math
+from gymnax.environments import spaces
 
 # =====================================================
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
-def initialize_rnd_network(rng, obs_shape, config, k=128):
-    model = RND_Net(network_type=config["NETWORK_TYPE"], k=k, normalize = config['NORMALIZE_FEATURES'])
+def initialize_rnd_network(rng, obs_shape, network_type, normalize_features, bias=True, k=128):
+    model = RND_Net(network_type=network_type, k=k, normalize = normalize_features, bias = bias)
     rng, init_rng = jax.random.split(rng)
     print('obs shape is ', obs_shape)
     params = model.init(init_rng, jnp.zeros(obs_shape))
@@ -19,7 +20,6 @@ def initialize_rnd_network(rng, obs_shape, config, k=128):
 
 def initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads: int):
     # Detect if continuous
-    from gymnax.environments import spaces
     is_continuous = isinstance(env.action_space(env_params), spaces.Box)
     action_dim = env.action_space(env_params).shape[0] if is_continuous else env.action_space(env_params).n
     
@@ -118,8 +118,51 @@ class CNNTorso(nn.Module):
         x = x.reshape(*x.shape[:-3], -1)
         x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         return x
+    
+class CNNTorso1D(nn.Module):
+    out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
+
+    @nn.compact
+    def __call__(self, x):
+        """
+        x: (Batch, Length, 1) or (Batch, Length)
+        """
+        
+        if x.ndim <= 2:
+            x = x[..., None]
+        
+        # Layer 1: 200 -> 100 (Stride 2)
+        x = nn.Conv(features=4, kernel_size=(3,), strides=(2,), padding="SAME")(x)
+        x = nn.relu(x)
+
+        # Layer 2: 100 -> 50 (Stride 2)
+        x = nn.Conv(features=8, kernel_size=(3,), strides=(2,), padding="SAME")(x)
+        x = nn.relu(x)
+
+        # Layer 3: 50 -> 25 (Stride 2)
+        x = nn.Conv(features=8, kernel_size=(3,), strides=(2,), padding="SAME")(x)
+        x = nn.relu(x)
+
+        # Flatten: 25 * 8 = 200 features
+        x = x.reshape(*x.shape[:-2], -1)
+        
+        # Final Projection to desired embedding size (e.g. 64)
+        x = nn.Dense(self.out_dim)(x)
+        return x
+    
+class Identity(nn.Module):
+    out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
+
+    @nn.compact
+    def __call__(self, x):
+        assert self.out_dim == x.shape[-1], f'Out dim is {self.out_dim}, x shape is {x.shape}'
+        return x
 
 def make_torso(network_type: str, **kwargs):
+    if network_type == "identity":
+        return Identity(**kwargs)
+    if network_type == "cnn_1d":
+        return CNNTorso1D(**kwargs)
     if network_type == "cnn":
         return CNNTorso(**kwargs)
     elif network_type == "mlp":
@@ -135,49 +178,28 @@ def make_torso(network_type: str, **kwargs):
 class RNDTrainState(TrainState):
     target_params: Any
 
-# class RND_Net(nn.Module):
-#     activation: str = "tanh"
-
-#     @nn.compact
-#     def __call__(self, x):
-#         if self.activation == "relu":
-#             activation = nn.relu
-#         else:
-#             activation = nn.tanh
-#         embedding = nn.Dense(
-#             64, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
-#         )(x)
-#         embedding = activation(embedding)
-#         embedding = nn.Dense(
-#             128, kernel_init=orthogonal(1.0), bias_init=constant(0.0)
-#         )(embedding)
-#         embedding = activation(embedding)
-
-#         return embedding
-
 class RND_Net(nn.Module):
     network_type: str
     k: int = 128
     normalize: bool = False
+    bias: bool = True
     
     def setup(self):
-        # We output k-1 features so that after adding the bias term we have exactly k
-        self.torso = make_torso(self.network_type, out_dim=self.k - 1)
+        k = self.k - 1 if self.bias else self.k
+        self.torso = make_torso(self.network_type, out_dim= k)
 
     def __call__(self, x):
         phi = self.torso(x)  
-        # phi = nn.relu(phi) # we want only 0> features
 
         if self.normalize:
             norm = jnp.linalg.norm(phi, axis=-1)  # normalize
             phi = phi / jnp.maximum(norm[..., None], 1e-8)
         
-        batch_size = phi.shape[:-1]
-        # bias_val = 1.0 / jnp.sqrt(self.k)
-        bias_val = 1.0
-        bias = jnp.ones((*batch_size, 1)) * bias_val
-        
-        phi = jnp.concatenate([phi, bias], axis=-1)
+        if self.bias:
+            bias_val = 1.0
+            batch_size = phi.shape[:-1]
+            bias = jnp.ones((*batch_size, 1)) * bias_val
+            phi = jnp.concatenate([phi, bias], axis=-1)
         
         return phi
 

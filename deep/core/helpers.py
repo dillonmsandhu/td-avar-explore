@@ -2,11 +2,11 @@
 # This file contains technical helpers used for the RL loop, including GAE and trace computation, PPO loss, and environment initialization.
 from core.imports import *
 from envs.sparse_mc import SparseMountainCar
-from envs.fourrooms_custom import FourRooms
 import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction
+from envs.long_chain import LongChain
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -29,15 +29,21 @@ def load_config(args):
     return config
 
 def make_env(config):
+
     if config['ENV_NAME'] == "FourRooms-misc" and config['NETWORK_TYPE'] == 'cnn':
-        N = config['FOURROOMS_SIZE']
-        env = FourRooms(N=N, use_visual_obs=True)
+        env, env_params = gymnax.make(config["ENV_NAME"], use_visual_obs = True)
+    
+    elif config['ENV_NAME'] == "Chain":
+        env = LongChain(config.get('CHAIN_LENGTH', 100))
         env_params = env.default_params
+
     elif config['ENV_NAME'] == "SparseMountainCar-v0":
         env = SparseMountainCar()
         env_params = env.default_params
+    
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
         env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+    
     else:
         env, env_params = gymnax.make(config["ENV_NAME"])
         print('Env:', config['ENV_NAME'])
@@ -91,9 +97,48 @@ def sigma_update(   sigma_state: Dict,
     N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
     S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
     S_b = S_update.mean(axis=batch_axes) # Batch average
-    S_b = 0.5 * (S_b + S_b.T) # symmetrize
     S = (1-α) * S + α * S_b # EMA
+    S = 0.5 * (S+ S.T) # symmetrize
     return {'S': S, 'N': N, 't': t+1} # new sigma_state
+
+def EMA(coeff, x_old, x_new):
+    return (1 - coeff) * x_old + coeff * x_new
+
+def sigma_update_masked(
+    sigma_state: Dict,
+    features: jnp.ndarray,  # Shape: (..., k)
+    mask: jnp.ndarray,      # Shape: (...) matching the batch dimensions of features
+    α: float,
+):
+    """
+    Masks out those that are included twice
+    Takes a mask that corresponds to what included feature vectors are valid for the update.
+    """
+    S = sigma_state['S']
+    S_update = jnp.einsum("...i, ...j -> ...ij", features, features)
+    
+    # 2. Apply Mask
+    # Expand mask to (..., 1, 1) so it broadcasts over the (k, k) matrix dimensions
+    # Zeros out the outer products corresponding to invalid/padding states
+    S_masked = S_update * mask[..., None, None]
+    
+    # 3. Compute Weighted Mean
+    batch_axes = tuple(range(mask.ndim))
+    total_valid = jnp.sum(mask)
+    S_batch_mean = jnp.sum(S_masked, axis=batch_axes) / total_valid
+    
+    # 4. Update & Force Symmetry
+    S_new = EMA(α, S, S_batch_mean)
+    S_new = 0.5 * (S_new + S_new.T)
+    
+    # 5. Update N
+    N_new = sigma_state['N'] + jnp.sum(mask)
+    
+    return {
+        'S': S_new, 
+        'N': N_new, 
+        't': sigma_state['t'] + 1
+    }
 
 def _get_all_traces(traj_batch, features, γ, λ):
     """Get all traces for a batch of trajectories.
@@ -284,12 +329,11 @@ def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, 
     )
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
-def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, γi=None, λi=None):
+def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, λi=None, γi=None):
     """Episodic Intrinsic TD Target"""
     if λi is None:
         λi = λ 
-
-    if γi==None:
+    if γi is None:
         γi = γ
 
     def _get_advantages(gae_and_next_value, transition):
@@ -515,3 +559,215 @@ def get_alpha_schedule(a_schedule, min_lr=0.1):
     else:
         assert f'a_schedule={a_schedule} not recognized.'
     return alpha_fn
+
+def schedule_extrinsic_to_intrinsic_ratio(percent, ratio_e_to_i = 1.0):
+    # Phase 1: Warmup (0% -> 10%) 
+    # Phase 2: Plateau (10% -> 80%)
+    # Phase 3: Decay (80% -> 100%)
+    warmup = jnp.minimum(1.0, percent / 0.05)
+    decay = jnp.clip((1.0 - percent) / 0.2, 0.0, 1.0)
+    return ratio_e_to_i * warmup * decay
+
+def warmup_env(rng, env, env_params, config):
+    """
+    Runs warmup to populate running statistics, then resets the environment
+    to s0 while preserving those statistics.
+    
+    Assumes Wrapper Hierarchy from make_env:
+    Outer -> NormalizeObservationWrapper -> NormalizeRewardWrapper -> Base(Flatten/Clip/etc) -> Inner
+    """
+    
+    # 1. Check which wrappers are actually active
+    norm_obs = config.get("NORMALIZE_OBS", False)
+    norm_rew = config.get("NORMALIZE_REWARDS", False)
+    num_envs = config["NUM_ENVS"]
+    
+    # 2. Prepare RNGs
+    rng, reset_rng = jax.random.split(rng)
+    reset_rngs = jax.random.split(reset_rng, num_envs)
+
+    # -------------------------------------------------------------------------
+    # CASE A: No Normalization (Skip Warmup)
+    # -------------------------------------------------------------------------
+    if not norm_obs and not norm_rew:
+        obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rngs, env_params)
+        return env_state, obsv, rng
+
+    # -------------------------------------------------------------------------
+    # CASE B: Run Warmup
+    # -------------------------------------------------------------------------
+    # Initial reset just for the warmup loop
+    obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rngs, env_params)
+
+    def _warmup_step(runner_state, step_idx):
+        env_state, last_obs, rng = runner_state
+        
+        # RNG splitting
+        rng, _rng = jax.random.split(rng)
+        rng_action = jax.random.split(_rng, num_envs)
+        rng, _rng = jax.random.split(rng)
+        rng_step = jax.random.split(_rng, num_envs)
+
+        # Action / Step
+        action = jax.vmap(env.action_space(env_params).sample)(rng_action)
+        obsv, next_env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
+            rng_step, env_state, action, env_params
+        )
+
+        # Staggered Starts Logic
+        if config.get("STAGGERED_STARTS", False):
+            rng, _rng = jax.random.split(rng)
+            # Create a threshold for each env
+            start_thresholds = jax.random.randint(_rng, (num_envs,), 0, config["WARMUP"])
+            active_mask = step_idx < start_thresholds
+            
+            # Mask state and observation
+            env_state = jax.tree.map(
+                lambda x, y: jnp.where(active_mask.reshape(-1, *([1] * (x.ndim - 1))), x, y),
+                next_env_state, env_state
+            )
+            obsv = jnp.where(active_mask.reshape(-1, *([1] * (obsv.ndim - 1))), obsv, last_obs)
+        else:
+            env_state = next_env_state
+
+        return (env_state, obsv, rng), None
+
+    # Run Scan
+    warmup_runner_state = (env_state, obsv, rng)
+    (env_state, obsv, rng), _ = jax.lax.scan(
+        _warmup_step, warmup_runner_state, jnp.arange(config["WARMUP"])
+    )
+
+    # -------------------------------------------------------------------------
+    # CASE C: State Injection (Reset to s0, keep stats)
+    # -------------------------------------------------------------------------
+    # We generate fresh reset keys for the actual run
+    rng, reset_rng = jax.random.split(rng)
+    reset_rngs = jax.random.split(reset_rng, num_envs)
+
+    if norm_obs and norm_rew:
+        # Hierarchy: ObsWrapper(RewardWrapper(Base))
+        obs_stats = env_state.mean_std
+        rew_stats = env_state.env_state.mean_std
+        base_env = env._env._env 
+
+        # 1. Reset the base environment (clears game state, gives raw s0)
+        raw_obs, base_state = jax.vmap(base_env.reset, in_axes=(0, None))(reset_rngs, env_params)
+
+        # 2. Reconstruct Reward State (Keep stats, reset return_val to 0)
+        # Note: We create a zeros array of shape (NUM_ENVS,) for the vectorized state
+        rew_state = NormalizeRewardEnvState(
+            mean_std=rew_stats,
+            return_val=jnp.zeros((num_envs,), dtype=jnp.float32), 
+            env_state=base_state
+        )
+
+        # 3. Reconstruct Obs State (Keep stats, wrap reward state)
+        final_state = NormalizeObsEnvState(
+            mean_std=obs_stats,
+            env_state=rew_state
+        )
+
+        # 4. Normalize the raw s0 observation using warmed-up stats
+        final_obs = jax.vmap(env._normalize)(raw_obs, obs_stats)
+
+    elif norm_obs and not norm_rew:
+        # Hierarchy: ObsWrapper(Base)
+        obs_stats = env_state.mean_std
+        base_env = env._env 
+
+        raw_obs, base_state = jax.vmap(base_env.reset, in_axes=(0, None))(reset_rngs, env_params)
+        
+        final_state = NormalizeObsEnvState(
+            mean_std=obs_stats,
+            env_state=base_state
+        )
+        final_obs = jax.vmap(env._normalize)(raw_obs, obs_stats)
+
+    elif not norm_obs and norm_rew:
+        # Hierarchy: RewardWrapper(Base)
+        rew_stats = env_state.mean_std
+        base_env = env._env 
+
+        raw_obs, base_state = jax.vmap(base_env.reset, in_axes=(0, None))(reset_rngs, env_params)
+        
+        final_state = NormalizeRewardEnvState(
+            mean_std=rew_stats,
+            return_val=jnp.zeros((num_envs,), dtype=jnp.float32),
+            env_state=base_state
+        )
+        final_obs = raw_obs # No obs normalization
+
+    return final_state, final_obs, rng
+
+def update_cov_and_get_rho(traj_batch, sigma_state, get_features_fn, int_rew_from_features_fn, sigma_ema_alpha_fn):
+    "Updates traj_batch and sigma_state based on feature visitations."
+    # --- 1. Update EMA of Gram Matrix ---
+    phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
+    next_phi = get_features_fn(traj_batch.next_obs)# Contains s_T (Terminal)
+    terminal_phi = next_phi * traj_batch.done[..., None]
+    # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
+    all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
+
+    # Update Sigma
+    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+    
+    sigma_state = sigma_update_masked(sigma_state, all_phi_sigma, mask_sigma, sigma_ema_alpha_fn(sigma_state['t']) )
+    
+    # A. Intrinsic Reward (Future Novelty)
+    rho = int_rew_from_features_fn(next_phi)
+    rho = rho - rho.min()
+    traj_batch = traj_batch._replace(intrinsic_reward=rho) # used by LSTD estimat
+
+    return traj_batch, sigma_state, rho
+
+
+def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta, network, train_state, traj_batch, get_vi = None, get_ve = None):
+    "Uses evaluator to compute the per-state quantities and append them to metric, quantities: ve, vi, ri"
+    ri = int_rew_from_state(evaluator.obs_stack)
+    ri = evaluator.get_value_grid(ri)
+    effective_visits = (old_beta / ri)**2
+    # 1. Compute Exact Values using the Evaluator
+    v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, int_rew_from_state)
+    if len(v_pred) ==2:
+        v_pred, vi_pred = v_pred # evaluator already returned these in grid form if the network returns them
+    else:
+        vi_pred = get_vi(evaluator.obs_stack)
+        v_pred = evaluator.get_value_grid(v_pred) if get_ve is None else evaluator.get_value_grid(get_ve(evaluator.obs_stack))
+        vi_pred = evaluator.get_value_grid(vi_pred)
+    
+    if config['RND_NETWORK_TYPE'] == 'identity': # One hot features, we can keep track of visitiatinos
+        visitation = traj_batch.obs.sum(0).sum(0) # sum over batch axes the visitation count.
+        metric['visitation_count'] = evaluator.get_value_grid(visitation) 
+    else:
+        metric['visitation_count'] = jnp.zeros_like(ri)
+
+    metric.update({
+        "ri_grid": ri,
+        "vi_pred": vi_pred,
+        "v_i_pred": vi_pred,
+        "v_i": v_i,
+        "v_e": v_e,
+        "v_e_pred": v_pred,
+        "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
+        "i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - vi_pred)**2),
+        "effective_visits": effective_visits,
+    })
+
+    return metric
+
+def update_beta(old_beta, i_values, e_values, progress, update=True):
+    "Scales rho. Normalizes the intrinsic value relative to the extrinsic value. "
+    "End result: ri is normalized by dividing the mean intinrisic value and multiplying by the mean extrinisc value."
+    "Let i = mean(|v_i|) and e = mean(|v_e|), where v_i is unscaled intrinsic value. c_t is on a schedule (usually = 1)"
+    "β = c_t * v / i"
+    "v_i_scaled = β v_i = (v_i / i) * ( c_t * e )"
+    if not update:
+        return old_beta
+    c_t = schedule_extrinsic_to_intrinsic_ratio(progress) # ratio of i_value to e_value, equal to 1 for most of learnings 
+    vi_mag = jnp.mean(jnp.abs(i_values))
+    ve_mag = jnp.mean(jnp.abs(e_values))
+    target_mag = jnp.maximum(ve_mag, 1.0) # Floor for extrinsic scale
+    beta = c_t * (target_mag / vi_mag)
+    beta = jnp.minimum(beta, 1000.0)
+    return beta

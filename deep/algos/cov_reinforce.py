@@ -48,8 +48,8 @@ def make_train(config):
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config)
-        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config)
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
             
         # initialize value and policy network
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
@@ -160,7 +160,7 @@ def make_train(config):
             _, last_val = network.apply(train_state.params, last_obs)
             gaes, targets = gae_fn(traj_batch, last_val, jnp.zeros_like(last_val), config["GAMMA"], config['GAE_LAMBDA'], λi=1.0, γi = config["GAMMA_i"]) #REINFORCE
             e_gae, i_gae = gaes
-                        
+            i_gae -= i_gae.mean() # subtract out baseline to reduce variance. True REINFORCE would use intrinisc and extrinsic TD returns.
             i_gae = jax.lax.cond(config['STANDARDIZE_I_GAE'],
                                lambda x: standardize(x),
                                lambda x: x,
@@ -169,7 +169,13 @@ def make_train(config):
             # Average Return across this timestep across all batches ~ V
             gaes = (e_gae, i_gae)
             advantages = i_gae + e_gae
+            advantages = jax.lax.cond(config['STANDARDIZE_I_GAE'],
+                               lambda x: standardize(x),
+                               lambda x: x,
+                               operand = i_gae,
+                               )
             extrinsic_target = targets[0]
+
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):

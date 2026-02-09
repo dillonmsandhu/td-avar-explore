@@ -3,8 +3,8 @@ from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
+from envs.long_chain import LongChainExactValue
 SAVE_DIR = 'cov_net'
-
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -19,38 +19,34 @@ class Transition(NamedTuple):
     info: jnp.ndarray
     
 def make_train(config):
+    assert config.get('EPISODIC', True)
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
     k = config.get('RND_FEATURES', 128)
-    GET_ALPHA_FN = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
-
-    if config['EPISODIC']: 
-        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic
-    else:
-        gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic
-    # --- Setup Evaluator (Only if requested) ---
+    alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
-    if calc_true_values:
+
+    if calc_true_values and config['ENV_NAME'] == 'DeepSea-bsuite':
         evaluator = DeepSeaExactValue(
-            size=config['DEEPSEA_SIZE'], 
-            unscaled_move_cost=0.01, 
-            gamma=config['GAMMA'], 
-            episodic=config['EPISODIC']
+            size=config['DEEPSEA_SIZE'], unscaled_move_cost=0.01, gamma=config['GAMMA'], episodic=config['EPISODIC']
         )
-    def get_int_rew(S, features, N):
+    if calc_true_values and config['ENV_NAME'] == 'Chain':
+        evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], config['EPISODIC'])
+
+    def get_scale_free_bonus(S, features):
+        """bonus = x^T Sigma^{-1} X, where Sigma^{-1} is the empriical second moment inverse."""
         Sigma_inv = jnp.linalg.solve(S + config['GRAM_REG'] * jnp.eye(features.shape[-1]), jnp.eye(features.shape[-1]))
-        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features) / jnp.maximum(1.0, N)
-        rho = config['BONUS_SCALE'] * jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
-        return rho
+        bonus_sq = jnp.einsum('...i,ij,...j->...', features, Sigma_inv, features)
+        return jnp.sqrt(bonus_sq)
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config)
-        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config)
+        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
+        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
             
         # initialize value and policy network
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=3)
@@ -69,35 +65,14 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
 
-        # WARMUP:
-        def _warmup_step(runner_state, unused):
-            env_state, last_obs, rng = runner_state
-            
-            # Select RANDOM actions (no need for network here, just exploring state space)
-            rng, _rng = jax.random.split(rng)
-            rng_action = jax.random.split(_rng, config["NUM_ENVS"])
-            action = jax.vmap(env.action_space(env_params).sample)(rng_action)
-            # Step env (wrappers will update their internal mean/std stats automatically)
-            rng, _rng = jax.random.split(rng)
-            rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-            obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0,None))(
-                rng_step, env_state, action, env_params
-            )
-            
-            return (env_state, obsv, rng), None
-
-        # Run the warmup
-        warmup_runner_state = (env_state, obsv, rng)
-        (env_state, obsv, rng), _ = jax.lax.scan(
-            _warmup_step, warmup_runner_state, None, config["WARMUP"]
-        )
         # -------------------------
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             
-            train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx = runner_state
+            train_state, sigma_state, rnd_state, env_state, last_obs, beta, rng, idx = runner_state
             
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
@@ -122,8 +97,8 @@ def make_train(config):
                     done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
                 )
 
-                runner_state = (train_state, rnd_state, env_state, obsv, rng)
-                return runner_state, transition
+                env_scan_state = (train_state, rnd_state, env_state, obsv, rng)
+                return env_scan_state, transition
             
             initial_obs = last_obs # shape: (NUM_ENVS, *obs_shape)
             env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
@@ -133,40 +108,42 @@ def make_train(config):
             
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
-            initial_obs_expanded = jnp.expand_dims(initial_obs, axis=0)
-            all_encountered_obs = jnp.concatenate([initial_obs_expanded, traj_batch.next_obs], axis=0)
-            all_phi = batch_get_features(all_encountered_obs)
+            int_rew_from_features = lambda phi: get_scale_free_bonus(sigma_state['S'], phi) 
+            traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
             
-            phi = all_phi[:-1]
-            sigma_state = helpers.sigma_update( sigma_state, traj_batch, all_phi, α=GET_ALPHA_FN(sigma_state['t']),)
-            # COMPUTE intrinsic reward:            
-            int_rew_from_features = lambda features: get_int_rew(sigma_state['S'], features, sigma_state['N'] + config['NUM_ENVS'])
-            
-            next_phi = all_phi[1:]
-            rho = int_rew_from_features(next_phi)
-            traj_batch = traj_batch._replace(intrinsic_reward=rho)
-            
+            # Scale rho
+            beta = helpers.update_beta(beta, 
+                               traj_batch.i_value, 
+                               traj_batch.value, 
+                               progress = sigma_state['N'] / config['TOTAL_TIMESTEPS'], 
+                               update=config['ADAPTIVE_BETA']
+            )
+            # Final scale of r_i is unscaled rho times 1/sqrt(N) times beta
+            rho_scale = beta / jnp.maximum(1.0, jnp.sqrt(sigma_state['N']))
+
             # Advantage
             _, last_val, last_i_val = network.apply(train_state.params, last_obs)
-            gaes, targets = gae_fn(traj_batch, last_val, last_i_val, config["GAMMA"], config["GAE_LAMBDA"])
-            advantages = gaes[0] + gaes[1]
+            # Extrinsic Advantage
+            gae_e, target_e = helpers._calculate_gae(traj_batch, last_val, config["GAMMA"], config["GAE_LAMBDA"])
+            # B. Intrinsic GAE (Unit Scale)
+            gae_i, target_i = helpers._calculate_gae(traj_batch, last_i_val, config["GAMMA_i"], config["GAE_LAMBDA_i"])
+            
+            # C. Combine using Beta
+            # Total Advantage = Adv_Extrinsic + (Beta * Adv_Intrinsic)
+            targets = (target_e, rho_scale * target_i) 
+            advantages = gae_e + (rho_scale * gae_i)
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
-                    
-                    
-                    # --- UPDATE PPO ---
-                    # def _loss_fn_intrisic_v(params, network, traj_batch, gae, targets, config):
                     grad_fn = jax.value_and_grad(helpers._loss_fn_intrinsic_v, has_aux=True)
                     (total_loss, (i_value_loss, value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    
                     return train_state, (total_loss, i_value_loss, value_loss, loss_actor, entropy)
-
+                
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
@@ -174,6 +151,7 @@ def make_train(config):
                 train_state, losses = jax.lax.scan(_update_minbatch, train_state, minibatches)
                 update_state = (train_state, traj_batch, advantages, targets, rng)
                 return update_state, losses
+            
             # --------- Train the network ---------
             initial_update_state = (train_state, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(
@@ -182,54 +160,51 @@ def make_train(config):
             train_state, _, _, _, rng = update_state
             # -------------------------------
             # --------- Update metrics ------
+
+            scaled_reward = traj_batch.intrinsic_reward * rho_scale
+            scaled_i_val = traj_batch.i_value * rho_scale
+            
             metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
+
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "i_value_loss": loss_info[1].mean(),
                 "e_value_loss": loss_info[2].mean(),
                 "pi_loss": loss_info[3].mean(),
                 "entropy": loss_info[4].mean(),
-                "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
-                "bonus_mean": gaes[1].mean(),
-                "bonus_std": gaes[1].std(),
-                "bonus_max": gaes[1].max(),
+                "bonus_mean": gae_i.mean(),
+                "bonus_std": gae_i.std(),
+                "bonus_max": gae_i.max(),
                 "lambda_ret_mean": targets[0].mean(),
                 "lambda_ret_std": targets[0].std(),
-                "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
-                "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
+                "intrinsic_rew_mean": scaled_reward.mean(),
+                "intrinsic_rew_std": scaled_reward.std(),
                 "mean_rew": traj_batch.reward.mean(),
+                "beta": beta,
+                "rho_scale": rho_scale
             })
-            # Branch: Expensive True Values vs. Cheap Proxies
-            # Branch: Expensive True Values vs. Cheap Proxies
-            if calc_true_values:
-                # def compute_true_values(self, network: Any, params: PyTree,lstd_state: Dict, get_features: Callable, get_int_rew: Callable
-                v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, batch_get_features, int_rew_from_features)
-                v_pred, v_i_pred = v_pred
-                ri_grid_vals = int_rew_from_features(batch_get_features(evaluator.obs_stack))
-                ri_grid = evaluator.get_value_grid(ri_grid_vals)
 
+            if evaluator is None: # No way to compute true values, just record the batch average prediction.
                 metric.update({
-                    "ri_grid": ri_grid,
-                    "vi_pred": v_i_pred,
-                    "v_i": v_i,
-                    "v_e": v_e,
-                    "v_e_pred": v_pred,
-                    "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
-                    "i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - v_i_pred)**2),
-                })
+                "vi_pred": scaled_i_val.mean(),
+                "v_e_pred": traj_batch.value.mean()
+            })
             else:
-                metric.update({
-                    "vi_pred": traj_batch.i_value.mean(),
-                    "v_e_pred": traj_batch.value.mean()
-                })
-            runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
+                def int_rew_from_state(s):
+                    phi = batch_get_features(s)
+                    rho = int_rew_from_features(phi) * rho_scale
+                    return rho
+                
+                metric = helpers.add_values_to_metric(config, metric, int_rew_from_state, evaluator, beta, network, train_state, traj_batch)
+                
+            runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, beta, rng, idx+1)
             return runner_state, metric
             # end update_step
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 0)
+        init_runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, config['BONUS_SCALE'], _rng, 0)
         runner_state, metrics = jax.lax.scan(
-            _update_step, runner_state, None, config["NUM_UPDATES"]
+            _update_step, init_runner_state, None, config["NUM_UPDATES"]
         )
         return {"runner_state": runner_state, "metrics": metrics}
 

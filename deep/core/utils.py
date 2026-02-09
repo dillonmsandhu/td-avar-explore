@@ -6,7 +6,6 @@ import cloudpickle
 import matplotlib.pyplot as plt
 from core.networks import *
 
-
 def run_experiment_main(make_train, SAVE_DIR):
     import argparse
     import datetime
@@ -22,7 +21,7 @@ def run_experiment_main(make_train, SAVE_DIR):
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
     parser.add_argument('--base-config', type=str, default='shared', 
-                        choices=['shared','mc', 'ds', 'min', 'visual'])
+                        choices=['shared','mc', 'ds', 'min', 'visual', 'chain'])
     parser.add_argument('--env_ids', nargs='+', default=[])
 
     args = parser.parse_args()
@@ -56,7 +55,6 @@ def run_experiment_main(make_train, SAVE_DIR):
             print(f"!!! CRITICAL ERROR running {env_name} !!!")
             traceback.print_exc()
             print("Continuing to next environment...")
-
 
 def parse_config_override(config_str):
     """Parse config override from command line argument."""
@@ -225,5 +223,8 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
                         save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, mean_data[1:], key)
                 else:
                     # Values are Grids (DeepSea), plot initial state (0,0)
-                    initial_state_data = mean_data[:, 0, 0] 
+                    if run_config['ENV_NAME'] == 'DeepSea-bsuite':
+                        initial_state_data = mean_data[:, 0, 0] 
+                    else:
+                        initial_state_data = mean_data[:, 0] 
                     save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, initial_state_data[1:], key)
