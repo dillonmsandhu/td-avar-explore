@@ -325,6 +325,7 @@ def make_train(config):
                 def int_rew_from_state(s): # for computing the intrinsic reward given an arbitrary state 
                     phi = batch_get_features(s)
                     rho = int_rew_from_features(phi) * rho_scale
+                    jax.debug.print('unscaled reward for s is {ri}', ri = int_rew_from_features(phi)[0])
                     return rho
                 
                 get_vi = lambda obs: batch_get_features(obs) @ lstd_state['w_i'] * rho_scale 
