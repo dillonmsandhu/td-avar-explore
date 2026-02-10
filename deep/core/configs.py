@@ -141,6 +141,7 @@ CONFIG_REGISTRY = {
                 "envs": [
                     "Pong-misc", 
                     "FourRooms-misc", 
+                    "FourRoomsCustom-v0",
                     "MNISTBandit-bsuite", 
                     "Catch-bsuite"]},
     "mc":     {"config_dict": mc_config, 

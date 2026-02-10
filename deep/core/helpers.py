@@ -6,7 +6,9 @@ import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
+from envs.fourrooms_custom import FourRooms
 from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, ClipRewardWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -30,12 +32,25 @@ def load_config(args):
 
 def make_env(config):
 
-    if config['ENV_NAME'] == "FourRooms-misc" and config['NETWORK_TYPE'] == 'cnn':
-        env, env_params = gymnax.make(config["ENV_NAME"], use_visual_obs = True)
+    if config["ENV_NAME"] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+        env = FourRooms(
+            N=int(config.get("FOURROOMS_SIZE", 13)),
+            use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
+        )
+        env_params = env.default_params.replace(
+            fail_prob=float(config.get("FOURROOMS_FAIL_PROB", env.default_params.fail_prob)),
+            resample_init_pos=bool(config.get("FOURROOMS_RESAMPLE_INIT_POS", env.default_params.resample_init_pos)),
+            resample_goal_pos=bool(config.get("FOURROOMS_RESAMPLE_GOAL_POS", env.default_params.resample_goal_pos)),
+            max_steps_in_episode=int(config.get("FOURROOMS_MAX_STEPS", env.default_params.max_steps_in_episode)),
+        )
     
     elif config['ENV_NAME'] == "Chain":
         env = LongChain(config.get('CHAIN_LENGTH', 100))
-        env_params = env.default_params
+        env_params = env.default_params.replace(
+            fail_prob=float(config.get("CHAIN_FAIL_PROB", env.default_params.fail_prob)),
+            resample_init_pos=bool(config.get("CHAIN_RESAMPLE_INIT_POS", env.default_params.resample_init_pos)),
+            max_steps_in_episode=int(config.get("CHAIN_MAX_STEPS", env.default_params.max_steps_in_episode)),
+        )
 
     elif config['ENV_NAME'] == "SparseMountainCar-v0":
         env = SparseMountainCar()
@@ -704,7 +719,7 @@ def update_cov_and_get_rho(traj_batch, sigma_state, get_features_fn, int_rew_fro
     "Updates traj_batch and sigma_state based on feature visitations."
     # --- 1. Update EMA of Gram Matrix ---
     phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
-    next_phi = get_features_fn(traj_batch.next_obs)# Contains s_T (Terminal)
+    next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
     terminal_phi = next_phi * traj_batch.done[..., None]
     # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
     all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
@@ -726,7 +741,7 @@ def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta
     "Uses evaluator to compute the per-state quantities and append them to metric, quantities: ve, vi, ri"
     ri = int_rew_from_state(evaluator.obs_stack)
     ri = evaluator.get_value_grid(ri)
-    effective_visits = (old_beta / ri)**2
+    effective_visits = (old_beta / jnp.maximum(ri, 1e-8))**2
     # 1. Compute Exact Values using the Evaluator
     v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, int_rew_from_state)
     if len(v_pred) ==2:
@@ -736,9 +751,25 @@ def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta
         v_pred = evaluator.get_value_grid(v_pred) if get_ve is None else evaluator.get_value_grid(get_ve(evaluator.obs_stack))
         vi_pred = evaluator.get_value_grid(vi_pred)
     
-    if config['RND_NETWORK_TYPE'] == 'identity': # One hot features, we can keep track of visitiatinos
-        visitation = traj_batch.obs.sum(0).sum(0) # sum over batch axes the visitation count.
-        metric['visitation_count'] = evaluator.get_value_grid(visitation) 
+    obs = jnp.asarray(traj_batch.obs)
+    if config.get("ENV_NAME") in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+        # Visual FourRooms obs: (T, B, H, W, C) where channel 1 is the agent one-hot map.
+        if obs.ndim >= 5:
+            metric['visitation_count'] = obs[..., 1].sum(axis=(0, 1))
+        # Vector FourRooms obs: (T, B, 4) = [agent_y, agent_x, goal_y, goal_x].
+        elif obs.ndim >= 3 and obs.shape[-1] >= 2:
+            size = int(config.get("FOURROOMS_SIZE", ri.shape[0]))
+            pos = obs[..., :2].astype(jnp.int32)
+            y = jnp.clip(pos[..., 0], 0, size - 1).reshape(-1)
+            x = jnp.clip(pos[..., 1], 0, size - 1).reshape(-1)
+            counts = jnp.zeros((size, size), dtype=jnp.float32)
+            metric['visitation_count'] = counts.at[y, x].add(1.0)
+        else:
+            metric['visitation_count'] = jnp.zeros_like(ri)
+    elif config['RND_NETWORK_TYPE'] == 'identity':
+        # One-hot tabular features: recover state visitation from observations.
+        visitation = obs.sum(0).sum(0)
+        metric['visitation_count'] = evaluator.get_value_grid(visitation)
     else:
         metric['visitation_count'] = jnp.zeros_like(ri)
 
