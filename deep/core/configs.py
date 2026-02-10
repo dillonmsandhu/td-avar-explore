@@ -1,7 +1,7 @@
 NORMALIZE_FEATURES = True # for LSTD.
 EPISODIC = True # RND continuous. RND LSTD try both. 
 BIAS = True # for LSTD 
-NORMALIZE_REWARDS = True
+NORMALIZE_REWARDS = False
 # for RND: bias, episodic, and normalize feawtures are all false.
 # for covariance based: all true
 
@@ -30,8 +30,8 @@ min_specific = {
     "TOTAL_TIMESTEPS": 1e7,
     "LR": 2.5e-3,
     "LR_END": 1e-5,
-    "NUM_ENVS": 128,
-    "NUM_STEPS": 64,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
     "GAE_LAMBDA": 0.8,
     "CLIP_EPS": 0.1,
     "VF_CLIP": 0.2,
@@ -39,6 +39,7 @@ min_specific = {
     "NORMALIZE_OBS": False,
     "WARMUP": 20_000, # warmup steps for running mean/std
     "NETWORK_TYPE": 'cnn',
+    "RND_NETWORK_TYPE": 'cnn', 
     "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     "N_SEEDS": 4,
 }
@@ -68,9 +69,9 @@ shared = {
     "NORMALIZE_OBS": True,
     "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     # FOR Covariance Based Reward
-    "BONUS_SCALE": 1.0,
+    "BONUS_SCALE": 1.96,
     "A_REGULARIZATION_PER_STEP": 1e-8,
-    "A_REGULARIZATION": 1e-3,
+    "A_REGULARIZATION": 1e-1,
     "GRAM_REG": 1e-3,
     "N_SEEDS": 8,
     "EPISODIC": EPISODIC,
@@ -79,13 +80,14 @@ shared = {
     "RND_NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,
     "ALPHA_SCHEDULE": 'constant',
-    "MIN_COV_LR": 1/20,
-    "MIN_LSTD_LR": 1/20,
-    "MIN_LSTD_LR_RI": 1/10, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
+    "MIN_COV_LR": 1/50,
+    "MIN_LSTD_LR": 1/50,
+    "MIN_LSTD_LR_RI": 1/20, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
     "ADAPTIVE_BETA": True,
     "LSTD_PRIOR_SAMPLES": 100.0,
     "STAGGERED_STARTS": False,
     "BIAS": BIAS,
+    "CLIP_REWARD": True
 }
 
 visual = {
@@ -109,7 +111,7 @@ chain={
     "CALC_TRUE_VALUES": True,
     "BIAS": False,
     "EPISODIC": EPISODIC,
-    "STAGGERED_STARTS": True,
+    "STAGGERED_STARTS": False,
 }
 
 if chain['RND_NETWORK_TYPE'] == 'identity':
