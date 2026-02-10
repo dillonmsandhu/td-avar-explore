@@ -188,6 +188,10 @@ def make_train(config):
             N = idx *traj_batch.done.shape[0] * traj_batch.done.shape[1]
             beta = helpers.schedule_extrinsic_to_intrinsic_ratio( N / config['TOTAL_TIMESTEPS'], config['BONUS_SCALE'])
             beta = jnp.where(config['ADAPTIVE_BETA'], beta, config['BONUS_SCALE'])
+            # subtract min intrinsic reward
+            traj_batch = traj_batch._replace(
+                intrinsic_reward = traj_batch.intrinsic_reward - traj_batch.intrinsic_reward.min()
+            ) # zero mean intrinsic reward for stability (optional)
             
             # Advantage
             _, last_val = network.apply(train_state.params, last_obs)
@@ -252,7 +256,7 @@ def make_train(config):
             # LSTD update:
             new_phi = batch_get_features(traj_batch.obs)
             new_phi_prime = batch_get_features(traj_batch.next_obs)
-            traces = trace_fn(traj_batch, new_phi, config['GAMMA_i'], config['GAE_LAMBDA'])
+            traces = trace_fn(traj_batch, new_phi, config['GAMMA_i'], config['GAE_LAMBDA_i'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, new_phi, new_phi_prime, traces)
             # Metrics
             metric = {k: v.mean() for k, v in traj_batch.info.items()} 
