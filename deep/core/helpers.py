@@ -6,7 +6,7 @@ import gymnax
 from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, ClipRewardWrapper
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -62,6 +62,8 @@ def make_env(config):
             env = AddChannelWrapper(env) # add an empty channel to the end if 2d input
     if config["NORMALIZE_REWARDS"]:
         env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) 
+    if config['CLIP_REWARD']:
+        env = ClipRewardWrapper(env, -1.0, 1.0) # Prevents massive extrinsic spikes
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
     
