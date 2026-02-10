@@ -4,6 +4,7 @@ from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
+from envs.fourrooms_custom import FourRoomsExactValue
 from envs.long_chain import LongChainExactValue
 SAVE_DIR = 'cov_dual_lstd'
 
@@ -41,8 +42,24 @@ def make_train(config):
                 gamma=config['GAMMA'], 
                 episodic=config['EPISODIC']
             )
-        if config['ENV_NAME'] == 'Chain':
+        elif config["ENV_NAME"] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+            goal_pos = config.get("FOURROOMS_GOAL_POS", None)
+            if goal_pos is not None:
+                goal_pos = tuple(goal_pos)
+            evaluator = FourRoomsExactValue(
+                size=int(config.get("FOURROOMS_SIZE", 13)),
+                fail_prob=float(config.get("FOURROOMS_FAIL_PROB", 1.0 / 3.0)),
+                gamma=config["GAMMA"],
+                episodic=config["EPISODIC"],
+                use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
+                goal_pos=goal_pos,
+            )
+        elif config['ENV_NAME'] == 'Chain':
             evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], config['EPISODIC'])
+        else:
+            raise ValueError(
+                f"CALC_TRUE_VALUES=True is only supported for DeepSea/FourRooms/Chain. Got {config['ENV_NAME']}."
+            )
 
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic

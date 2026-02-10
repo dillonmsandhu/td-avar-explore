@@ -104,8 +104,19 @@ def save_results(data, config, env_name, env_dir):
     return env_dir
 
 def save_plot(env_dir, env_name, steps_per_pi, episodic_return, title):
+    y = jnp.asarray(episodic_return)
+    if y.ndim == 0:
+        y = y[None]
+    if y.ndim != 1:
+        print(f"Skipping plot {title}: expected 1D series, got shape {tuple(y.shape)}")
+        return
+    if y.shape[0] == 0:
+        print(f"Skipping plot {title}: empty series")
+        return
+
     plt.figure()
-    plt.plot([i * steps_per_pi for i in range(len(episodic_return))], episodic_return, 'o-')
+    x = [i * steps_per_pi for i in range(int(y.shape[0]))]
+    plt.plot(x, y, 'o-', label=title)
     plt.xlabel("Step")
     plt.ylabel(f"{title}")
     plt.title(env_name)
@@ -174,11 +185,40 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         save_results(metrics, run_config, run_config['ENV_NAME'], env_dir)
     
     # --- Helper for Metrics extraction ---
+    def _mean_over_seeds(data):
+        arr = jnp.asarray(data)
+        if arr.ndim > 0 and arr.shape[0] == run_config['N_SEEDS']:
+            arr = arr.mean(0)
+        return arr
+
+    def _extract_series(data):
+        arr = _mean_over_seeds(data)
+        if arr.ndim == 0:
+            return arr[None]
+        if arr.ndim == 1:
+            return arr
+
+        # For grid-like metrics, plot a fixed reference state over time.
+        # FourRooms default start is (1, 1), DeepSea default start is (0, 0).
+        if arr.ndim >= 3:
+            if run_config['ENV_NAME'] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+                y_idx = 1 if arr.shape[1] > 1 else 0
+                x_idx = 1 if arr.shape[2] > 1 else 0
+                idx = [slice(None), y_idx, x_idx]
+                if arr.ndim > 3:
+                    idx.extend([0] * (arr.ndim - 3))
+                return arr[tuple(idx)]
+
+        idx = [slice(None)]
+        if arr.ndim > 1:
+            idx.extend([0] * (arr.ndim - 1))
+        return arr[tuple(idx)]
+
     def get_metric(name, slice_idx=0):
-        if name not in metrics: return None
-        data = metrics[name]
-        data = data.mean(0) if run_config['N_SEEDS'] > 1 else data
-        return data[slice_idx:]
+        if name not in metrics:
+            return None
+        series = _extract_series(metrics[name])
+        return series[slice_idx:]
 
     # 1. Main Return Plot
     mean_rets = get_metric('returned_episode_returns', 0)
@@ -216,15 +256,5 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         extended_metrics = ["v_i", "v_e", "v_e_pred", "vi_pred", "v_i_pred_opt", "e_value_error", "i_value_error"]
         for key in extended_metrics:
             if key in metrics:
-                data = metrics[key]
-                mean_data = data.mean(0) if run_config['N_SEEDS'] > 1 else data
-                
-                if "error" in key:
-                        save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, mean_data[1:], key)
-                else:
-                    # Values are Grids (DeepSea), plot initial state (0,0)
-                    if run_config['ENV_NAME'] == 'DeepSea-bsuite':
-                        initial_state_data = mean_data[:, 0, 0] 
-                    else:
-                        initial_state_data = mean_data[:, 0] 
-                    save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, initial_state_data[1:], key)
+                series = _extract_series(metrics[key])
+                save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, series[1:], key)
