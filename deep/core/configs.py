@@ -1,7 +1,7 @@
 NORMALIZE_FEATURES = True # for LSTD.
 EPISODIC = True # RND continuous. RND LSTD try both. 
 BIAS = True # for LSTD 
-NORMALIZE_REWARDS = False
+NORMALIZE_REWARDS = True
 # for RND: bias, episodic, and normalize feawtures are all false.
 # for covariance based: all true
 
@@ -49,7 +49,7 @@ shared = {
     "RND_LR": 5e-5,
     "NUM_ENVS": 32,
     "NUM_STEPS": 256,
-    "TOTAL_TIMESTEPS": 100_000, # will be adjusted up
+    "TOTAL_TIMESTEPS": 500_000, # will be adjusted up
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99, # extrinsic Gamma
@@ -71,14 +71,14 @@ shared = {
     "BONUS_SCALE": 1.0,
     "A_REGULARIZATION_PER_STEP": 1e-8,
     "A_REGULARIZATION": 1e-3,
-    "GRAM_REG": 1.0,
+    "GRAM_REG": 1e-3,
     "N_SEEDS": 8,
     "EPISODIC": EPISODIC,
     "RND_FEATURES": 128,
     "NETWORK_TYPE": 'mlp',
     "RND_NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,
-    "ALPHA_SCHEDULE": 'inv_t',
+    "ALPHA_SCHEDULE": 'constant',
     "MIN_COV_LR": 1/20,
     "MIN_LSTD_LR": 1/20,
     "MIN_LSTD_LR_RI": 1/10, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
@@ -104,20 +104,12 @@ chain={
     'NETWORK_TYPE': 'mlp',
     'NORMALIZE_OBS': False,
     'NORMALIZE_FEATURES': NORMALIZE_FEATURES,
-    "TOTAL_TIMESTEPS": 500_000, # will be adjusted up
-    "RND_FEATURES": 100,
-    "CHAIN_LENGTH": 100,
+    "RND_FEATURES": 200,
+    "CHAIN_LENGTH": 200,
     "CALC_TRUE_VALUES": True,
     "BIAS": False,
     "EPISODIC": EPISODIC,
-    "STAGGERED_STARTS": False,
-    "A_REGULARIZATION_PER_STEP": 1e-4,
-    "A_REGULARIZATION": 1e-4,
-    "GRAM_REG": 0.01,
-    "MIN_COV_LR": 1/100,
-    "MIN_LSTD_LR": 1/100,
-    "MIN_LSTD_LR_RI": 1/100, # LSTD for intrinsic reward
-    "ALPHA_SCHEDULE": 'inv_t',
+    "STAGGERED_STARTS": True,
 }
 
 if chain['RND_NETWORK_TYPE'] == 'identity':
@@ -158,6 +150,6 @@ CONFIG_REGISTRY = {
                 ["SpaceInvaders-MinAtar", 
                 "Breakout-MinAtar", 
                 "Freeway-MinAtar", 
-                "Asterix-MinAtar"],},
-    'chain':   {'config_dict':  chain, "envs": ["Chain"]},
+                "Asterix-MinAtar"],}, 
+    
 }
