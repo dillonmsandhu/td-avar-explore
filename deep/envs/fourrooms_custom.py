@@ -57,6 +57,7 @@ class FourRooms(environment.Environment[EnvState, EnvParams]):
         super().__init__()
         self.N = int(N)
         self.use_visual_obs = use_visual_obs
+        #use_tabular_obs
 
         self.env_map = generate_four_rooms_map(self.N)
         self.occupied_map = (1.0 - self.env_map.astype(jnp.float32))
@@ -133,6 +134,10 @@ class FourRooms(environment.Environment[EnvState, EnvParams]):
     def get_obs(self, state: EnvState, params: EnvParams | None = None, key=None) -> jax.Array:
         if not self.use_visual_obs:
             return jnp.concatenate([state.pos, state.goal]).astype(jnp.float32)
+        # if use_tabular_obs:
+        # one hot 169, matching the evaluator
+        # List of states: jnp.stack([y, x], axis=1).astype(jnp.int32)
+        # Look up index in jnp.stack([y, x], axis=1).astype(jnp.int32)
 
         agent_map = (
             jnp.zeros((self.N, self.N), dtype=jnp.float32)

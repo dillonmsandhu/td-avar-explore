@@ -50,7 +50,7 @@ shared = {
     "RND_LR": 5e-5,
     "NUM_ENVS": 32,
     "NUM_STEPS": 256,
-    "TOTAL_TIMESTEPS": 500_000, # will be adjusted up
+    "TOTAL_TIMESTEPS": 100_000, # will be adjusted up
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99, # extrinsic Gamma
@@ -95,6 +95,7 @@ visual = {
     "RND_NETWORK_TYPE": 'cnn',
     "NORMALIZE_OBS": False,
     "WARMUP": 0,
+    "CALC_TRUE_VALUES": True,
 }
 continuous = {
     "LR": 1e-3,
