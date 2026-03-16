@@ -29,7 +29,6 @@ def load_config(args):
     return config
 
 def make_env(config):
-
     if config['ENV_NAME'] == "FourRooms-misc" and config['NETWORK_TYPE'] == 'cnn':
         env, env_params = gymnax.make(config["ENV_NAME"], use_visual_obs = True)
     

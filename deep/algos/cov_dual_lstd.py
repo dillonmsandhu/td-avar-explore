@@ -290,9 +290,10 @@ def make_train(config):
                 _update_epoch, initial_update_state, None, config["NUM_EPOCHS"]
             )
             train_state, _, _, rng = update_state
-
+            # jax.debug.print('sigma before update {sigma}', sigma = sigma_state['S'][0:10, 0])
             # Update sigma state:
             _, sigma_state, _ = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
+            # jax.debug.print('sigma after update {sigma}', sigma = sigma_state['S'][0:10, 0])
             
             # METRICS ---
             metric = {k: v.mean() for k, v in traj_batch.info.items()}
@@ -324,7 +325,9 @@ def make_train(config):
             else:
                 def int_rew_from_state(s): # for computing the intrinsic reward given an arbitrary state 
                     phi = batch_get_features(s)
+                    # rho = get_scale_free_bonus(sigma_state['S'], phi)  * rho_scale
                     rho = int_rew_from_features(phi) * rho_scale
+                    # jax.debug.print('unscaled reward for s is {ri}', ri = int_rew_from_features(phi)[0] )
                     return rho
                 
                 get_vi = lambda obs: batch_get_features(obs) @ lstd_state['w_i'] * rho_scale 
