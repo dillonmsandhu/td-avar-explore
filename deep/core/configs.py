@@ -1,4 +1,4 @@
-NORMALIZE_FEATURES = True # for LSTD.
+NORMALIZE_FEATURES = False # for LSTD.
 EPISODIC = True # RND continuous. RND LSTD try both. 
 BIAS = True # for LSTD 
 NORMALIZE_REWARDS = False
@@ -107,12 +107,17 @@ chain={
     'NETWORK_TYPE': 'mlp',
     'NORMALIZE_OBS': False,
     'NORMALIZE_FEATURES': NORMALIZE_FEATURES,
-    "RND_FEATURES": 200,
-    "CHAIN_LENGTH": 200,
+    'NORMALIZE_REWARDS': NORMALIZE_REWARDS,
+    "RND_FEATURES": 100,
+    "CHAIN_LENGTH": 100,
     "CALC_TRUE_VALUES": True,
     "BIAS": False,
     "EPISODIC": EPISODIC,
     "STAGGERED_STARTS": False,
+    "ALPHA_SCHEDULE": 'inv_t',
+    "MIN_COV_LR": 1/100,
+    "MIN_LSTD_LR": 1/100,
+    "MIN_LSTD_LR_RI": 1/100, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
 }
 
 if chain['RND_NETWORK_TYPE'] == 'identity':
@@ -155,5 +160,9 @@ CONFIG_REGISTRY = {
                 "Breakout-MinAtar", 
                 "Freeway-MinAtar", 
                 "Asterix-MinAtar"],}, 
+    "chain":    {"config_dict": chain, 
+                "envs": 
+                ["Chain",],}
+
     
 }

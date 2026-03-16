@@ -1,4 +1,3 @@
-# root/networks.py
 from core.imports import *
 import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
@@ -11,12 +10,24 @@ from gymnax.environments import spaces
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
-def initialize_rnd_network(rng, obs_shape, network_type, normalize_features, bias=True, k=128):
-    model = RND_Net(network_type=network_type, k=k, normalize = normalize_features, bias = bias)
+def initialize_rnd_network(rng, obs_shape, network_type, normalize_features, bias=True, k=128, state_action_features=False, n_actions=1):
+    """
+    Initializes the RND network. 
+    If state_action_features is True, returns shape (..., n_actions, k).
+    Otherwise returns shape (..., k).
+    """
+    model = RND_Net(
+        network_type=network_type, 
+        k=k, 
+        normalize=normalize_features, 
+        bias=bias, 
+        state_action_features=state_action_features,
+        n_actions=n_actions
+    )
     rng, init_rng = jax.random.split(rng)
-    print('obs shape is ', obs_shape)
     params = model.init(init_rng, jnp.zeros(obs_shape))
     return model, params
+
 
 def initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads: int):
     # Detect if continuous
@@ -183,22 +194,32 @@ class RND_Net(nn.Module):
     k: int = 128
     normalize: bool = False
     bias: bool = True
+    state_action_features: bool = False
+    n_actions: int = 1
     
     def setup(self):
-        k = self.k - 1 if self.bias else self.k
-        self.torso = make_torso(self.network_type, out_dim= k)
+        # Base feature dimension before optional bias
+        self.feat_dim = self.k - 1 if self.bias else self.k
+        # If state-action, we need enough outputs for all actions
+        total_out = self.feat_dim * self.n_actions if self.state_action_features else self.feat_dim
+        self.torso = make_torso(self.network_type, out_dim=total_out)
 
     def __call__(self, x):
         phi = self.torso(x)  
 
+        if self.state_action_features:
+            # Reshape to (..., n_actions, feat_dim)
+            phi = phi.reshape(*phi.shape[:-1], self.n_actions, self.feat_dim)
+        
         if self.normalize:
-            norm = jnp.linalg.norm(phi, axis=-1)  # normalize
-            phi = phi / jnp.maximum(norm[..., None], 1e-8)
+            # Normalize along the feature dimension
+            norm = jnp.linalg.norm(phi, axis=-1, keepdims=True)
+            phi = phi / jnp.maximum(norm, 1e-8)
         
         if self.bias:
-            bias_val = 1.0
-            batch_size = phi.shape[:-1]
-            bias = jnp.ones((*batch_size, 1)) * bias_val
+            # Concatenate 1.0 to the feature dimension
+            bias_shape = phi.shape[:-1] + (1,)
+            bias = jnp.ones(bias_shape)
             phi = jnp.concatenate([phi, bias], axis=-1)
         
         return phi

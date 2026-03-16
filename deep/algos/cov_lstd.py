@@ -111,6 +111,7 @@ def make_train(config):
         return {
             "A": A_i,"b": b_i,"w": w_i,"N": N,"t": t + 1,"V_max": lstd_state['V_max'], "Beta": lstd_state['Beta'],
         }
+        # end lstd_batch_update
 
 
     def train(rng):
