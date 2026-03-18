@@ -240,14 +240,17 @@ def make_train(config):
             # --- 4. Optimistic Initialization (Diagonal Prior) ---
             PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
 
-            # 2. The uncertainty of the basis vectors IS the diagonal of Sigma_inv (O(k))
-            uncertainty_k = jnp.diag(Sigma_inv) / sigma_state["N"]
+            # 1. Calculate total precision (true counts + fake reg counts)
+            total_precision_k = sigma_state["N"] / jnp.diag(Sigma_inv)
 
-            # 3. Convert uncertainty to pseudo-counts (Precision)
-            pseudo_counts_k = 1.0 / (uncertainty_k + 1e-8)
+            # 2. Extra count due to regularizer
+            fake_reg_counts = sigma_state["N"] * config["GRAM_REG"]
 
-            # 4. Bayesian Ratio
-            lambda_k = PRIOR_SAMPLES / (PRIOR_SAMPLES + pseudo_counts_k)
+            # 3. Subtract to reveal the true empirical counts (floor at 0)
+            true_counts_k = jnp.maximum(0.0, total_precision_k - fake_reg_counts)
+
+            # 4. Apply your Bayesian ratio!
+            lambda_k = PRIOR_SAMPLES / (PRIOR_SAMPLES + true_counts_k)
             lambda_k = jnp.where(lambda_k >= 0.1, lambda_k, 0.0)
             Lambda_mat = jnp.diag(lambda_k)
 
