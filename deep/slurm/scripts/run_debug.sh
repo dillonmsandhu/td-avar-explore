@@ -32,8 +32,8 @@ SUFFIX=$2
 # python run_debug.py --script algos/${FILE} --suffix "${SUFFIX}" --config '{"BONUS_SCALE": 1.0, "MIN_LSTD_LR_RI": 0.1, "LSTD_PRIOR_SAMPLES": 0.0}'
 
 # # continuing
-python run_debug.py --script algos/${FILE} --suffix "${SUFFIX}" --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 0.0, 
-"EPISODIC": false}'
+python run_debug.py --script algos/${FILE} --suffix "${SUFFIX}" --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 50.0, 
+"EPISODIC": true}'
 
 # # Intrinsic Reward plus optimistic initialization
 # python run_debug.py --script algos/${FILE} --suffix "${SUFFIX}" --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 10.0}'
