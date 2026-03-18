@@ -114,7 +114,7 @@ def make_train(config):
         # 1. Calculate IS weights based on inverse pseudo-count (unscaled variance)
         is_weights = rho_unscaled ** 2 
         # Normalize so the batch mean is 1 (preserves the scale of regularization)
-        is_weights = is_weights / (is_weights.mean() + 1e-8)
+        is_weights = jnp.clip( is_weights / (is_weights.mean() + 1e-8), 1e-2, 1000)
 
         # 2. Standard LSTD A update (policy evaluation)
         A_update = jax.vmap(jax.vmap(cross_cov))(
@@ -144,6 +144,7 @@ def make_train(config):
 
         # Apply IS weighting to the Prior b injection!
         b_i_sample_opt = (1-lambda_s)[..., None] * b_i_sample  + (lambda_s * is_weights)[..., None] * lstd_state['V_max'] * features
+        # Consider b_total = b_i_sample + lambda_s * V_max
         b_i_opt = b_i_sample_opt.mean(axis=batch_axes)
         
         # ema of stored (non-optimistic) b and optimistic b.

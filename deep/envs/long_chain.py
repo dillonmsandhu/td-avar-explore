@@ -19,7 +19,7 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     fail_prob: float = 0.0
     resample_init_pos: bool = False
-    max_steps_in_episode: int = 1e12
+    max_steps_in_episode: int = 1e6
 
 
 class LongChain(environment.Environment[EnvState, EnvParams]):

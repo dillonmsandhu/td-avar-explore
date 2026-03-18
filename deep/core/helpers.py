@@ -31,8 +31,19 @@ def load_config(args):
     return config
 
 def make_env(config):
-
-    if config["ENV_NAME"] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+    
+    if config['ENV_NAME'] ==  "FourRoomsCustom-v0":
+        env = FourRooms(
+            N=int(config.get("FOURROOMS_SIZE", 21)),
+            use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
+        )
+        env_params = env.default_params.replace(
+            fail_prob=float(config.get("FOURROOMS_FAIL_PROB", env.default_params.fail_prob)),
+            resample_init_pos=bool(config.get("FOURROOMS_RESAMPLE_INIT_POS", env.default_params.resample_init_pos)),
+            resample_goal_pos=bool(config.get("FOURROOMS_RESAMPLE_GOAL_POS", env.default_params.resample_goal_pos)),
+            max_steps_in_episode=int(config.get("FOURROOMS_MAX_STEPS", env.default_params.max_steps_in_episode)),
+        )
+    elif config["ENV_NAME"] in {"FourRooms-misc"}:
         env = FourRooms(
             N=int(config.get("FOURROOMS_SIZE", 13)),
             use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),

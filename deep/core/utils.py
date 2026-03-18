@@ -157,6 +157,56 @@ def load_run_data(run_folder_name, env_name, results_base_path="../results"):
     
     return config, results
 
+
+import matplotlib.pyplot as plt
+
+def save_chain_diagnostic_plot(env_dir, config, metrics, T_values=[0, 1, 2, 3, 4, 5, 10, 20, 40], SEED=0):
+    """Diagnostic plot specifically for the Chain environment."""
+    n_rows = len(T_values)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(12, n_rows * 2.1), sharex=True)
+    range_min, range_max = 0, None
+
+    for row_idx, T in enumerate(T_values):
+        # Safety check: Ensure T exists in the metrics
+        if T >= metrics['visitation_count'].shape[2]: continue
+
+        # --- Row Header ---
+        last_10 = int(jnp.sum(metrics['visitation_count'][SEED][T][-11:]))
+        axes[row_idx, 0].annotate(f"T={T}\nVis10={last_10}", 
+                                    xy=(-0.25, 0.5), xycoords='axes fraction',
+                                    fontsize=8, fontweight='bold', ha='right', va='center')
+        
+        # Plotting logic (Col 1: Visitation, Col 2: Vi, Col 3: Ve)
+        # Using [SEED][T] indexing as per your original data structure
+        ax1, ax2, ax3 = axes[row_idx]
+        
+        # Helper to plot twin axes
+        def _plot_twin(ax, data1, data2, color, label1, label2, ls2='--'):
+            ax_t = ax.twinx()
+            p1, = ax.plot(data1, color=color, lw=1.5, label=label1)
+            p2, = ax_t.plot(data2, color=color, ls=ls2, alpha=0.6, label=label2)
+            ax.tick_params(axis='y', colors=color)
+            return p1, p2
+
+        p0, = ax1.plot(metrics['visitation_count'][SEED][T], color='black', ls='--', label='Visits')
+        ax1_t = ax1.twinx()
+        p1, = ax1_t.plot(metrics['ri_grid'][SEED][T], color='purple', lw=1.2, label='$r_i$')
+        
+        p2, p3 = _plot_twin(ax2, metrics['v_i'][SEED][T], metrics['vi_pred'][SEED][T], 'blue', 'True $v_i$', 'Pred $v_i$')
+        p4, p5 = _plot_twin(ax3, metrics['v_e'][SEED][T], metrics['v_e_pred'][SEED][T], 'red', 'True $v_e$', 'Pred $v_e$')
+
+        if row_idx == 0:
+            ax1.set_title("(a) Visitation & $r_i$")
+            ax2.set_title("(b) Intrinsic $V_i$")
+            ax3.set_title("(c) Extrinsic $V_e$")
+            fig.legend(handles=[p0, p1, p2, p3, p4, p5], loc='upper center', bbox_to_anchor=(0.5, 0.98), ncol=6, frameon=False)
+
+    plt.tight_layout(rect=[0.05, 0, 1, 0.95])
+    plot_path = os.path.join(env_dir, "chain_diagnostic.pdf")
+    plt.savefig(plot_path, bbox_inches='tight')
+    plt.close() # Important to close fig in loops to save memory
+
+
 def evaluate(run_config, make_train, SAVE_DIR, args, rng):
     # Setup specific to this run_config
     steps_per_pi = run_config["NUM_ENVS"] * run_config["NUM_STEPS"]
@@ -221,8 +271,10 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         return series[slice_idx:]
 
     # 1. Main Return Plot
+    discounted_return_envs = ("SparseMountainCar-v0", "FourRooms-misc", "Chain", "FourRoomsCustom-v0")
+
     mean_rets = get_metric('returned_episode_returns', 0)
-    if run_config['ENV_NAME'] == "SparseMountainCar-v0":
+    if run_config['ENV_NAME'] in discounted_return_envs: # plot the discoutned return for these envs.
             mean_rets = get_metric('returned_discounted_episode_returns', 0)
     
     if mean_rets is not None: 
@@ -258,3 +310,12 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
             if key in metrics:
                 series = _extract_series(metrics[key])
                 save_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, series[1:], key)
+        
+            if run_config['ENV_NAME'] == "Chain":
+                print(f"Generating specialized Chain diagnostic plot for {run_config['ENV_NAME']}...")
+                try:
+                    # We pass 'metrics' directly from the JAX output
+                    save_chain_diagnostic_plot(env_dir, run_config, metrics)
+                except Exception as e:
+                    print(f"Failed to generate Chain diagnostic: {e}")
+                    

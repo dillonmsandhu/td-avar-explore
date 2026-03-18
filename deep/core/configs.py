@@ -1,4 +1,4 @@
-NORMALIZE_FEATURES = False # for LSTD.
+NORMALIZE_FEATURES = True # for LSTD.
 EPISODIC = True # RND continuous. RND LSTD try both. 
 BIAS = True # for LSTD 
 NORMALIZE_REWARDS = False
@@ -13,15 +13,15 @@ mc_specific = {
 
 ds_specific = {
     "ENV_NAME": "DeepSea-bsuite",
-    "TOTAL_TIMESTEPS": 1e5 * 50,
+    "TOTAL_TIMESTEPS": 1e5 * 5,
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": NORMALIZE_FEATURES,
-    "DEEPSEA_SIZE": 50,
+    "DEEPSEA_SIZE": 45,
     "WARMUP": 0, # warmup steps for running mean/std
     "NETWORK_TYPE": 'cnn',
     "RND_NETWORK_TYPE": 'cnn',
-    "CALC_TRUE_VALUES": False,
-    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "CALC_TRUE_VALUES": True,
+    "NORMALIZE_REWARDS": False,
     "N_SEEDS": 4,
 }
 
@@ -50,7 +50,7 @@ shared = {
     "RND_LR": 5e-5,
     "NUM_ENVS": 32,
     "NUM_STEPS": 256,
-    "TOTAL_TIMESTEPS": 100_000, # will be adjusted up
+    "TOTAL_TIMESTEPS": 500_000, # will be adjusted up
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
     "GAMMA": 0.99, # extrinsic Gamma
@@ -69,23 +69,23 @@ shared = {
     "NORMALIZE_OBS": True,
     "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     # FOR Covariance Based Reward
-    "BONUS_SCALE": 1.96,
-    "A_REGULARIZATION_PER_STEP": 1e-8,
-    "A_REGULARIZATION": 1e-1,
-    "GRAM_REG": 1e-3,
+    "BONUS_SCALE": 1.0,
+    "A_REGULARIZATION_PER_STEP": 1e-6,
+    "A_REGULARIZATION": 1e-2,
+    "GRAM_REG": 1e-2,
     "N_SEEDS": 8,
     "EPISODIC": EPISODIC,
     "RND_FEATURES": 128,
     "NETWORK_TYPE": 'mlp',
     "RND_NETWORK_TYPE": 'mlp',
     "WARMUP": 20_000,
-    "ALPHA_SCHEDULE": 'constant',
-    "MIN_COV_LR": 1/50,
-    "MIN_LSTD_LR": 1/50,
+    "ALPHA_SCHEDULE": 'inv_t',
+    "MIN_COV_LR": 1/20,
+    "MIN_LSTD_LR": 1/20,
     "MIN_LSTD_LR_RI": 1/20, # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
-    "ADAPTIVE_BETA": True,
-    "LSTD_PRIOR_SAMPLES": 100.0,
-    "STAGGERED_STARTS": False,
+    "ADAPTIVE_BETA": False,
+    "LSTD_PRIOR_SAMPLES": 10.0,
+    "STAGGERED_STARTS": True,
     "BIAS": BIAS,
     "CLIP_REWARD": True
 }
@@ -106,10 +106,10 @@ chain={
     'RND_NETWORK_TYPE': 'identity',
     'NETWORK_TYPE': 'mlp',
     'NORMALIZE_OBS': False,
-    'NORMALIZE_FEATURES': NORMALIZE_FEATURES,
-    'NORMALIZE_REWARDS': NORMALIZE_REWARDS,
-    "RND_FEATURES": 100,
-    "CHAIN_LENGTH": 100,
+    'NORMALIZE_FEATURES': False, # tabular
+    'NORMALIZE_REWARDS': False,
+    "RND_FEATURES": 200,
+    "CHAIN_LENGTH": 200,
     "CALC_TRUE_VALUES": True,
     "BIAS": False,
     "EPISODIC": EPISODIC,
@@ -163,6 +163,17 @@ CONFIG_REGISTRY = {
     "chain":    {"config_dict": chain, 
                 "envs": 
                 ["Chain",],}
-
-    
 }
+
+DEBUG_REGISTRY = {    
+    "chain":    {"config_dict": chain, 
+                "envs": 
+                ["Chain",],},
+    "visual": {"config_dict": visual, 
+                "envs": [
+                    "FourRooms-misc", 
+                    "FourRoomsCustom-v0",]},
+    "ds":     {"config_dict": ds_config, 
+                "envs": ["DeepSea-bsuite"]},
+}
+

@@ -85,7 +85,6 @@ def make_train(config):
         trace_fn = helpers._get_all_traces # continuing due to setting phi' = 0 when done = True. 
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov(z, phi, phi_prime, done, config['GAMMA_i'])
     else:
-        assert False, 'only episodic!!!!! '
         gae_fn = helpers.calculate_i_and_e_gae_two_critic
         trace_fn = helpers._get_all_traces_continuing
         cross_cov = lambda z, phi, phi_prime, done: helpers.cross_cov_continuing(z, phi, phi_prime, done, config['GAMMA_i'])

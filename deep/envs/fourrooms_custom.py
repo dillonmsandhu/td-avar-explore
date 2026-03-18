@@ -16,10 +16,10 @@ class EnvState(environment.EnvState):
 
 @struct.dataclass
 class EnvParams(environment.EnvParams):
-    fail_prob: float = 1.0 / 3.0
+    fail_prob: float = 0.0
     resample_init_pos: bool = False
     resample_goal_pos: bool = False
-    max_steps_in_episode: int = 256
+    max_steps_in_episode: int = 1e5
 
 
 def generate_four_rooms_map(size: int) -> jax.Array:
