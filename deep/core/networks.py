@@ -163,11 +163,15 @@ class CNNTorso1D(nn.Module):
     
 class Identity(nn.Module):
     out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
+    n_actions: int=1
 
     @nn.compact
     def __call__(self, x):
-        assert self.out_dim == x.shape[-1], f'Out dim is {self.out_dim}, x shape is {x.shape}'
-        return x
+        # broadcast the state features to n-actions:
+        k = x.shape[-1]
+        repeated = jnp.repeat(x[:,None], self.n_actions, 1)
+        # final shape is (..., n_actions, out_dim)
+        return repeated.reshape(*x.shape[:-1], self.n_actions, k)
 
 def make_torso(network_type: str, **kwargs):
     if network_type == "identity":
