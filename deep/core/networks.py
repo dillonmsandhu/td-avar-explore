@@ -168,10 +168,13 @@ class Identity(nn.Module):
     @nn.compact
     def __call__(self, x):
         # broadcast the state features to n-actions:
-        k = x.shape[-1]
-        repeated = jnp.repeat(x[:,None], self.n_actions, 1)
-        # final shape is (..., n_actions, out_dim)
-        return repeated.reshape(*x.shape[:-1], self.n_actions, k)
+        if self.n_actions > 1:
+            k = x.shape[-1]
+            repeated = jnp.repeat(x[:,None], self.n_actions, 1)
+            # final shape is (..., n_actions, out_dim)
+            return repeated.reshape(*x.shape[:-1], self.n_actions, k)
+        else:
+            return x
 
 def make_torso(network_type: str, **kwargs):
     if network_type == "identity":
