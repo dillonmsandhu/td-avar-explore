@@ -89,7 +89,9 @@ def make_train(config):
         Z = traces               # Shape: (T, B, k * n_actions)
         Φ = features             # Shape: (T, B, k * n_actions)
         γ = config['GAMMA']
-        terminal = jnp.where(transitions.done, config['EPISODIC'], 0)[..., None]
+        # terminal masking whenever episodic is true
+        is_episodic = config.get('EPISODIC', True)
+        terminal = jnp.where(is_episodic, transitions.done, 0)[..., None]
         
         # Policy: Uniform random. Shape: (T, B, n_actions)
         Pi = jnp.ones((*transitions.done.shape, n_actions)) * (1.0 / n_actions) 
