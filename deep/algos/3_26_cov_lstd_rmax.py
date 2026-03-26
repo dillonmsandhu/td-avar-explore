@@ -1,13 +1,12 @@
-# LSTD with Optimistic Initialization
-# Intrinsic Value
+# designed to correctly handle terminal state
+# uses r-max optimism
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
 from envs.long_chain import LongChainExactValue
 
-SAVE_DIR = "3_13_cov_lstd"
-
+SAVE_DIR = "3_26_lstd_rmax"
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -227,6 +226,7 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
+                true_next_obs = info["real_next_obs"]
                 intrinsic_reward = jnp.zeros_like(reward)
                 i_val = jnp.zeros_like(reward)
                 transition = Transition(
@@ -238,7 +238,7 @@ def make_train(config):
                     intrinsic_reward,
                     log_prob,
                     last_obs,
-                    obsv,
+                    true_next_obs,
                     info,
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
@@ -370,11 +370,13 @@ def make_train(config):
             )
 
             # --------- Metrics ---------
+
             metric = {
                 k: v.mean() 
                 for k, v in traj_batch.info.items() 
                 if k not in ["real_next_obs", "real_next_state"]
             }
+
             # Shared Metrics
             metric.update(
                 {

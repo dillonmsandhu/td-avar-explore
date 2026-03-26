@@ -259,8 +259,11 @@ def make_train(config):
             traces = trace_fn(traj_batch, new_phi, config['GAMMA_i'], config['GAE_LAMBDA_i'])
             lstd_state = lstd_batch_update(lstd_state, traj_batch, new_phi, new_phi_prime, traces)
             # Metrics
-            metric = {k: v.mean() for k, v in traj_batch.info.items()} 
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "rnd_loss": loss_info[1].mean(),

@@ -282,8 +282,12 @@ def make_train(config):
             entropy_mean = loss_info[1][1].mean()
             
             # --------- Metrics ---------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()}
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }
+                        
             # Common Metrics
             metric.update({
                 "ppo_loss": loss_info[0], 

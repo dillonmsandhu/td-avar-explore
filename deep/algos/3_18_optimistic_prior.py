@@ -8,7 +8,6 @@ from envs.long_chain import LongChainExactValue
 
 SAVE_DIR = "3_18_cov_lstd"
 
-
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -203,7 +202,7 @@ def make_train(config):
                     intrinsic_reward,
                     log_prob,
                     last_obs,
-                    obsv,
+                    info["real_next_obs"],
                     info,
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
@@ -319,8 +318,11 @@ def make_train(config):
             )
 
             # --------- Metrics ---------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()}
-
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }
             # Shared Metrics
             metric.update(
                 {

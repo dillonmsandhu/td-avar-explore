@@ -299,8 +299,11 @@ def make_train(config):
             _, sigma_state, _ = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
 
             # --------- Metrics ---------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()}
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
             # Shared Metrics
             metric.update({
                 "ppo_loss": loss_info[0], 

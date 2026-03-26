@@ -5,6 +5,39 @@ from gymnax.environments import spaces
 from gymnax.wrappers.purerl import GymnaxWrapper
 from typing import Any
 
+class TerminalInfoWrapper(GymnaxWrapper):
+    """Wrapper that injects the true terminal state and observation into info."""
+    
+    def __init__(self, env):
+        super().__init__(env)
+
+    def step(self, key, state, action, params=None):
+        if params is None:
+            params = self._env.default_params
+
+        # 1. Split the RNG key
+        key_step, key_reset = jax.random.split(key)
+        
+        # 2. Get the true transition (no auto-reset applied yet)
+        obs_st, state_st, reward, done, info = self._env.step_env(
+            key_step, state, action, params
+        )
+        
+        # 3. Get the reset transition
+        obs_re, state_re = self._env.reset_env(key_reset, params)
+
+        # 4. Inject the true terminal observation and state into the info dict
+        info["real_next_obs"] = obs_st
+        info["real_next_state"] = state_st
+
+        # 5. Apply the standard Gymnax auto-reset logic
+        state = jax.tree.map(
+            lambda x, y: jax.lax.select(done, x, y), state_re, state_st
+        )
+        obs = jax.lax.select(done, obs_re, obs_st)
+
+        return obs, state, reward, done, info
+
 class ClipAction(GymnaxWrapper):
     def __init__(self, env, low=-1.0, high=1.0):
         super().__init__(env)

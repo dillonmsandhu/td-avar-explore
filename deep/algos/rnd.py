@@ -249,8 +249,11 @@ def make_train(config):
             )
             train_state, rnd_state, _, _, _, rng = update_state
             
-            metric = {k: v.mean() for k, v in traj_batch.info.items()} 
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "rnd_loss": loss_info[1].mean(),

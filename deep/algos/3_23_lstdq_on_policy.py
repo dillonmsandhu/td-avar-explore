@@ -356,8 +356,11 @@ def make_train(config):
             )
 
             # --------- Metrics ---------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()}
-
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }
             # Shared Metrics
             metric.update(
                 {

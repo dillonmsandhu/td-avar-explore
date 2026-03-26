@@ -204,7 +204,12 @@ def make_train(config):
             
             # -------------------------------
             # --------- Update metrics ------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
+            
             metric.update({
                 "ppo_loss": loss_info[0].mean(), 
                 "i_value_loss": loss_info[1].mean(),

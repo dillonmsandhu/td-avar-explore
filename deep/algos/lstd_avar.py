@@ -241,8 +241,11 @@ def make_train(config):
             )
             # -------------------------------
             # --------- Update metrics ------
-            metric = {k: v.mean() for k, v in traj_batch.info.items()} # performance
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
             # constant obs:
             constant_obs = jnp.zeros_like(traj_batch.obs)
             target_features_const_obs = rnd_net.apply(rnd_state.target_params, constant_obs)

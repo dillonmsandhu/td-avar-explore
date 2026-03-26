@@ -313,8 +313,11 @@ def make_train(config):
             # jax.debug.print('sigma after update {sigma}', sigma = sigma_state['S'][0:10, 0])
             
             # METRICS ---
-            metric = {k: v.mean() for k, v in traj_batch.info.items()}
-            
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }            
             # Common Metrics
             metric.update({
                 "ppo_loss": loss_info[0], 

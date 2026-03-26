@@ -7,8 +7,7 @@ from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
 from envs.fourrooms_custom import FourRooms
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, ClipRewardWrapper
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, ClipRewardWrapper, TerminalInfoWrapper
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -76,6 +75,7 @@ def make_env(config):
         print('Network:', config['NETWORK_TYPE'])
         print('Default Obs Shape:', env.observation_space(env_params).shape)
     
+    env = TerminalInfoWrapper(env) # adds the terminal state to info.
     env = LogWrapper(env)
     
     if isinstance(env.action_space(env_params), spaces.Box):
@@ -92,7 +92,7 @@ def make_env(config):
         env = ClipRewardWrapper(env, -1.0, 1.0) # Prevents massive extrinsic spikes
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
-    
+        
     print('Obs Shape:', env.observation_space(env_params).shape)
     print('Action Shape:', env.action_space(env_params).shape)
     return env, env_params
