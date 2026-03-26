@@ -119,7 +119,16 @@ def make_train(config):
                 intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
                 i_val = jnp.zeros_like(reward)  # placeholder, will be filled later
                 transition = Transition(
-                    done, action, value, i_val, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                    done,
+                    action,
+                    value,
+                    i_val,
+                    reward,
+                    intrinsic_reward,
+                    log_prob,
+                    last_obs,
+                    info["real_next_obs"],
+                    info,
                 )
 
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)

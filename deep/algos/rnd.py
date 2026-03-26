@@ -122,7 +122,7 @@ def make_train(config):
                 intrinsic_reward = intrinsic_reward_raw / (jnp.sqrt(rnd_ret_rms.var) + 1e-8)                
 
                 transition = Transition(
-                    done, action, value, i_value, reward, intrinsic_reward, log_prob, last_obs, obsv, target_embedding, info
+                    done, action, value, i_value, reward, intrinsic_reward, log_prob, last_obs, info["real_next_obs"], target_embedding, info
                 )
                 
                 # Pack updated `rnd_return` back into state

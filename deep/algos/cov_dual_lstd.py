@@ -215,7 +215,16 @@ def make_train(config):
                 ve = jnp.zeros_like(reward)
                 
                 transition = Transition(
-                    done, action, ve, vi, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                    done,
+                    action,
+                    ve,
+                    vi,
+                    reward,
+                    intrinsic_reward,
+                    log_prob,
+                    last_obs,
+                    info["real_next_obs"],
+                    info,
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition

@@ -171,8 +171,9 @@ def make_train(config):
 
                 intrinsic_reward = jnp.zeros_like(reward)
                 target_embedding = jnp.zeros_like(reward)
+
                 transition = Explore_Transition(
-                    done, action, value, value, reward, intrinsic_reward, log_prob, last_obs, obsv, target_embedding, δ, info
+                    done, action, value, value, reward, intrinsic_reward, log_prob, last_obs, info["real_next_obs"], target_embedding, δ, info
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition

@@ -196,7 +196,7 @@ def make_train(config):
                     intrinsic_reward,
                     log_prob,
                     last_obs,
-                    obsv,
+                    info["real_next_obs"],
                     info,
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)

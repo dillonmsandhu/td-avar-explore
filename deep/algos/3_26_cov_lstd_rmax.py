@@ -226,7 +226,6 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"]
                 intrinsic_reward = jnp.zeros_like(reward)
                 i_val = jnp.zeros_like(reward)
                 transition = Transition(
@@ -238,7 +237,7 @@ def make_train(config):
                     intrinsic_reward,
                     log_prob,
                     last_obs,
-                    true_next_obs,
+                    info["real_next_obs"],
                     info,
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)

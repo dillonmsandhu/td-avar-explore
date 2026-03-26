@@ -200,7 +200,7 @@ def make_train(config):
                 ve = jnp.zeros_like(reward)
                 
                 transition = Transition(
-                    done, action, ve, vi, reward, intrinsic_reward, log_prob, last_obs, obsv, info, 
+                    done, action, ve, vi, reward, intrinsic_reward, log_prob, last_obs, info['true_last_obs'], info, 
                 )
                 runner_state = (train_state, rnd_state, env_state, obsv, rng)
                 return runner_state, transition
@@ -287,7 +287,7 @@ def make_train(config):
                 for k, v in traj_batch.info.items() 
                 if k not in ["real_next_obs", "real_next_state"]
             }
-                        
+
             # Common Metrics
             metric.update({
                 "ppo_loss": loss_info[0], 
