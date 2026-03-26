@@ -20,5 +20,5 @@ exec > >(tee -a "${LOGDIR}/log.out") 2> >(tee -a "${LOGDIR}/log.err")
 # ----------------------------
 FILE=$1
 
-python run_all.py --script algos/${FILE} --suffix ${2} --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 50.0, 
-"EPISODIC": true, "A_REGULARIZATION_PER_STEP": 1e-3}'
+python run_continuous.py --script algos/${FILE} --suffix ${2} --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 50.0, 
+"EPISODIC": true, "A_REGULARIZATION_PER_STEP": 1e-4}'

@@ -64,45 +64,36 @@ def make_train(config):
         bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
         return jnp.sqrt(bonus_sq)
 
-    def lstd_batch_update(lstd_state: Dict, transitions, features, next_features, traces, Lambda_mat):
+    def lstd_batch_update(lstd_state: Dict, transitions, features, next_features, traces, Lambda_mat, batch_phi_precision):
         """
         LSTD update with:
         - intrinsic reward based on next-state uncertainty
         - Diagonal prior optimism applied purely at solve-time via Lambda_mat
         """
-
         batch_axes = tuple(range(transitions.done.ndim))
         N = transitions.done.size + lstd_state["N"]
         t = lstd_state["t"]
         rho = transitions.intrinsic_reward
 
-        # ------------------------------------------------------------
-        # 1. Purely Empirical LSTD Updates
-        # ------------------------------------------------------------
+        # 1. Empirical LSTD Updates
         A_update = jax.vmap(jax.vmap(cross_cov))(traces, features, next_features, transitions.done)
         A_batch = A_update.mean(axis=batch_axes)
 
         b_i_sample = traces * rho[..., None]
         b_batch = b_i_sample.mean(axis=batch_axes)
 
-        # ------------------------------------------------------------
-        # 2. Update EMA (Strictly empirical, NO optimism baked in)
-        # ------------------------------------------------------------
+        # 2. Update EMA
         A_i = helpers.EMA(alpha_fn_lstd(t), lstd_state["A"], A_batch)
         b_i = helpers.EMA(alpha_fn_lstd_b(t), lstd_state["b"], b_batch)
+        
+        # Update the explicit feature counts (Sum of squares)
+        phi_diag_counts = lstd_state["phi_diag_counts"] + batch_phi_precision
 
-        # ------------------------------------------------------------
-        # 3. Apply Diagonal Prior and Solve (Optimism View)
-        # ------------------------------------------------------------
+        # 3. Apply Diagonal Prior and Solve
         k = A_batch.shape[0]
         reg = jnp.eye(k) * config["A_REGULARIZATION_PER_STEP"]
 
-        # Inject optimism directly into the current view of A
         A_view = A_i + Lambda_mat + reg
-
-        # Add the hallucinated rewards to the view of b.
-        # Since Lambda_mat is a k x k diagonal matrix, multiplying its
-        # diagonal elements by V_max is mathematically equivalent to (Lambda @ [V_max...])
         prior_b = jnp.diag(Lambda_mat) * lstd_state["V_max"]
         b_view = b_i + prior_b
 
@@ -116,8 +107,8 @@ def make_train(config):
             "t": t + 1,
             "V_max": lstd_state["V_max"],
             "Beta": lstd_state["Beta"],
+            "phi_diag_counts": phi_diag_counts, # Persistent tracker
         }
-        # end lstd_batch_update
 
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -153,7 +144,7 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
 
-        V_max = 1 / (1 - config["GAMMA_i"])
+        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) # maximum intrinsic values
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
 
@@ -165,9 +156,10 @@ def make_train(config):
             "t": 1,
             "Beta": config["BONUS_SCALE"],
             "V_max": V_max,
+            'phi_diag_counts': jnp.zeros(k)
         }
         initial_sigma_state = {
-            "S": jnp.eye(k) * config["GRAM_REG"],
+            "S": jnp.zeros((k,k)),
             "N": 1,
             "t": 1,
         }
@@ -226,10 +218,7 @@ def make_train(config):
 
             # --- Intrinsic Rewards ---
             # invert the covariance matrix
-            Sigma_inv = jnp.linalg.solve(
-                sigma_state["S"] + config["GRAM_REG"] * jnp.eye(k),
-                jnp.eye(k),
-            )
+            Sigma_inv = jnp.linalg.solve(sigma_state["S"] + config['GRAM_REG'] * jnp.eye(k) ,jnp.eye(k))
 
             int_rew_from_features = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
             # traj_batch, sigma_state, rho = helpers.update_cov_and_get_rho(traj_batch, sigma_state, batch_get_features, int_rew_from_features, alpha_fn)
@@ -240,24 +229,20 @@ def make_train(config):
             # --- 4. Optimistic Initialization (Diagonal Prior) ---
             PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
 
-            # 1. Calculate total precision (true counts + fake reg counts)
-            total_precision_k = sigma_state["N"] / jnp.diag(Sigma_inv)
+            # Calculate how much this batch contributes to feature "energy"
+            # phi shape is (T, B, k), so we sum over T and B
+            batch_phi_precision = (phi**2).sum(axis=(0, 1)) 
+            current_total_counts = lstd_state["phi_diag_counts"] + batch_phi_precision
 
-            # 2. Extra count due to regularizer
-            fake_reg_counts = sigma_state["N"] * config["GRAM_REG"]
-
-            # 3. Subtract to reveal the true empirical counts (floor at 0)
-            true_counts_k = jnp.maximum(0.0, total_precision_k - fake_reg_counts)
-
-            # 4. Apply your Bayesian ratio!
-            lambda_k = PRIOR_SAMPLES / (PRIOR_SAMPLES + true_counts_k)
+            # Bayesian ratio: If counts are low, lambda is high (prior dominates)
+            lambda_k = PRIOR_SAMPLES / (PRIOR_SAMPLES + current_total_counts)
             lambda_k = jnp.where(lambda_k >= 0.1, lambda_k, 0.0)
             Lambda_mat = jnp.diag(lambda_k)
 
             # --- LSTD ---
             traces = trace_fn(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"])
             next_phi = batch_get_features(traj_batch.next_obs)
-            lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces, Lambda_mat)
+            lstd_state = lstd_batch_update(lstd_state, traj_batch, phi, next_phi, traces,  Lambda_mat, batch_phi_precision)
 
             # --- GAE ---
             _, last_val = network.apply(train_state.params, last_obs)

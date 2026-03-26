@@ -253,10 +253,7 @@ def make_train(config):
             # Intrinsic Rewards and optimism
 
             k = sigma_state["S"].shape[0]
-            S_inv_local = jnp.linalg.solve(
-                sigma_state["S"] + config["GRAM_REG"] * jnp.eye(k),
-                jnp.eye(k),
-            )
+            S_inv_local = jnp.linalg.solve(sigma_state["S"], jnp.eye(k))
 
             int_rew_from_features = lambda phi: get_scale_free_bonus(S_inv_local, phi)
             rho = int_rew_from_features(batch_get_features(traj_batch.next_obs))

@@ -1,4 +1,4 @@
-# LSTD-Q evaluating the random policy
+# LSTD-Q evaluating the current policy
 # Independent State Action Featuresn (sparse block LSTD system)
 from core.imports import *
 import core.helpers as helpers
@@ -6,7 +6,7 @@ import core.networks as networks
 from envs.deepsea_v import DeepSeaExactValue
 from envs.long_chain import LongChainExactValue
 
-SAVE_DIR = "3_23_cov_lstd_q"
+SAVE_DIR = "3_23_cov_lstd_q_on_policy"
 
 
 class Transition(NamedTuple):
@@ -76,9 +76,9 @@ def make_train(config):
         expected_next_sa = next_phi[..., None, :] * Pi[..., :, None]
         return expected_next_sa.reshape(*next_phi.shape[:-1], -1)
 
-    def LSTDQ(lstd_state: Dict, transitions, features, next_features, traces):
+    def LSTDQ(lstd_state: Dict, transitions, features, next_features, traces, target_pi):
         """
-        LSTDQ for random target policy with:
+        LSTDQ for ON-POLICY target with:
         - intrinsic reward based on next-state uncertainty
         - Diagonal prior optimism applied purely at solve-time via Lambda_mat
         """
@@ -94,8 +94,8 @@ def make_train(config):
         is_episodic = config.get("EPISODIC", True)
         terminal = jnp.where(is_episodic, transitions.done, 0)[..., None]
 
-        # Policy: Uniform random. Shape: (T, B, n_actions)
-        Pi = jnp.ones((*transitions.done.shape, n_actions)) * (1.0 / n_actions)
+        # Policy: On-policy target. Shape: (T, B, n_actions)
+        Pi = target_pi
         # ------------------------------------------------------------
         # 1. Purely Empirical LSTD Updates
         # ------------------------------------------------------------
@@ -182,7 +182,8 @@ def make_train(config):
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
-        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) # maximum (scale free) intrinsic value
+
+        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) # maximum intrinsic values
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
 
@@ -257,7 +258,7 @@ def make_train(config):
             # --- Intrinsic Reward (due to Precision) ---
             # Precision matrix
             Sigma_inv = jnp.linalg.solve(sigma_state["S"] + config['GRAM_REG'] * jnp.eye(k) ,jnp.eye(k),)
-
+            
             ρ_from_phi = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
             phi_next_s = get_phi(traj_batch.next_obs)
             rho = ρ_from_phi(phi_next_s)  # scale-free
@@ -268,20 +269,24 @@ def make_train(config):
 
             # --- LSTD ---
             phi_s = get_phi(traj_batch.obs)  # Pure state features: (T, B, k)
+            # Forward pass the next states through the actor to get pi(a | s')
+            pi_next, _ = network.apply(train_state.params, traj_batch.next_obs)
+            target_pi_next = pi_next.probs
 
             phi_sa = expand_to_sa_features(phi_s, n_actions, traj_batch.action)
             # 2. Compute traces using the block-sparse features
             traces = trace_fn(traj_batch, phi_sa, config["GAMMA_i"], config["GAE_LAMBDA_i"])
             # 3. Call LSTDQ (passing the expanded Phi_taken, but the raw next_phi_s)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
-            lstd_state = LSTDQ(lstd_state, traj_batch, phi_sa, phi_next_s, traces)
+            lstd_state = LSTDQ(lstd_state, traj_batch, phi_sa, phi_next_s, traces, target_pi_next)
 
             # Intrinsic values (scaled):
             def get_vi(obs):
                 "Gets intrinsic value from LSTDQ (uniform average policy)"
                 phi = get_phi(obs)  # Shape: (..., k)
-                # Create uniform policy for this obs shape
-                Pi = jnp.ones((*phi.shape[:-1], n_actions)) * (1.0 / n_actions)
+                pi_obs, _ = network.apply(train_state.params, obs)
+                Pi = pi_obs.probs
+
                 # Expand to expected state-action features
                 phi_policy = expected_next_sa_features(phi, Pi)
                 return phi_policy @ lstd_state["w"] * ri_scale

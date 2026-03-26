@@ -8,6 +8,7 @@ from envs.long_chain import LongChainExactValue
 
 SAVE_DIR = "3_23_cov_lspi"
 
+
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -63,18 +64,18 @@ def make_train(config):
     def expand_to_sa_features(phi_s, n_actions, taken_actions):
         "Takes phi_s (batched length k vectors), and actions taken, and returns phi_action_taken, with a block-structure [ ...0..., phi(s), ... 0 ... ]"
         # 1. Construct the block-sparse Phi(s, a) for the taken actions
-        one_hots = jax.nn.one_hot(taken_actions, n_actions) # Shape: (T, B, n_actions)
+        one_hots = jax.nn.one_hot(taken_actions, n_actions)  # Shape: (T, B, n_actions)
         # Broadcast multiply: (T, B, 1, k) * (T, B, n_actions, 1) -> (T, B, n_actions, k)
         phi_sa_unflattened = phi_s[..., None, :] * one_hots[..., :, None]
         # Flatten the last two dims to get the block-diagonal structure: (T, B, n_actions * k)
         phi_taken_action = phi_sa_unflattened.reshape(*phi_s.shape[:-1], n_actions * k)
         return phi_taken_action
-    
+
     def expected_next_sa_features(next_phi, Pi):
         "Assumes Pi is size (..., n_actions), and next_phi is size (..., k). Contracts over the policy"
         expected_next_sa = next_phi[..., None, :] * Pi[..., :, None]
-        return expected_next_sa.reshape(*next_phi.shape[:-1], -1) 
-    
+        return expected_next_sa.reshape(*next_phi.shape[:-1], -1)
+
     def LSPI(lstd_state: Dict, transitions, features, next_features, traces, num_iters=3):
         """
         Least-Squares Policy Iteration.
@@ -84,27 +85,27 @@ def make_train(config):
         batch_size = transitions.done.size
         N = batch_size + lstd_state["N"]
         t = lstd_state["t"]
-        rho = transitions.intrinsic_reward 
-        Z = traces               
-        Φ = features             
-        γ = config['GAMMA']
-        is_episodic = config.get('EPISODIC', True)
+        rho = transitions.intrinsic_reward
+        Z = traces
+        Φ = features
+        γ = config["GAMMA"]
+        is_episodic = config.get("EPISODIC", True)
         terminal = jnp.where(is_episodic, transitions.done, 0)[..., None]
-        
+
         # ------------------------------------------------------------
         # 1. Constants for the Batch (S and b)
         # ------------------------------------------------------------
-        S = jnp.einsum('nmi, nmj -> ij', Z, Φ)
+        S = jnp.einsum("nmi, nmj -> ij", Z, Φ)
         b_i_sample = traces * rho[..., None]
         b_batch = b_i_sample.mean(axis=batch_axes)
 
-        batch_sa_precision = (Φ ** 2).sum(axis=batch_axes) 
+        batch_sa_precision = (Φ**2).sum(axis=batch_axes)
         sa_diag_counts = lstd_state["sa_diag_counts"] + batch_sa_precision
 
         PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
         lambda_kA = PRIOR_SAMPLES / (PRIOR_SAMPLES + sa_diag_counts)
         lambda_kA = jnp.where(lambda_kA >= 0.1, lambda_kA, 0.0)
-        Lambda_mat = jnp.diag(lambda_kA) 
+        Lambda_mat = jnp.diag(lambda_kA)
 
         dim_kA = k * n_actions
         reg = jnp.eye(dim_kA) * config["A_REGULARIZATION_PER_STEP"]
@@ -116,20 +117,20 @@ def make_train(config):
         def lspi_step(w_current, _):
             # 1. Policy Improvement: Find greedy actions efficiently
             w_reshaped = w_current.reshape(n_actions, k)
-            
+
             # Compute Q(s', a) for all actions simultaneously
-            Q_next = jnp.einsum('...k, ak -> ...a', next_features, w_reshaped)
-            
+            Q_next = jnp.einsum("...k, ak -> ...a", next_features, w_reshaped)
+
             # Extract greedy policy
             greedy_actions = jnp.argmax(Q_next, axis=-1)
-            Pi_greedy = jax.nn.one_hot(greedy_actions, n_actions) 
+            Pi_greedy = jax.nn.one_hot(greedy_actions, n_actions)
 
             # 2. Policy Evaluation (LSTD on Target Policy)
             PΠφ = expected_next_sa_features(next_features, Pi_greedy)
-            γPΠφ = γ * terminal * PΠφ
-            γPΠΦ = jnp.einsum('nmi, nmj -> ij', Z, γPΠφ)
-            
-            A_batch = (S - γPΠΦ) / batch_size 
+            γPΠφ = γ * (1 - terminal) * PΠφ
+            γPΠΦ = jnp.einsum("nmi, nmj -> ij", Z, γPΠφ)
+
+            A_batch = (S - γPΠΦ) / batch_size
 
             # Temporarily blend with EMA to evaluate this specific policy stablely
             A_i_temp = helpers.EMA(alpha_fn_lstd(t), lstd_state["A"], A_batch)
@@ -139,17 +140,17 @@ def make_train(config):
             b_view = b_i_temp + prior_b
 
             w_new = jnp.linalg.solve(A_view, b_view)
-            
+
             # Pass w_new to the next round, and save the A_batch used
-            return w_new, A_batch 
+            return w_new, A_batch
 
         # Initialize LSPI with the weights from the previous environment step
         w_init = lstd_state["w"]
-        
-        # Run LSPI rounds 
+
+        # Run LSPI rounds
         # (You can swap `num_iters` for `config.get("NUM_LSPI_ITERS", 3)`)
         w_final, A_batch_history = jax.lax.scan(lspi_step, w_init, None, length=num_iters)
-        
+
         # Extract the A_batch corresponding to the final converged policy
         final_A_batch = A_batch_history[-1]
 
@@ -168,7 +169,7 @@ def make_train(config):
             "t": t + 1,
             "V_max": lstd_state["V_max"],
             "Beta": lstd_state["Beta"],
-            "sa_diag_counts": sa_diag_counts
+            "sa_diag_counts": sa_diag_counts,
         }
 
     def train(rng):
@@ -206,10 +207,10 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
 
-        V_max = 1 / (1 - config["GAMMA_i"])
+        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) # maximum intrinsic values
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
-        
+
         # A = (Z^ΤΦ)^{-1} - γZ^ΤPπΦ
         dim_kA = k * n_actions
         initial_lstd_state = {
@@ -220,10 +221,10 @@ def make_train(config):
             "t": 1,
             "Beta": config["BONUS_SCALE"],
             "V_max": V_max,
-            "sa_diag_counts": jnp.zeros(dim_kA), 
+            "sa_diag_counts": jnp.zeros(dim_kA),
         }
         initial_sigma_state = {
-            "S": jnp.eye(k) * config["GRAM_REG"],
+            "S": jnp.zeros((k, k)),
             "N": 1,
             "t": 1,
         }
@@ -280,46 +281,42 @@ def make_train(config):
             )
             # --- Intrinsic Reward (due to Precision) ---
             # Precision matrix
-            Sigma_inv = jnp.linalg.solve(
-                sigma_state["S"] + config["GRAM_REG"] * jnp.eye(k),
-                jnp.eye(k),
-            )
-            
+            Sigma_inv = jnp.linalg.solve(sigma_state["S"] + config['GRAM_REG'] * jnp.eye(k) ,jnp.eye(k))
+
             ρ_from_phi = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
             phi_next_s = get_phi(traj_batch.next_obs)
-            rho = ρ_from_phi(phi_next_s) # scale-free
-            
+            rho = ρ_from_phi(phi_next_s)  # scale-free
+
             # scale of the intrinsic reward:
             sqrt_n = jnp.maximum(1.0, jnp.sqrt(sigma_state["N"]))
             ri_scale = lstd_state["Beta"] / sqrt_n
-        
-            # --- LSTD ---
-            phi_s = get_phi(traj_batch.obs)            # Pure state features: (T, B, k)
 
+            # --- LSTD ---
+            phi_s = get_phi(traj_batch.obs)  # Pure state features: (T, B, k)
             phi_sa = expand_to_sa_features(phi_s, n_actions, traj_batch.action)
             # 2. Compute traces using the block-sparse features
             traces = trace_fn(traj_batch, phi_sa, config["GAMMA_i"], config["GAE_LAMBDA_i"])
             # 3. Call LSTDQ (passing the expanded Phi_taken, but the raw next_phi_s)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
-            lstd_state = LSPI(lstd_state, traj_batch, phi_sa, phi_next_s, traces, num_iters=1)
+            lstd_state = LSPI(lstd_state, traj_batch, phi_sa, phi_next_s, traces, num_iters=config["LSPI_NUM_ITERS"])
 
             # Intrinsic values (scaled):
             def get_vi(obs):
                 "Gets greedy intrinsic value V(s) from LSPI"
-                phi = get_phi(obs) # Shape: (..., k)
+                phi = get_phi(obs)  # Shape: (..., k)
                 w_reshaped = lstd_state["w"].reshape(n_actions, k)
-                Q_vals = jnp.einsum('...k, ak -> ...a', phi, w_reshaped) # Q(s, a) for all a
-                return jnp.max(Q_vals, axis=-1) * ri_scale # V(s) = max_a Q(s, a)
-            
+                Q_vals = jnp.einsum("...k, ak -> ...a", phi, w_reshaped)  # Q(s, a) for all a
+                return jnp.max(Q_vals, axis=-1) * ri_scale  # V(s) = max_a Q(s, a)
+
             # intrinsic value computation on the batch (random policy):
             v_i = get_vi(traj_batch.obs)
             last_i_val = get_vi(last_obs)
             # Scale vi and ri in traj_batch for GAE.
             traj_batch = traj_batch._replace(i_value=v_i, intrinsic_reward=rho * ri_scale)
-            
+
             # --- GAE ---
             _, last_val = network.apply(train_state.params, last_obs)
-            
+
             gaes, targets = gae_fn(
                 traj_batch,
                 last_val,
@@ -365,7 +362,7 @@ def make_train(config):
             )
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
             train_state, _, _, _, rng = update_state
-            
+
             # UPDATE Covariance
             _, sigma_state, _ = helpers.update_cov_and_get_rho(
                 traj_batch,
@@ -392,7 +389,7 @@ def make_train(config):
                     "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
                     "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                     "mean_rew": traj_batch.reward.mean(),
-                    "lambda_k": lstd_state['sa_diag_counts'],
+                    "lambda_k": lstd_state["sa_diag_counts"],
                     "beta": lstd_state["Beta"],
                     "rho_scale": ri_scale,
                 }
@@ -405,8 +402,11 @@ def make_train(config):
                         "v_e_pred": traj_batch.value.mean(),
                     }
                 )
-            else: # Compute the true intrinsic value using the evaluator
-                def int_rew_from_state(s,):  
+            else:  # Compute the true intrinsic value using the evaluator
+
+                def int_rew_from_state(
+                    s,
+                ):
                     phi = get_phi(s)
                     rho = ρ_from_phi(phi) * ri_scale
                     return rho
