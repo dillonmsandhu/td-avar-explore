@@ -2,3 +2,4 @@ slurm/logs/
 results/
 *__pycache__*
 figures/
+*slurm*.out

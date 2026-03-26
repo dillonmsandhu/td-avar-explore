@@ -133,7 +133,7 @@ class DeepSeaExactValue:
         """Reshapes flat value vector to N x N grid."""
         return V_flat[:self.num_grid_states].reshape((self.N, self.N))
 
-    def compute_true_values(self, network: Any, params: PyTree, get_features: Callable, get_int_rew: Callable
+    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable
         ) -> Tuple[jax.Array, jax.Array, Any]:
             """
             Computes V_e (Episodic) and V_i (Episodic OR Continuing based on flag).
@@ -160,8 +160,7 @@ class DeepSeaExactValue:
             pi_full = jnp.vstack([pi_probs.probs, terminal_policy])
 
             # 2. Compute Intrinsic Reward Vector (State-Based)
-            feats = get_features(self.obs_stack)
-            r_next_grid = get_int_rew(feats) # shape (N^2,)
+            r_next_grid = get_int_rew(self.obs_stack)
             
             # Append 0.0 for terminal state
             r_next_all = jnp.concatenate([r_next_grid, jnp.array([0.0])])

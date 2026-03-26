@@ -1,6 +1,6 @@
-from utils import *
-from helpers import FullTransition
-import helpers
+from core.utils import *
+from core.helpers import FullTransition
+import core.helpers as helpers
 from envs.sparse_mc import SparseMountainCar
 
 DEFAULT_CONFIG = {
@@ -342,7 +342,7 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
     

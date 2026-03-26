@@ -1,7 +1,7 @@
 # Covariance-Based Intrinsic Reward, propegated by LSTD.
-from utils import *
-import helpers
-import networks
+from core.utils import *
+import core.helpers as helpers
+import core.networks as networks
 SAVE_DIR = 'cov_lstd'
 
 class Transition(NamedTuple):
@@ -268,10 +268,10 @@ def make_train(config):
 def main():
     import warnings; warnings.simplefilter('ignore')
     import os
-    from utils import save_results, save_plot, parse_config_override
+    from core.utils import save_results, save_plot, parse_config_override
     import datetime
     import argparse
-    import configs
+    import core.configs as configs
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
