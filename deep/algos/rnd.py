@@ -284,6 +284,78 @@ def make_train(config):
 
     return train
 
+<<<<<<< HEAD:deep/algos/rnd.py
+=======
+def main():
+    import warnings; warnings.simplefilter('ignore')
+    import os
+    from utils import save_results, save_plot, parse_config_override
+    import datetime
+    import argparse
+    import configs
+
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    parser = argparse.ArgumentParser(description='Run LSTD Explore experiment')
+    parser.add_argument('--config', type=str, default=None,
+                       help='JSON string to override config values, e.g. \'{"LR": 0.001, "LAMBDA": 0.0}\'')
+    parser.add_argument('--run_suffix', type=str, default=run_timestamp,
+                       help='saves to rnd/{args.run_suffix}' )
+    parser.add_argument('--n-seeds', type=int, default=0)
+    parser.add_argument('--save-checkpoint', action='store_true')
+    parser.add_argument('--base-config', type = str, default = 'mc', choices = ['mc', 'ds'])
+    args = parser.parse_args()
+    
+    if args.base_config == 'mc':
+        config = configs.mc_config.copy()
+        raise AssertionError('conv_net_v.py only has value solver implemented for DeepSea')
+    elif args.base_config == 'ds':
+        config = configs.ds_config.copy()
+    elif args.base_config  == 'min':
+        config = configs.min_config.copy()
+
+    # Override with command line config
+    config_override = parse_config_override(args.config)
+    config.update(config_override)
+    rng = jax.random.PRNGKey(config['SEED'])
+        
+    def evaluate(config, rng):
+        steps_per_pi = config["NUM_ENVS"]*config["NUM_STEPS"]
+        run_fn = jax.jit(jax.vmap(make_train(config)))
+        rngs = jax.random.split(rng, config['N_SEEDS'])
+        out = run_fn(rngs)
+        metrics = out["metrics"]
+
+        print("Mean return is " , jnp.mean(metrics['returned_episode_returns']))
+        print("(Mean) Max return is " , jnp.max(metrics['returned_episode_returns']))
+
+        run_dir = os.path.join("results", f"rnd/{args.run_suffix}")
+        env_dir = os.path.join(run_dir, config['ENV_NAME'])
+        
+        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(env_dir, exist_ok=True)
+        print(f"Saving {config['ENV_NAME']} results to {run_dir}")
+
+        if args.save_checkpoint:
+            save_results(out, config, config['ENV_NAME'], env_dir)
+        else:
+            save_results(metrics, config, config['ENV_NAME'], env_dir)
+        mean_rets = metrics['returned_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_episode_returns']
+        if config['ENV_NAME'] == "SparseMountainCar-v0":
+            mean_rets = metrics['returned_discounted_episode_returns'].mean(0) if config['N_SEEDS'] > 1 else metrics['returned_discounted_episode_returns']
+        
+        ia_mean = metrics['ia_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['ia_mean']
+        i_mean = metrics['intrinsic_rew_mean'].mean(0) if config['N_SEEDS'] > 1 else metrics['intrinsic_rew_mean']
+        rnd_loss = metrics['rnd_loss'].mean(0) if config['N_SEEDS'] > 1 else metrics['rnd_loss']
+
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, mean_rets, 'Return')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, ia_mean, 'Intrinsic_Adv')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, i_mean, 'Intrinsic_Rew')
+        save_plot(env_dir, config['ENV_NAME'], steps_per_pi, rnd_loss, 'rnd_loss')
+
+    
+    evaluate(config, rng)
+
+>>>>>>> main:deep/rnd.py
 if __name__ == '__main__':
     from core.utils import run_experiment_main
     run_experiment_main(make_train, SAVE_DIR)
