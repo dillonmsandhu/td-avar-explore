@@ -815,3 +815,73 @@ def update_beta(old_beta, i_values, e_values, progress, update=True):
     # beta = EMA(0.95, old_beta, beta)
     # beta = jnp.minimum(beta, 1000.0)
     return beta
+
+
+def calculate_traces(traj_batch, features, γ, λ, is_episodic: bool, is_absorbing: bool):
+    """
+    Unified trace calculation supporting 'episodic', 'continuing', and 'absorbing'.
+    Input shapes:
+        features: (T, B, k)
+        traj_batch.done: (T, B)
+    Returns:
+        traces: (T, B, k)
+    """
+    # The trace is severed if the environment physically resets.
+    # This is True for both Episodic and Absorbing states.
+    mask_trace = is_episodic or is_absorbing
+    
+    def _step_trace(trace_prev, scan_inputs):
+        phi, done = scan_inputs
+        # Calculate current trace: decay the history and add current feature
+        trace_current = trace_prev * γ * λ + phi
+        # Determine what gets passed as the "history" for the NEXT step.
+        # Convert boolean mask flag to float multiplier: True -> 1.0, False -> 0.0
+        trace_mult = 1.0 - (done * float(mask_trace))
+        trace_next = trace_current * trace_mult[..., None] 
+        
+        # Return: (carry_state, output_for_this_step)
+        return trace_next, trace_current
+
+    # Scan over the time dimension (T)
+    _, traces = jax.lax.scan(_step_trace, jnp.zeros_like(features[0]), (features, traj_batch.done))
+    
+    return traces
+
+def calculate_gae(
+    traj_batch, 
+    γ, λ, 
+    is_episodic: bool, 
+    is_absorbing: bool, 
+    γi=None, λi=None
+):
+    """Unified extrinsic and intrinsic GAE, handles episodic, continuing, and abosrbing formulation."""
+    if γi is None: γi = γ
+    if λi is None: λi = λ
+
+    i_mask_boot = is_episodic and not is_absorbing
+    i_mask_gae = is_episodic or is_absorbing
+
+    # Scan natively over traj_batch
+    def _get_advantages(gae_accs, transition):
+        gae, i_gae = gae_accs
+        
+        done = transition.done 
+        i_boot_mult = 1.0 - (done * i_mask_boot)
+        i_gae_mult  = 1.0 - (done * i_mask_gae)
+
+        # Pull next values directly from the transition tuple!
+        delta = transition.reward + γ * transition.next_value * (1-done) - transition.value
+        gae = delta + (γ * λ * (1-done) * gae)
+        
+        i_delta = transition.intrinsic_reward + γi * transition.next_i_val * i_boot_mult - transition.i_value 
+        i_gae = i_delta + (γi * λi * i_gae_mult * i_gae)
+        
+        return (gae, i_gae), (gae, i_gae)
+
+    initial_accs = (jnp.zeros_like(traj_batch.value[0]), jnp.zeros_like(traj_batch.i_value[0]))
+
+    _, (advantages, i_advantages) = jax.lax.scan(
+        _get_advantages, initial_accs, traj_batch, reverse=True, unroll=16
+    )
+    
+    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
