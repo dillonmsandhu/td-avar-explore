@@ -50,6 +50,9 @@ class LogWrapper(GymnaxWrapper):
         action: int | float,
         params: environment.EnvParams | None = None,
     ) -> tuple[jax.Array, LogEnvState, jax.Array, bool, dict[Any, Any]]:
+        
+        # ---> THE CRITICAL FIX IS HERE <---
+        # We unwrap the LogEnvState and pass ONLY the inner environment's state down!
         obs, env_state, reward, done, info = self._env.step(
             key, state.env_state, action, params
         )

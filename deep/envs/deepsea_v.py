@@ -13,11 +13,13 @@ class DeepSeaExactValue:
         self.absorbing = absorbing 
         
         self.num_grid_states = size * size
-        self.num_total_states = self.num_grid_states # No more dummy "Void" state
+        self.num_total_states = self.num_grid_states
         self.num_actions = 2
+        
         
         # 1. Pre-compute Observations Stack (N^2 x N x N x 1)
         self.obs_stack = self._create_obs_stack()
+        self.reachable_mask = jnp.tril(jnp.ones((self.N, self.N)))
         
         # 2. Pre-compute Transition Matrices
         self.P, self.R_extrinsic = self._build_env_dynamics()

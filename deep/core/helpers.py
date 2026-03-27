@@ -88,11 +88,12 @@ def make_env(config):
             env = AddChannelWrapper(env) # add an empty channel to the end if 2d input
     if config["NORMALIZE_REWARDS"]:
         env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) 
-    if config['CLIP_REWARD']:
+    if config['CLIP_REWARD'] is not None:
         env = ClipRewardWrapper(env, -1.0, 1.0) # Prevents massive extrinsic spikes
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
-        
+    
+    
     print('Obs Shape:', env.observation_space(env_params).shape)
     print('Action Shape:', env.action_space(env_params).shape)
     return env, env_params
@@ -783,7 +784,11 @@ def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta
         metric['visitation_count'] = evaluator.get_value_grid(visitation)
     else:
         metric['visitation_count'] = jnp.zeros_like(ri)
-
+    
+    e_sq_err = (v_e - v_pred)**2
+    i_sq_err = (v_i - vi_pred)**2
+    num_reachable = jnp.sum(evaluator.reachable_mask)
+    
     metric.update({
         "ri_grid": ri,
         "vi_pred": vi_pred,
@@ -791,8 +796,8 @@ def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta
         "v_i": v_i,
         "v_e": v_e,
         "v_e_pred": v_pred,
-        "e_value_error": jnp.mean(evaluator.reachable_mask * (v_e - v_pred)**2),
-        "i_value_error": jnp.mean(evaluator.reachable_mask * (v_i - vi_pred)**2),
+        "e_value_error": jnp.sum(evaluator.reachable_mask * e_sq_err) / num_reachable,
+        "i_value_error": jnp.sum(evaluator.reachable_mask * i_sq_err) / num_reachable,
         "effective_visits": effective_visits,
     })
 
@@ -885,3 +890,41 @@ def calculate_gae(
     )
     
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
+
+def initialize_evaluator(config):
+    from envs.deepsea_v import DeepSeaExactValue
+    from envs.fourrooms_custom import FourRoomsExactValue
+    from envs.long_chain import LongChainExactValue
+
+    absorbing = config.get('ABSORBING_TERMINAL_STATE', True)
+    episodic = config.get('EPISODIC', True)
+    
+    if not config.get("CALC_TRUE_VALUES", False):
+        return None
+    
+    evaluator = None
+    if config['ENV_NAME'] == 'DeepSea-bsuite':
+        evaluator = DeepSeaExactValue(
+            size=config['DEEPSEA_SIZE'], 
+            unscaled_move_cost=0.01, 
+            gamma=config['GAMMA'], 
+            episodic=episodic,
+            absorbing=absorbing
+        )
+    elif config["ENV_NAME"] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+        goal_pos = config.get("FOURROOMS_GOAL_POS", None)
+        if goal_pos is not None:
+            goal_pos = tuple(goal_pos)
+        evaluator = FourRoomsExactValue(
+            size=int(config.get("FOURROOMS_SIZE", 13)),
+            fail_prob=float(config.get("FOURROOMS_FAIL_PROB", 1.0 / 3.0)),
+            gamma=config["GAMMA"],
+            episodic=episodic,
+            use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
+            goal_pos=goal_pos,
+            absorbing=absorbing
+        )
+    elif config['ENV_NAME'] == 'Chain':
+        evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], episodic, absorbing= absorbing)
+    
+    return evaluator 

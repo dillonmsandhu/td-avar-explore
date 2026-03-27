@@ -3,8 +3,6 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from envs.deepsea_v import DeepSeaExactValue
-from envs.long_chain import LongChainExactValue
 
 SAVE_DIR = "3_26_cov_lstd"
 
@@ -33,7 +31,7 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
 
     # --- Flag to enable heavy exact value calculation ---
-    calc_true_values = config.get("CALC_TRUE_VALUES", False)
+    
     k = config.get("RND_FEATURES", 128)
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
@@ -41,20 +39,10 @@ def make_train(config):
     alpha_fn = lambda t: jnp.maximum(config.get("MIN_COV_LR", 1 / 10), 1 / t)
     alpha_fn_lstd = helpers.get_alpha_schedule(config["ALPHA_SCHEDULE"], config["MIN_LSTD_LR"])
     alpha_fn_lstd_b = helpers.get_alpha_schedule(config["ALPHA_SCHEDULE"], config["MIN_LSTD_LR_RI"])
-    evaluator = None
-    if calc_true_values:
-        if config["ENV_NAME"] == "DeepSea-bsuite":
-            evaluator = DeepSeaExactValue(
-                size=config["DEEPSEA_SIZE"],
-                unscaled_move_cost=0.01,
-                gamma=config["GAMMA"],
-                episodic=config["EPISODIC"],
-            )
-        if config["ENV_NAME"] == "Chain":
-            evaluator = LongChainExactValue(config.get("CHAIN_LENGTH", 100), config["GAMMA"], config["EPISODIC"])
+    evaluator = helpers.initialize_evaluator(config)
 
     def get_scale_free_bonus(S_inv, features):
-        """bonus = x^T Sigma^{-1} X, where Sigma^{-1} is the empriical second moment inverse."""
+        """bonus = x^T Σ^{-1} X, where Σ^{-1} is the empriical second moment inverse."""
         bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
         return jnp.sqrt(bonus_sq)
 

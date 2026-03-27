@@ -3,7 +3,32 @@ import jax.numpy as jnp
 from flax import struct
 from gymnax.environments import spaces
 from gymnax.wrappers.purerl import GymnaxWrapper
+from gymnax.environments.environment import Environment, EnvState, EnvParams
 from typing import Any
+
+
+class UniversalObservationWrapper(GymnaxWrapper):
+    """Base wrapper that syncs standard and ghost observations."""
+    
+    def observation(self, obs: jax.Array, env_state: EnvState, params: EnvParams) -> jax.Array:
+        """Override this method to transform the observation."""
+        raise NotImplementedError
+
+    def reset(self, key, params=None):
+        obs, state = self._env.reset(key, params)
+        return self.observation(obs, state, params), state
+
+    def step(self, key, state, action, params=None):
+        obs, env_state, reward, done, info = self._env.step(key, state, action, params)
+        
+        # 1. Transform the main obs
+        obs = self.observation(obs, env_state, params)
+        
+        # 2. Automatically transform the ghost obs if it exists!
+        if "real_next_obs" in info:
+            info["real_next_obs"] = self.observation(info["real_next_obs"], env_state, params)
+            
+        return obs, env_state, reward, done, info
 
 class TerminalInfoWrapper(GymnaxWrapper):
     """Wrapper that injects the true terminal state and observation into info."""
@@ -79,9 +104,7 @@ class NormalizeObsEnvState:
     env_state: Any
 
 
-class AddChannelWrapper(GymnaxWrapper):
-    """Add a channel dimension to observations for CNNs."""
-
+class AddChannelWrapper(UniversalObservationWrapper):
     def observation_space(self, params):
         orig = self._env.observation_space(params)
         return spaces.Box(
@@ -91,22 +114,18 @@ class AddChannelWrapper(GymnaxWrapper):
             dtype=orig.dtype,
         )
 
-    def reset(self, key, params=None):
-        obs, state = self._env.reset(key, params)
-        return obs[..., None], state
-
-    def step(self, key, state, action, params=None):
-        obs, state, reward, done, info = self._env.step(
-            key, state, action, params
-        )
-        return obs[..., None], state, reward, done, info
+    def observation(self, obs, env_state, params):
+        # Only add the channel if it's missing (keeps it safe for 1D/2D)
+        if obs.ndim < 3: 
+            return obs[..., None]
+        return obs
 
 class NormalizeObservationWrapper(GymnaxWrapper):
     def __init__(self, env):
         super().__init__(env)
 
     def reset(self, key, params=None):
-        obs, state = self._env.reset(key, params)
+        obs, env_state = self._env.reset(key, params)
         # Initialize running stats
         obs_shape = self._env.observation_space(params).shape
         mean_std = RunningMeanStdState(
@@ -114,14 +133,22 @@ class NormalizeObservationWrapper(GymnaxWrapper):
             var=jnp.ones(obs_shape),
             count=1e-4
         )
-        return self._normalize(obs, mean_std), NormalizeObsEnvState(mean_std, state)
+        return self._normalize(obs, mean_std), NormalizeObsEnvState(mean_std, env_state)
 
     def step(self, key, state, action, params=None):
+        # 1. Step the underlying environment
         obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
-        # Update stats
+        
+        # 2. Update running statistics using the RAW observation
         new_mean_std = update_running_mean_std(state.mean_std, obs)
-        # Normalize
+        
+        # 3. Normalize the main observation
         norm_obs = self._normalize(obs, new_mean_std)
+        
+        # 4. CRITICAL FIX: Normalize the ghost observation if it exists!
+        if "real_next_obs" in info:
+            info["real_next_obs"] = self._normalize(info["real_next_obs"], new_mean_std)
+            
         return norm_obs, NormalizeObsEnvState(new_mean_std, env_state), reward, done, info
 
     def _normalize(self, obs, mean_std):
@@ -138,44 +165,26 @@ class NormalizeRewardWrapper(GymnaxWrapper):
     def __init__(self, env, gamma=0.99):
         super().__init__(env)
         self.gamma = gamma
-
+    
     def reset(self, key, params=None):
         obs, state = self._env.reset(key, params)
         mean_std = RunningMeanStdState(
-            mean=jnp.array(0.0), # We usually don't subtract mean for rewards, but we track variance
-            var=jnp.array(1.0),
-            count=1e-4
+            mean=jnp.array(0.0, dtype=jnp.float32), 
+            var=jnp.array(1.0, dtype=jnp.float32),
+            count=jnp.array(1e-4, dtype=jnp.float32) # Good practice to make this an array too!
         )
-        return obs, NormalizeRewardEnvState(mean_std, 0.0, state)
-
-    # def step(self, key, state, action, params=None):
-    #     obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
+        initial_return_val = jnp.zeros((), dtype=jnp.float32)
         
-    #     # 1. Update running return (discounted)
-    #     # If done, we reset the running return to 0 (effectively handled by (1-done))
-    #     # Note: In PPO we technically want to normalize based on return variance, not reward variance.
-    #     new_return_val = state.return_val * self.gamma * (1 - done) + reward
-        
-    #     # 2. Update stats based on the *return*, not the immediate reward
-    #     new_mean_std = update_running_mean_std(state.mean_std, new_return_val)
-        
-    #     # 3. Normalize Reward (scale only, do not shift mean)
-    #     # We divide by the std of the *returns*
-    #     norm_reward = jnp.clip(reward / jnp.sqrt(new_mean_std.var + 1e-8), -10.0, 10.0)
-
-    #     return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
-    
+        return obs, NormalizeRewardEnvState(mean_std, initial_return_val, state)
 
     def step(self, key, state, action, params=None):
             obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
             
-            # 1. Update Return Logic (Corrected per previous discussion)
             current_return = state.return_val * self.gamma + reward
             new_mean_std = update_running_mean_std(state.mean_std, current_return)
             
-            # 2. Calculate Scale
             scale = jnp.sqrt(new_mean_std.var + 1e-8)
-            # 3. Normalize & Clip
+            
             norm_reward = jnp.clip(reward / scale, -10.0, 10.0)
 
             # 4. Mask for next step
@@ -191,7 +200,7 @@ class ClipRewardWrapper(GymnaxWrapper):
 
     def step(self, key, state, action, params=None):
         # 1. Step the environment
-        obs, env_state, reward, done, info = self._env.step(key, state, action, params)
+        obs, env_state, reward, done, info = self._env.step(key, stae.state, action, params)
         
         # 2. Clip the reward
         # This keeps 0 as 0, but clamps spikes (e.g., 100 -> 1.0)

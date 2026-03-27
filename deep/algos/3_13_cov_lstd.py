@@ -3,9 +3,6 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from envs.deepsea_v import DeepSeaExactValue
-from envs.long_chain import LongChainExactValue
-
 SAVE_DIR = "3_13_cov_lstd"
 
 
@@ -20,7 +17,6 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-
 
 def append_frontier_transition(traj_batch: Transition, last_obs: jnp.ndarray) -> Transition:
     """

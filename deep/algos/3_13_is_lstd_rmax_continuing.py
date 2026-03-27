@@ -3,8 +3,6 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from envs.deepsea_v import DeepSeaExactValue
-from envs.long_chain import LongChainExactValue
 SAVE_DIR = '3_13_is_lstd_rmax_continuing'
 
 class Transition(NamedTuple):

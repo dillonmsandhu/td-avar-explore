@@ -3,8 +3,6 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from envs.deepsea_v import DeepSeaExactValue
-from envs.long_chain import LongChainExactValue
 SAVE_DIR = '3_14_is_lstd_rmax_no_ema'
 
 class Transition(NamedTuple):
@@ -67,17 +65,7 @@ def make_train(config):
     alpha_fn = lambda t: 1/t
     alpha_fn_lstd = lambda t: 1/t
     alpha_fn_lstd_b = lambda t: 1/t
-    evaluator = None    
-    if calc_true_values:
-        if config['ENV_NAME'] == 'DeepSea-bsuite':
-            evaluator = DeepSeaExactValue(
-                size=config['DEEPSEA_SIZE'], 
-                unscaled_move_cost=0.01, 
-                gamma=config['GAMMA'], 
-                episodic=config['EPISODIC']
-            )
-        if config['ENV_NAME'] == 'Chain':
-            evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], config['EPISODIC'])
+    evaluator = helpers.initialize_evaluator(config)
 
     if config['EPISODIC']: 
         gae_fn = helpers.calculate_gae_intrinsic_and_extrinsic_episodic

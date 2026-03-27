@@ -1,7 +1,8 @@
 NORMALIZE_FEATURES = True  # for LSTD.
 EPISODIC = True  # RND continuous. RND LSTD try both.
 BIAS = True  # for LSTD
-NORMALIZE_REWARDS = False
+NORMALIZE_REWARDS = True # normalize extrinsic reward.
+CLIP_REWARD = False
 # for RND: bias, episodic, and normalize feawtures are all false.
 # for covariance based: all true
 
@@ -21,8 +22,9 @@ ds_specific = {
     "NETWORK_TYPE": "cnn",
     "RND_NETWORK_TYPE": "cnn",
     "CALC_TRUE_VALUES": True,
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     "N_SEEDS": 4,
+    "LSTD_PRIOR_SAMPLES": 0.0,
 }
 
 min_specific = {
@@ -87,9 +89,10 @@ shared = {
     "LSTD_PRIOR_SAMPLES": 10.0,
     "STAGGERED_STARTS": True,
     "BIAS": BIAS,
-    "CLIP_REWARD": True,
+    "CLIP_REWARD": False,
     # for the LSPI variant
     "LSPI_NUM_ITERS": 5,
+    "ABSORBING_TERMINAL_STATE": True
 }
 
 visual = {
@@ -109,7 +112,7 @@ chain = {
     "NETWORK_TYPE": "mlp",
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,  # tabular
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     "RND_FEATURES": 200,
     "CHAIN_LENGTH": 200,
     "CALC_TRUE_VALUES": True,

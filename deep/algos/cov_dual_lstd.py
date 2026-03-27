@@ -3,9 +3,6 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from envs.deepsea_v import DeepSeaExactValue
-from envs.fourrooms_custom import FourRoomsExactValue
-from envs.long_chain import LongChainExactValue
 SAVE_DIR = 'cov_dual_lstd'
 
 class Transition(NamedTuple):
