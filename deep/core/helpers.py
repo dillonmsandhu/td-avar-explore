@@ -913,6 +913,15 @@ def initialize_evaluator(config):
             episodic=episodic,
             absorbing=absorbing
         )
+    if config['ENV_NAME'] == 'DeepSea-Dense': # all rewards minus 1.
+        evaluator = DeepSeaExactValue(
+            size=config['DEEPSEA_SIZE'], 
+            unscaled_move_cost=0.01, 
+            gamma=config['GAMMA'], 
+            episodic=episodic,
+            absorbing=absorbing,
+            dense=True,
+        )
     elif config["ENV_NAME"] in {"FourRooms-misc", "FourRoomsCustom-v0"}:
         goal_pos = config.get("FOURROOMS_GOAL_POS", None)
         if goal_pos is not None:

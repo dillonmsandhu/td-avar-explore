@@ -5,7 +5,7 @@ from typing import Any, Dict, Callable, Tuple, Optional
 PyTree = Any
 
 class DeepSeaExactValue:
-    def __init__(self, size: int, unscaled_move_cost: float = 0.01, gamma: float = 0.99, episodic: bool = False, absorbing: bool = False):
+    def __init__(self, size: int, unscaled_move_cost: float = 0.01, gamma: float = 0.99, episodic: bool = False, absorbing: bool = False, dense: bool=False):
         self.N = size
         self.cost = unscaled_move_cost
         self.gamma = gamma
@@ -15,6 +15,7 @@ class DeepSeaExactValue:
         self.num_grid_states = size * size
         self.num_total_states = self.num_grid_states
         self.num_actions = 2
+        self.dense = dense
         
         
         # 1. Pre-compute Observations Stack (N^2 x N x N x 1)
@@ -118,7 +119,7 @@ class DeepSeaExactValue:
         """Reshapes flat value vector to N x N grid."""
         return V_flat.reshape((self.N, self.N))
 
-    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, dense_mode=False
+    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
         ) -> Tuple[jax.Array, jax.Array, Any]:
             
             # 1. Forward Pass
@@ -154,7 +155,7 @@ class DeepSeaExactValue:
             target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
             R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
 
-            if dense_mode:
+            if self.dense:
                 # 1. Subtract 1 from every single transition
                 R_ext_modified = self.R_extrinsic - 1.0
                 
