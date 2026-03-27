@@ -68,7 +68,7 @@ def make_env(config):
     
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
         env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
-    elif config['ENV_NAME'] == 'DeepSea-dense':
+    elif config['ENV_NAME'] == 'DeepSea-Dense':
         env, env_params = gymnax.make('DeepSea-bsuite', size = config.get("DEEPSEA_SIZE", 10))
         env = SubtractOneRewardWrapper(env)
     

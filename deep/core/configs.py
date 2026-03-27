@@ -156,7 +156,7 @@ CONFIG_REGISTRY = {
         "envs": ["Pong-misc", "FourRooms-misc", "FourRoomsCustom-v0", "MNISTBandit-bsuite", "Catch-bsuite"],
     },
     "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
-    "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite"]},
+    "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite", "DeepSea-Dense"]},
     "min": {
         "config_dict": min_config,
         "envs": ["SpaceInvaders-MinAtar", "Breakout-MinAtar", "Freeway-MinAtar", "Asterix-MinAtar"],
