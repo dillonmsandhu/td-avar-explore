@@ -7,7 +7,7 @@ from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
 from envs.fourrooms_custom import FourRooms
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, TerminalInfoWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, TerminalInfoWrapper, SubtractOneRewardWrapper
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -68,12 +68,16 @@ def make_env(config):
     
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
         env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+    elif config['ENV_NAME'] == 'DeepSea-dense':
+        env, env_params = gymnax.make('DeepSea-bsuite', size = config.get("DEEPSEA_SIZE", 10))
+        env = SubtractOneRewardWrapper(env)
     
     else:
         env, env_params = gymnax.make(config["ENV_NAME"])
         print('Env:', config['ENV_NAME'])
         print('Network:', config['NETWORK_TYPE'])
         print('Default Obs Shape:', env.observation_space(env_params).shape)
+    
     
     env = TerminalInfoWrapper(env) # adds the terminal state to info.
     env = LogWrapper(env)

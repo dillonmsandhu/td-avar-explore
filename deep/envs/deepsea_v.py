@@ -118,7 +118,7 @@ class DeepSeaExactValue:
         """Reshapes flat value vector to N x N grid."""
         return V_flat.reshape((self.N, self.N))
 
-    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable
+    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, dense_mode=False
         ) -> Tuple[jax.Array, jax.Array, Any]:
             
             # 1. Forward Pass
@@ -154,8 +154,21 @@ class DeepSeaExactValue:
             target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
             R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
 
-            # 5. Solve
-            v_e_true = self.solve_linear_system(pi_matrix, self.P, self.R_extrinsic)
-            v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
+            if dense_mode:
+                # 1. Subtract 1 from every single transition
+                R_ext_modified = self.R_extrinsic - 1.0
+                
+                # 2. Zero out the infinite sinkhole (Terminal Row)
+                terminal_start_idx = (self.N - 1) * self.N
+                mask = jnp.ones_like(R_ext_modified)
+                mask = mask.at[terminal_start_idx:, :].set(0.0) 
+                
+                Re = R_ext_modified * mask
+            else:
+                Re = self.R_extrinsic
+
+                # 5. Solve
+                v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
+                v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
             return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid

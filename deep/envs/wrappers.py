@@ -192,3 +192,16 @@ class NormalizeRewardWrapper(GymnaxWrapper):
 
             return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
     
+class SubtractOneRewardWrapper(GymnaxWrapper):
+    """A debugging wrapper that subtracts 1.0 from every environment reward."""
+    def __init__(self, env):
+        super().__init__(env)
+
+    def step(self, key, state, action, params=None):
+        # Step the inner environment
+        obs, env_state, reward, done, info = self._env.step(key, state, action, params)
+        
+        # Apply the dense penalty
+        modified_reward = reward - 1.0
+        
+        return obs, env_state, modified_reward, done, info
