@@ -190,15 +190,15 @@ class LongChainExactValue:
         A = jnp.eye(self.num_total_states) - self.gamma * P_pi
         return jnp.linalg.solve(A, R_pi)
 
-    def compute_true_values(self, network, params, get_int_rew_per_state):
+    def compute_true_values(self, network, params, get_int_rew_per_state, all=False):
         out = network.apply(params, self.obs_stack)
         
         if len(out) == 3:
             pi_dist, v_net_ext, v_net_int = out
-            v_net_tuple = (self.get_value_grid(v_net_ext.squeeze()), self.get_value_grid(v_net_int.squeeze()))
+            v_net_tuple = (self.get_value_grid(v_net_ext.squeeze(), all), self.get_value_grid(v_net_int.squeeze(), all))
         else:
             pi_dist, v_net_all = out
-            v_net_tuple = self.get_value_grid(v_net_all.squeeze())
+            v_net_tuple = self.get_value_grid(v_net_all.squeeze(), all)
             
         pi_matrix = pi_dist.probs # (N, 2)
 
@@ -218,11 +218,13 @@ class LongChainExactValue:
         v_i = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
         # Slice off the terminal state before returning
-        return self.get_value_grid(v_e), self.get_value_grid(v_i), v_net_tuple
+        return self.get_value_grid(v_e, all), self.get_value_grid(v_i, all), v_net_tuple
     
-    def get_value_grid(self, x: jax.Array) -> jax.Array:
+    def get_value_grid(self, x: jax.Array, all=False) -> jax.Array:
         """Slices off the terminal state to protect downstream logging."""
-        return x[:self.num_playable]    
+        if not all:
+            return x[:self.num_playable]    
+        else: return x 
 
     def plot(self, v_e, v_i, v_pred_tuple):
         """ Visualizes the Value Functions along the 1D Chain.
