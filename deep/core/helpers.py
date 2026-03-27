@@ -7,7 +7,7 @@ from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
 from envs.fourrooms_custom import FourRooms
-from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, ClipRewardWrapper, TerminalInfoWrapper
+from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, TerminalInfoWrapper
 from gymnax.environments import spaces
 
 def load_config(args):
@@ -88,8 +88,6 @@ def make_env(config):
             env = AddChannelWrapper(env) # add an empty channel to the end if 2d input
     if config["NORMALIZE_REWARDS"]:
         env = NormalizeRewardWrapper(env, gamma=config["GAMMA"]) 
-    if config['CLIP_REWARD'] is not None:
-        env = ClipRewardWrapper(env, -1.0, 1.0) # Prevents massive extrinsic spikes
     if config["NORMALIZE_OBS"]:
         env = NormalizeObservationWrapper(env) 
     

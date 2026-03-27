@@ -192,19 +192,3 @@ class NormalizeRewardWrapper(GymnaxWrapper):
 
             return obs, NormalizeRewardEnvState(new_mean_std, new_return_val, env_state), norm_reward, done, info
     
-class ClipRewardWrapper(GymnaxWrapper):
-    def __init__(self, env, min_reward=-1.0, max_reward=1.0):
-        super().__init__(env)
-        self.min_reward = min_reward
-        self.max_reward = max_reward
-
-    def step(self, key, state, action, params=None):
-        # 1. Step the environment
-        obs, env_state, reward, done, info = self._env.step(key, stae.state, action, params)
-        
-        # 2. Clip the reward
-        # This keeps 0 as 0, but clamps spikes (e.g., 100 -> 1.0)
-        reward = jnp.clip(reward, self.min_reward, self.max_reward)
-        
-        # 3. Return modified reward
-        return obs, env_state, reward, done, info
