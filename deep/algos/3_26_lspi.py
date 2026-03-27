@@ -156,7 +156,6 @@ def make_train(config):
             "V_max": lstd_state["V_max"],
             "Beta": lstd_state["Beta"],
             "sa_diag_counts": new_sa_diag_counts,
-            "lambda_kA": lambda_kA,
         }
 
     def train(rng):
@@ -341,7 +340,6 @@ def make_train(config):
                     "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
                     "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                     "mean_rew": traj_batch.reward.mean(),
-                    "lambda_kA_mean": lstd_state["lambda_kA"].mean(), # Properly export array
                     "beta": lstd_state["Beta"],
                     "rho_scale": ri_scale,
                 }
