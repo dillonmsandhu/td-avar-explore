@@ -1,8 +1,7 @@
 NORMALIZE_FEATURES = True  # for LSTD.
 EPISODIC = True  # RND continuous. RND LSTD try both.
 BIAS = True  # for LSTD
-NORMALIZE_REWARDS = True # normalize extrinsic reward.
-CLIP_REWARD = False
+NORMALIZE_REWARDS = False # normalize extrinsic reward.
 # for RND: bias, episodic, and normalize feawtures are all false.
 # for covariance based: all true
 
@@ -18,13 +17,14 @@ ds_specific = {
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": NORMALIZE_FEATURES,
     "DEEPSEA_SIZE": 45,
-    "WARMUP": 0,  # warmup steps for running mean/std
+    "WARMUP": 20_000,  # warmup steps for running mean/std
     "NETWORK_TYPE": "cnn",
     "RND_NETWORK_TYPE": "cnn",
     "CALC_TRUE_VALUES": True,
-    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "NORMALIZE_REWARDS": False,
     "N_SEEDS": 4,
     "LSTD_PRIOR_SAMPLES": 0.0,
+    "BONUS_SCALE": 0.5,
 }
 
 min_specific = {
@@ -42,7 +42,7 @@ min_specific = {
     "WARMUP": 20_000,  # warmup steps for running mean/std
     "NETWORK_TYPE": "cnn",
     "RND_NETWORK_TYPE": "cnn",
-    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "NORMALIZE_REWARDS": False,
     "N_SEEDS": 4,
 }
 
@@ -112,7 +112,7 @@ chain = {
     "NETWORK_TYPE": "mlp",
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,  # tabular
-    "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
+    "NORMALIZE_REWARDS": False,
     "RND_FEATURES": 200,
     "CHAIN_LENGTH": 200,
     "CALC_TRUE_VALUES": True,
