@@ -191,6 +191,7 @@ class FourRoomsExactValue:
         fail_prob: float = 1.0 / 3.0,
         gamma: float = 0.99,
         episodic: bool = True,
+        absorbing: bool = False, # Added absorbing flag
         use_visual_obs: bool = True,
         goal_pos: Tuple[int, int] | None = None,
     ):
@@ -198,16 +199,17 @@ class FourRoomsExactValue:
         self.fail_prob = float(fail_prob)
         self.gamma = float(gamma)
         self.episodic = episodic
+        self.absorbing = absorbing
         self.use_visual_obs = use_visual_obs
 
         self.env_map = generate_four_rooms_map(self.N)
         self.occupied_map = 1.0 - self.env_map.astype(jnp.float32)
         y, x = jnp.where(self.env_map)
         self.coords = jnp.stack([y, x], axis=1).astype(jnp.int32)
+        
         self.num_states = int(self.coords.shape[0])
+        self.num_total_states = self.num_states # No dummy terminal state
         self.num_actions = 4
-        self.terminal_idx = self.num_states
-        self.num_total_states = self.num_states + 1
         self.directions = jnp.array(
             [[-1, 0], [0, 1], [1, 0], [0, -1]], dtype=jnp.int32
         )
@@ -238,6 +240,8 @@ class FourRoomsExactValue:
         self.reachable_mask = self.env_map.astype(jnp.float32)
 
         self.obs_stack = self._build_obs_stack()
+        
+        # Build Episodic/Absorbing P and Continuing P
         self.P, self.R_extrinsic = self._build_env_dynamics(continuing=False)
         self.P_cont, _ = self._build_env_dynamics(continuing=True)
 
@@ -270,49 +274,42 @@ class FourRoomsExactValue:
         return jnp.where(can_move, proposed, pos)
 
     def _build_env_dynamics(self, continuing: bool) -> Tuple[jax.Array, jax.Array]:
-        P = np.zeros((self.num_total_states, self.num_actions, self.num_total_states), dtype=np.float32)
-        R = np.zeros((self.num_total_states, self.num_actions), dtype=np.float32)
+        P = np.zeros((self.num_states, self.num_actions, self.num_states), dtype=np.float32)
+        R = np.zeros((self.num_states, self.num_actions), dtype=np.float32)
 
         p_rand = self.fail_prob / self.num_actions
 
         for s_idx in range(self.num_states):
-            pos = self.coords[s_idx]
-
-            # Goal is terminal in this evaluator.
+            # 1. Goal State Dynamics (Terminal transitions)
             if s_idx == self.goal_idx:
-                next_idx = self.start_idx if continuing else self.terminal_idx
+                next_idx = self.start_idx if continuing else self.goal_idx
                 P[s_idx, :, next_idx] = 1.0
-                continue
+                continue # No extrinsic reward for actions taken FROM the goal
 
+            # 2. Standard State Dynamics
+            pos = self.coords[s_idx]
             for chosen_a in range(self.num_actions):
                 for executed_a in range(self.num_actions):
                     p_exec = p_rand + (1.0 - self.fail_prob if executed_a == chosen_a else 0.0)
                     next_pos = self._step_pos(pos, executed_a)
-                    hits_goal = bool(jnp.all(next_pos == self.goal))
-
-                    if hits_goal:
-                        next_idx = self.start_idx if continuing else self.terminal_idx
-                        R[s_idx, chosen_a] += p_exec * 1.0
-                    else:
-                        next_idx = self._coord_to_idx(next_pos)
-
+                    next_idx = self._coord_to_idx(next_pos)
+                    
                     P[s_idx, chosen_a, next_idx] += p_exec
+                    
+                    # Reward is granted when transitioning INTO the goal
+                    if next_idx == self.goal_idx:
+                        R[s_idx, chosen_a] += p_exec * 1.0
 
-        # Terminal state: absorbing dummy.
-        P[self.terminal_idx, :, self.terminal_idx] = 1.0
         return jnp.asarray(P), jnp.asarray(R)
 
     def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
         P_pi = jnp.einsum("sa,sam->sm", pi, P_env)
         R_pi = jnp.einsum("sa,sa->s", pi, R_env)
-        A = jnp.eye(self.num_total_states) - self.gamma * P_pi
+        A = jnp.eye(self.num_states) - self.gamma * P_pi
         return jnp.linalg.solve(A, R_pi)
 
     def get_value_grid(self, values: jax.Array) -> jax.Array:
         """Map per-state values to N x N grid (walls = 0)."""
-        if values.shape[0] == self.num_total_states:
-            values = values[: self.num_states]
-
         grid = jnp.zeros((self.N, self.N), dtype=values.dtype)
         return grid.at[self.coords[:, 0], self.coords[:, 1]].set(values)
 
@@ -322,6 +319,8 @@ class FourRoomsExactValue:
         params: Any,
         get_int_rew_per_state: Callable[[jax.Array], jax.Array],
     ) -> Tuple[jax.Array, jax.Array, Any]:
+        
+        # 1. Forward Pass
         out = network.apply(params, self.obs_stack)
         if len(out) == 3:
             pi_dist, v_net_ext, v_net_int = out
@@ -334,15 +333,20 @@ class FourRoomsExactValue:
             v_net_tuple = self.get_value_grid(v_net.squeeze())
 
         pi = pi_dist.probs
-        terminal_policy = jnp.array([[1.0, 0.0, 0.0, 0.0]], dtype=pi.dtype)
-        pi_full = jnp.concatenate([pi, terminal_policy], axis=0)
-
+        
+        # 2. Extract intrinsic rewards natively
         r_int_s = get_int_rew_per_state(self.obs_stack)
-        r_int_all = jnp.concatenate([r_int_s, jnp.array([0.0], dtype=r_int_s.dtype)], axis=0)
 
-        target_P = self.P if self.episodic else self.P_cont
-        R_int_sa = jnp.einsum("sam,m->sa", target_P, r_int_all)
+        # 3. Mask goal state if purely Episodic (Not Absorbing)
+        if self.episodic and not self.absorbing:
+            r_int_s = r_int_s.at[self.goal_idx].set(0.0)
 
-        v_e = self.solve_linear_system(pi_full, self.P, self.R_extrinsic)
-        v_i = self.solve_linear_system(pi_full, target_P, R_int_sa)
+        # 4. Target selection and Reward projection
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+        R_int_sa = jnp.einsum("sam,m->sa", target_P, r_int_s)
+
+        # 5. Solve Systems
+        v_e = self.solve_linear_system(pi, self.P, self.R_extrinsic)
+        v_i = self.solve_linear_system(pi, target_P, R_int_sa)
+        
         return self.get_value_grid(v_e), self.get_value_grid(v_i), v_net_tuple

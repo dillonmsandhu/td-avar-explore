@@ -130,145 +130,99 @@ class LongChain(environment.Environment[EnvState, EnvParams]):
         ax.legend()
         ax.set_title(f"Long Chain (L={self.chain_length}) | Step: {state.time}")
         return fig, ax
-    
+
 class LongChainExactValue:
-    def __init__(self, chain_length: int, gamma: float = 0.99, episodic: bool = False):
-        """
-        Args:
-            chain_length (N): The total length defined in the Env. 
-                              States are 0..N-1.
-                              Playable states are 0..N-2.
-                              State N-1 is the Terminal Goal (never seen).
-        """
+    def __init__(self, chain_length: int, gamma: float = 0.99, episodic: bool = False, absorbing: bool = False):
         self.N = chain_length
-        self.num_playable = chain_length - 1  # We only solve for 0..N-2
+        self.num_playable = chain_length - 1  
+        self.num_total_states = chain_length  # Explicitly track terminal
+        self.terminal_idx = chain_length - 1
         self.gamma = gamma
         self.episodic = episodic
+        self.absorbing = absorbing 
         
-        # 1. Obs Stack: Only for Playable States (0 to N-2)
-        # Note: We keep num_classes=N to match the network's input shape, 
-        # even though index N-1 is never active.
-        self.obs_stack = jax.nn.one_hot(jnp.arange(self.num_playable), self.N)
+        # Obs Stack covers ALL states (including terminal) for exact RND evaluation
+        self.obs_stack = jax.nn.one_hot(jnp.arange(self.num_total_states), self.N)
         self.reachable_mask = jnp.ones(self.num_playable)
-        # 2. Dynamics (Square matrices of size N-1)
+        
+        # Dynamics (Square matrices of size N)
         self.P, self.R_extrinsic = self._build_env_dynamics()
         self.P_cont = self._build_env_dynamics_continuing()
 
     def _build_env_dynamics(self):
-        """
-        Standard Episodic Dynamics.
-        Transition off the end of the chain -> Terminal (Exit the system).
-        """
-        num_S = self.num_playable
+        """Episodic/Absorbing Dynamics. End of chain -> Terminal Self-Loop."""
+        num_S = self.num_total_states
         P = np.zeros((num_S, 2, num_S))
         R = np.zeros((num_S, 2))
         
-        for s in range(num_S):
-            # --- Action 0: Left ---
-            P[s, 0, max(0, s - 1)] = 1.0
-
-            # --- Action 1: Right ---
-            next_s = s + 1
+        for s in range(self.num_playable):
+            P[s, 0, max(0, s - 1)] = 1.0 # Left
             
-            if next_s == num_S: 
-                # We are at s = N-2, moving Right to N-1 (Goal).
-                # In Episodic P matrix: This mass leaves the system.
-                # Row remains all zeros for this action.
-                # Reward is received.
-                R[s, 1] = 1.0
-            else:
-                # Standard transition
-                P[s, 1, next_s] = 1.0
+            next_s = s + 1
+            P[s, 1, next_s] = 1.0        # Right
+            if next_s == self.terminal_idx:
+                R[s, 1] = 1.0            # Extrinsic reward for reaching the end
                 
+        # Terminal self loop
+        P[self.terminal_idx, :, self.terminal_idx] = 1.0
         return jnp.array(P), jnp.array(R)
 
     def _build_env_dynamics_continuing(self):
-        """
-        Continuing Dynamics (LSTD/Optimism).
-        Transition off the end of the chain -> Reset to State 0.
-        """
-        num_S = self.num_playable
+        """Continuing Dynamics. End of chain -> Reset to 0."""
+        num_S = self.num_total_states
         P = np.zeros((num_S, 2, num_S))
         
-        for s in range(num_S):
-            # --- Action 0: Left ---
+        for s in range(self.num_playable):
             P[s, 0, max(0, s - 1)] = 1.0
-
-            # --- Action 1: Right ---
-            next_s = s + 1
             
-            if next_s == num_S:
-                # We are at s = N-2, moving Right to N-1 (Goal).
-                # In Continuing P matrix: We loop back to Start.
-                P[s, 1, 0] = 1.0
+            next_s = s + 1
+            if next_s == self.terminal_idx:
+                P[s, 1, 0] = 1.0  # Teleport to start
             else:
                 P[s, 1, next_s] = 1.0
-            
+                
+        P[self.terminal_idx, :, self.terminal_idx] = 1.0 # Dummy loop for shape stability
         return jnp.array(P)
 
     def solve_linear_system(self, pi, P_env, R_env):
-        # pi: (N-1, 2)
-        # P_env: (N-1, 2, N-1)
-        # R_env: (N-1, 2) (Expected immediate reward)
-        
-        # P_pi[s, s'] = sum_a pi(a|s) * P(s'|s,a)
         P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
-        
-        # R_pi[s] = sum_a pi(a|s) * R(s,a)
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
-        
-        I = jnp.eye(self.num_playable)
-        
-        # Bellman: (I - gamma * P) * V = R
-        A = I - self.gamma * P_pi
-        
+        A = jnp.eye(self.num_total_states) - self.gamma * P_pi
         return jnp.linalg.solve(A, R_pi)
 
     def compute_true_values(self, network, params, get_int_rew_per_state):
-        # 1. Forward Pass on Playable States Only
         out = network.apply(params, self.obs_stack)
         
         if len(out) == 3:
             pi_dist, v_net_ext, v_net_int = out
-            v_net_tuple = (v_net_ext.squeeze(), v_net_int.squeeze())
+            v_net_tuple = (self.get_value_grid(v_net_ext.squeeze()), self.get_value_grid(v_net_int.squeeze()))
         else:
             pi_dist, v_net_all = out
-            v_net_tuple = v_net_all.squeeze()
+            v_net_tuple = self.get_value_grid(v_net_all.squeeze())
             
-        pi_matrix = pi_dist.probs # (N-1, 2)
+        pi_matrix = pi_dist.probs # (N, 2)
 
-        # 2. Intrinsic Reward
-        # r(s) for playable states. Shape (N-1,)
+        # 1. Get Intrinsic Rewards for ALL states
         r_int_s = get_int_rew_per_state(self.obs_stack)
         
-        # 3. Project to R(s,a)
-        # We need to be careful here. 
-        # The intrinsic reward vector r_int_s corresponds to states 0..N-2.
-        #
-        # If we loop (Continuing), we land in 0..N-2.
-        # If we terminate (Episodic), we land in Void. 
-        #
-        # For the "Void" transition, the intrinsic reward is effectively 0 
-        # (or whatever reward you assign to the terminal state, usually 0).
-        # Since r_int_s doesn't have an entry for "Void", normal multiplication works 
-        # provided P columns match r_int_s indices.
+        # 2. Unified Episodic vs Absorbing switch
+        if self.episodic and not self.absorbing:
+            r_int_s = r_int_s.at[self.terminal_idx].set(0.0)
         
-        target_P = self.P if self.episodic else self.P_cont
+        # 3. Choose Dynamics
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
         R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
         
-        # Note: If P has a transition to "Void" (all zeros row), 
-        # the einsum sums to 0, correctly implying 0 intrinsic reward for the next state.
-
         # 4. Solve
         v_e = self.solve_linear_system(pi_matrix, self.P, self.R_extrinsic)
         v_i = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
-        return v_e, v_i, v_net_tuple
+        # Slice off the terminal state before returning
+        return self.get_value_grid(v_e), self.get_value_grid(v_i), v_net_tuple
     
     def get_value_grid(self, x: jax.Array) -> jax.Array:
-        """Identity"""
-        return x
-    
+        """Slices off the terminal state to protect downstream logging."""
+        return x[:self.num_playable]    
 
     def plot(self, v_e, v_i, v_pred_tuple):
         """ Visualizes the Value Functions along the 1D Chain.
