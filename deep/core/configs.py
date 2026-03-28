@@ -229,3 +229,14 @@ CONTINUOUS_REGISTRY = {
         ],
     }
 }
+
+
+EXACT_REGISTRY = {
+    "visual": {
+        "config_dict": visual,
+        "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
+    },
+    "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
+    "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite", "DeepSea-Dense"]},
+    "chain": {"config_dict": chain,"envs": ["Chain",]},
+}
