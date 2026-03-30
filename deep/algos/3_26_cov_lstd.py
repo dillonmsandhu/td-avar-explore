@@ -356,9 +356,7 @@ def make_train(config):
                 )
             else:
 
-                def int_rew_from_state(
-                    s,
-                ):  # for computing the intrinsic reward given an arbitrary state
+                def int_rew_from_state(s,):  # for computing the intrinsic reward given an arbitrary state
                     phi = batch_get_features(s)
                     rho = int_rew_from_features(phi) * rho_scale
                     return rho

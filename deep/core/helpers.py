@@ -31,7 +31,7 @@ def load_config(args):
 
 def make_env(config):
     
-    if config['ENV_NAME'] ==  "FourRoomsCustom-v0":
+    if config['ENV_NAME'] in  ("FourRoomsCustom-v0"):
         env = FourRooms(
             N=int(config.get("FOURROOMS_SIZE", 21)),
             use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),

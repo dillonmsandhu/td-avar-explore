@@ -108,6 +108,7 @@ four_rooms = {
     "NORMALIZE_OBS": False,
     "WARMUP": 0,
     "CALC_TRUE_VALUES": True,
+    "FOURROOMS_SIZE": 21,
 }
 continuous = {
     "LR": 1e-3,
@@ -162,7 +163,7 @@ CONFIG_REGISTRY = {
     },
     "four_rooms": {
         "config_dict": four_rooms_config,
-        "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
+        "envs": ["FourRoomsCustom-v0"],
     },
     "visual": {
         "config_dict": visual,

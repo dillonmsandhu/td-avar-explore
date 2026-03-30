@@ -310,6 +310,9 @@ class FourRoomsExactValue:
 
     def get_value_grid(self, values: jax.Array, all= False) -> jax.Array:
         """Map per-state values to N x N grid (walls = 0)."""
+        if values.shape[0] == self.num_total_states:
+            values = values[: self.num_states]
+        print('shape of arg to get value grid is ', values.shape)
         grid = jnp.zeros((self.N, self.N), dtype=values.dtype)
         return grid.at[self.coords[:, 0], self.coords[:, 1]].set(values)
 
@@ -320,18 +323,18 @@ class FourRoomsExactValue:
         get_int_rew_per_state: Callable[[jax.Array], jax.Array],
         all = False
     ) -> Tuple[jax.Array, jax.Array, Any]:
-        
         # 1. Forward Pass
         out = network.apply(params, self.obs_stack)
+        
         if len(out) == 3:
             pi_dist, v_net_ext, v_net_int = out
             v_net_tuple = (
-                self.get_value_grid(v_net_ext.squeeze(), all),
-                self.get_value_grid(v_net_int.squeeze(), all),
+                v_net_ext.squeeze(),
+                v_net_int.squeeze(),
             )
         else:
             pi_dist, v_net = out
-            v_net_tuple = self.get_value_grid(v_net.squeeze(), all)
+            v_net_tuple = v_net.squeeze()
 
         pi = pi_dist.probs
         
@@ -349,5 +352,6 @@ class FourRoomsExactValue:
         # 5. Solve Systems
         v_e = self.solve_linear_system(pi, self.P, self.R_extrinsic)
         v_i = self.solve_linear_system(pi, target_P, R_int_sa)
-        
+
+
         return self.get_value_grid(v_e, all), self.get_value_grid(v_i, all), v_net_tuple
