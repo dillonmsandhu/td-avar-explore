@@ -21,7 +21,7 @@ def run_experiment_main(make_train, SAVE_DIR):
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
     parser.add_argument('--base-config', type=str, default='shared', 
-                        choices=['shared','mc', 'ds', 'min', 'visual', 'chain'])
+                        choices=['shared','mc', 'ds', 'min', 'visual', 'chain', 'four_rooms'])
     parser.add_argument('--env_ids', nargs='+', default=[])
 
     args = parser.parse_args()

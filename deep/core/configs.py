@@ -100,6 +100,13 @@ visual = {
     "RND_NETWORK_TYPE": "cnn",
     "NORMALIZE_OBS": False,
     "WARMUP": 0,
+    "CALC_TRUE_VALUES": False,
+}
+four_rooms = {
+    "NETWORK_TYPE": "cnn",
+    "RND_NETWORK_TYPE": "cnn",
+    "NORMALIZE_OBS": False,
+    "WARMUP": 0,
     "CALC_TRUE_VALUES": True,
 }
 continuous = {
@@ -131,8 +138,10 @@ if chain["RND_NETWORK_TYPE"] == "identity":
 mc_config = shared | mc_specific  # | is the union op. last dict's key takes precedence
 ds_config = shared | ds_specific
 min_config = shared | min_specific
-visual = shared | visual
+four_rooms_config = shared | four_rooms
 chain = shared | chain
+visual = shared | visual
+
 
 CONFIG_REGISTRY = {
     # maps from config name to all envs that we can run that use that config.
@@ -151,9 +160,13 @@ CONFIG_REGISTRY = {
             "Swimmer-misc",
         ],
     },
+    "four_rooms": {
+        "config_dict": four_rooms_config,
+        "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
+    },
     "visual": {
         "config_dict": visual,
-        "envs": ["Pong-misc", "FourRooms-misc", "FourRoomsCustom-v0", "MNISTBandit-bsuite", "Catch-bsuite"],
+        "envs": ["Pong-misc", "MNISTBandit-bsuite", "Catch-bsuite"],
     },
     "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
     "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite", "DeepSea-Dense"]},
@@ -176,12 +189,9 @@ DEBUG_REGISTRY = {
             "Chain",
         ],
     },
-    "visual": {
-        "config_dict": visual,
-        "envs": [
-            "FourRooms-misc",
-            "FourRoomsCustom-v0",
-        ],
+    "four_rooms": {
+        "config_dict": four_rooms_config,
+        "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
     },
     "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite"]},
 }
@@ -199,9 +209,13 @@ DISCRETE_REGISTRY = {
             "UmbrellaChain-bsuite",
         ],
     },
+    "four_rooms": {
+        "config_dict": four_rooms_config,
+        "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
+    },
     "visual": {
         "config_dict": visual,
-        "envs": ["Pong-misc", "FourRooms-misc", "FourRoomsCustom-v0", "MNISTBandit-bsuite", "Catch-bsuite"],
+        "envs": ["Pong-misc", "MNISTBandit-bsuite", "Catch-bsuite"],
     },
     "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
     "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite"]},
@@ -232,11 +246,10 @@ CONTINUOUS_REGISTRY = {
 
 
 EXACT_REGISTRY = {
-    "visual": {
-        "config_dict": visual,
+    "four_rooms": {
+        "config_dict": four_rooms_config,
         "envs": ["FourRooms-misc", "FourRoomsCustom-v0"],
     },
-    "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
     "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite", "DeepSea-Dense"]},
     "chain": {"config_dict": chain,"envs": ["Chain",]},
 }
