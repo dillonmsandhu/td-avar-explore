@@ -168,8 +168,8 @@ class DeepSeaExactValue:
             else:
                 Re = self.R_extrinsic
 
-                # 5. Solve
-                v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
-                v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
+            # 5. Solve
+            v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
+            v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
             return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid

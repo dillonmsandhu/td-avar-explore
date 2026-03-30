@@ -1,11 +1,53 @@
 # PURE ORACLE: Exact Value Policy Gradient
+# Now with Dual Advantage Normalization and Linear Beta Decay
 
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 
-SAVE_DIR = "3_26_oracle"
+SAVE_DIR = "3_27_oracle"
 
+def add_oracle_values_to_metric(
+    config, metric, ri_grid, v_e_grid, v_i_grid, traj_batch, evaluator
+):
+    """
+    Minimalist Oracle Metrics:
+    Logs the pre-calculated Bellman grids and rollout statistics.
+    """
+    # 1. Visitation Logging
+    obs = jnp.asarray(traj_batch.obs)
+    if config.get("ENV_NAME") in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+        if obs.ndim >= 5: # CNN
+            metric['visitation_count'] = obs[..., 1].sum(axis=(0, 1))
+        elif obs.ndim >= 3: # Vector
+            size = int(config.get("FOURROOMS_SIZE", ri_grid.shape[0]))
+            pos = obs[..., :2].astype(jnp.int32)
+            y, x = pos[..., 0].reshape(-1), pos[..., 1].reshape(-1)
+            counts = jnp.zeros((size, size), dtype=jnp.float32)
+            metric['visitation_count'] = counts.at[y, x].add(1.0)
+            
+    elif "DeepSea" in config.get("ENV_NAME", ""):
+        # For DeepSea CNN obs, channel 0 is the agent position
+        metric['visitation_count'] = obs[..., 0].sum(axis=(0, 1))
+        
+    elif "Chain" in config.get('ENV_NAME', '') or config.get('RND_NETWORK_TYPE') == 'identity':
+        visitation = obs.sum(axis=(0, 1))
+        metric['visitation_count'] = evaluator.get_value_grid(visitation)
+    else:
+        metric['visitation_count'] = jnp.zeros_like(ri_grid)
+
+    # 2. Map Pre-Calculated Oracle Grids to Metrics
+    metric.update({
+        "ri_grid": ri_grid,
+        "v_i": v_i_grid,
+        "v_e": v_e_grid,
+        "v_i_pred": v_i_grid,
+        "v_e_pred": v_e_grid,
+        # ri_grid is now unscaled rho, so 1/rho^2 represents the pure empirical visitation count N
+        "effective_visits": (1.0 / jnp.maximum(ri_grid, 1e-8))**2, 
+    })
+
+    return metric
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -47,49 +89,6 @@ def make_train(config):
         bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
         return jnp.sqrt(bonus_sq)
 
-
-    def add_oracle_values_to_metric(
-        config, metric, ri_grid, v_e_grid, v_i_grid, traj_batch, evaluator
-    ):
-        """
-        Minimalist Oracle Metrics:
-        Logs the pre-calculated Bellman grids and rollout statistics.
-        """
-        # 1. Visitation Logging
-        obs = jnp.asarray(traj_batch.obs)
-        if config.get("ENV_NAME") in {"FourRooms-misc", "FourRoomsCustom-v0"}:
-            if obs.ndim >= 5: # CNN
-                metric['visitation_count'] = obs[..., 1].sum(axis=(0, 1))
-            elif obs.ndim >= 3: # Vector
-                size = int(config.get("FOURROOMS_SIZE", ri_grid.shape[0]))
-                pos = obs[..., :2].astype(jnp.int32)
-                y, x = pos[..., 0].reshape(-1), pos[..., 1].reshape(-1)
-                counts = jnp.zeros((size, size), dtype=jnp.float32)
-                metric['visitation_count'] = counts.at[y, x].add(1.0)
-                
-        elif "DeepSea" in config.get("ENV_NAME", ""):
-            next_obs = jnp.asarray(traj_batch.next_obs)
-            metric['visitation_count'] = next_obs[..., 0].sum(axis=(0, 1))
-            
-        elif "Chain" in config.get('ENV_NAME', '') or config.get('RND_NETWORK_TYPE') == 'identity':
-            next_obs = jnp.asarray(traj_batch.next_obs)  # already true_next_obs for absorbing
-            visitation = next_obs.sum(axis=(0, 1))
-            metric['visitation_count'] = evaluator.get_value_grid(visitation)
-        else:
-            metric['visitation_count'] = jnp.zeros_like(ri_grid)
-
-        # 2. Map Pre-Calculated Oracle Grids to Metrics
-        metric.update({
-            "ri_grid": ri_grid,
-            "v_i": v_i_grid,
-            "v_e": v_e_grid,
-            "v_i_pred": v_i_grid,
-            "v_e_pred": v_e_grid,
-            "effective_visits": (config["BONUS_SCALE"] / jnp.maximum(ri_grid, 1e-8))**2,
-        })
-
-        return metric
-
     def train(rng):
         # 1. Initialize Networks
         rnd_rng, rng = jax.random.split(rng)
@@ -111,11 +110,12 @@ def make_train(config):
         
         # 2. Initialize Environment
         rng, _rng = jax.random.split(rng)
+
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
 
-        # 3. Initialize Covariance State (We only need this to compute novelty)
+        # 3. Initialize Covariance State 
         initial_sigma_state = {
             "S": jnp.zeros((k,k)),
             "N": 1,
@@ -125,6 +125,10 @@ def make_train(config):
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx) = runner_state
+
+            # --- Calculate linearly decaying Beta ---
+            progress = idx / config["NUM_UPDATES"]
+            beta_t = config["BONUS_SCALE"] * (1.0 - progress)
 
             # --- PHASE 1: COLLECT TRAJECTORIES ---
             def _env_step(env_scan_state, unused):
@@ -142,7 +146,6 @@ def make_train(config):
                 )
                 true_next_obs = info["real_next_obs"]
 
-                # Dummy values to satisfy the NamedTuple. They will be overwritten by the Oracle.
                 dummy_val = jnp.zeros_like(reward)
 
                 transition = Transition(
@@ -157,37 +160,33 @@ def make_train(config):
                 _env_step, env_step_state, None, config["NUM_STEPS"]
             )
 
-            # --- PHASE 2: COMPUTE NOVELTY REWARDS ---
+            # --- PHASE 2: COMPUTE NOVELTY REWARDS (Unscaled) ---
             Sigma_inv = jnp.linalg.solve(sigma_state["S"] + config['GRAM_REG'] * jnp.eye(k), jnp.eye(k))
             int_rew_from_features = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
-            
-            sqrt_n = jnp.maximum(1.0, jnp.sqrt(sigma_state["N"]))
-            rho_scale = config["BONUS_SCALE"] / sqrt_n
             
             # Unscaled rho for the batch
             rho_batch = int_rew_from_features(batch_get_features(traj_batch.next_obs))
 
-            # --- PHASE 3: ORACLE VALUE INJECTION ---
-            def int_rew_from_state(s):
-                """Helper for the evaluator to generate the exact intrinsic reward grid."""
-                return int_rew_from_features(batch_get_features(s)) * rho_scale
+            # --- PHASE 3: ORACLE VALUE INJECTION (Unscaled Target) ---
+            def unscaled_int_rew_from_state(s):
+                """Helper for the evaluator to generate the EXACT UNSCALED intrinsic reward grid."""
+                return int_rew_from_features(batch_get_features(s))
 
-            # Get Exact Values for the Entire MDP
+            # Get Exact Values for the Entire MDP (Pure, stationary math)
             v_e_true_grid, v_i_true_grid, _ = evaluator.compute_true_values(
-                network, train_state.params, int_rew_from_state, all = True
+                network, train_state.params, unscaled_int_rew_from_state, all = True
             )
 
-            # Fast JAX mapping from spatial observation to grid value
             def get_oracle_values(obs_batch):
                 env_name = config["ENV_NAME"]
                 if "DeepSea" in env_name:
                     v_e = jnp.sum(obs_batch[..., 0] * v_e_true_grid, axis=(-2, -1))
                     v_i = jnp.sum(obs_batch[..., 0] * v_i_true_grid, axis=(-2, -1))
                 elif "FourRooms" in env_name:
-                    if obs_batch.ndim >= 4: # Visual Obs
+                    if obs_batch.ndim >= 4: 
                         v_e = jnp.sum(obs_batch[..., 1] * v_e_true_grid, axis=(-2, -1))
                         v_i = jnp.sum(obs_batch[..., 1] * v_i_true_grid, axis=(-2, -1))
-                    else: # Vector Obs
+                    else: 
                         y, x = obs_batch[..., 0].astype(jnp.int32), obs_batch[..., 1].astype(jnp.int32)
                         v_e, v_i = v_e_true_grid[y, x], v_i_true_grid[y, x]
                 elif "Chain" in env_name:
@@ -206,24 +205,33 @@ def make_train(config):
                 next_value=true_next_v_e,
                 i_value=true_v_i,
                 next_i_val=true_next_v_i,
-                intrinsic_reward=rho_batch * rho_scale
+                intrinsic_reward=rho_batch # Passed in unscaled!
             )
 
-            # --- PHASE 4: GAE CALCULATION ---
+            # --- PHASE 4: GAE CALCULATION & DUAL NORMALIZATION ---
             gaes, targets = helpers.calculate_gae(
                 traj_batch, config["GAMMA"], config["GAE_LAMBDA"], 
                 is_episodic=is_episodic, is_absorbing=is_absorbing,
                 γi=config["GAMMA_i"], λi=config["GAE_LAMBDA_i"]
             )
-            advantages = gaes[0] + gaes[1]
+            
+            adv_ext = gaes[0]
+            adv_int = gaes[1]
             extrinsic_target = targets[0]
+
+            # Normalize both advantages independently across the entire batch
+            adv_ext_norm = (adv_ext - adv_ext.mean()) / (adv_ext.std() + 1e-8)
+            adv_int_norm = (adv_int - adv_int.mean()) / (adv_int.std() + 1e-8)
+
+            # Combine using the linearly decaying beta schedule
+            advantages = adv_ext_norm + beta_t * adv_int_norm
 
             # --- PHASE 5: UPDATE POLICY NETWORK ---
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    # Because config["VF_COEF"] is 0.0, the value loss gradients are entirely ignored
+                    # VF_COEF is 0.0, value loss gradients are ignored
                     (total_loss, _), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config,
                     )
@@ -251,56 +259,29 @@ def make_train(config):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
             metric.update({
                 "ppo_loss": loss_info[0],
-                "bonus_mean": gaes[1].mean(),
-                "bonus_std": gaes[1].std(),
-                "bonus_max": gaes[1].max(),
+                "bonus_mean": adv_int.mean(),  # Log the pre-normalized raw advantage
+                "bonus_std": adv_int.std(),
+                "bonus_max": adv_int.max(),
                 "lambda_ret_mean": targets[0].mean(),
                 "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
                 "mean_rew": traj_batch.reward.mean(),
-                "rho_scale": rho_scale,
+                "beta_t": beta_t, # Track the decaying beta
                 "vi_pred": v_i_true_grid,
                 "v_e_pred": v_e_true_grid
             })
-            
-            ri_grid = evaluator.get_value_grid(int_rew_from_state(evaluator.obs_stack)) * rho_scale
 
-            # Record Policy
-            pi_all, _ = network.apply(train_state.params, evaluator.obs_stack)
-
-            pi_all, _ = network.apply(train_state.params, evaluator.obs_stack)
-            # pi_all.probs shape: (num_states, num_actions)
-            num_actions = pi_all.probs.shape[-1]
+            # Retrieve pure unscaled intrinsic rewards for logging
+            ri_grid_unscaled = evaluator.get_value_grid(unscaled_int_rew_from_state(evaluator.obs_stack))
             
-            # Create a list of grids, one per action
-            policy_grids = []
-            for a in range(num_actions):
-                prob_a = pi_all.probs[:, a]
-                grid_a = evaluator.get_value_grid(prob_a)
-                policy_grids.append(grid_a)
-            
-            # Stack into shape (num_actions, height, width)
-            full_policy_grid = jnp.stack(policy_grids, axis=0)
-            
-            # Extract the probability of taking Action 1. 
-            # pi_all.probs has shape (num_states, 2). We slice the second column.
-            prob_a1 = pi_all.probs[:, 1]
-            policy_grid_a1 = evaluator.get_value_grid(prob_a1)
-            # ------------------------------
-
             metric = add_oracle_values_to_metric(
                 config=config,
                 metric=metric,
-                ri_grid=ri_grid,
+                ri_grid=ri_grid_unscaled,
                 v_e_grid=v_e_true_grid,
                 v_i_grid=v_i_true_grid,
                 traj_batch=traj_batch,
                 evaluator=evaluator
             )
-            
-            # Inject the policy grid into the final metrics dict
-            metric["policy_grid_a1"] = policy_grid_a1
-            metric["policy_dist_grid"] = full_policy_grid
-            
             runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx + 1)
             return runner_state, metric
 
