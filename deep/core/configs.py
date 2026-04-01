@@ -72,7 +72,7 @@ shared = {
     "NORMALIZE_REWARDS": NORMALIZE_REWARDS,
     # FOR Covariance Based Reward
     "BONUS_SCALE": 1.0,
-    "A_REGULARIZATION_PER_STEP": 1e-6,
+    "A_REGULARIZATION_PER_STEP": 1e-4,
     "A_REGULARIZATION": 1e-2,
     "GRAM_REG": 1e-2,
     "N_SEEDS": 8,
@@ -82,9 +82,9 @@ shared = {
     "RND_NETWORK_TYPE": "mlp",
     "WARMUP": 20_000,
     "ALPHA_SCHEDULE": "inv_t",
-    "MIN_COV_LR": 1 / 20,
-    "MIN_LSTD_LR": 1 / 20,
-    "MIN_LSTD_LR_RI": 1 / 20,  # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
+    "MIN_COV_LR": 1 / 100,
+    "MIN_LSTD_LR": 1 / 100,
+    "MIN_LSTD_LR_RI": 1 / 100,  # LSTD for intrinsic reward: faster forgetting of intrinsic reward.
     "ADAPTIVE_BETA": False,
     "LSTD_PRIOR_SAMPLES": 10.0,
     "STAGGERED_STARTS": True,

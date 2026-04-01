@@ -1,5 +1,5 @@
-# Model Based Evaluation of random policy
-# Independent State Action Features (sparse block LSTD system)
+# Model Based Evaluation of ON-POLICY behavior
+# State Features (LSTD-V system) + Optimistic Norm Scaling
 # ABSORBING
 from logging import config
 
@@ -7,15 +7,15 @@ from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
 
-SAVE_DIR = "3_30_linear_model" 
+SAVE_DIR = "3_31_linear_model_v_optimistic" 
 
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
-    next_value: jnp.ndarray  # Added
+    next_value: jnp.ndarray
     i_value: jnp.ndarray
-    next_i_val: jnp.ndarray  # Added
+    next_i_val: jnp.ndarray
     reward: jnp.ndarray
     intrinsic_reward: jnp.ndarray
     log_prob: jnp.ndarray
@@ -37,7 +37,6 @@ def make_train(config):
     k = config.get("RND_FEATURES", 128)
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
-    n_actions = env.action_space(env_params).n
 
     alpha_fn = lambda t: jnp.maximum(config.get("MIN_COV_LR", 1 / 10), 1 / t)
     alpha_fn_lstd = helpers.get_alpha_schedule(config["ALPHA_SCHEDULE"], config["MIN_LSTD_LR"])
@@ -49,172 +48,234 @@ def make_train(config):
         bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
         return jnp.sqrt(bonus_sq)
 
-    def expand_to_sa_features(phi_s, n_actions, taken_actions):
-        one_hots = jax.nn.one_hot(taken_actions, n_actions) 
-        phi_sa_unflattened = phi_s[..., None, :] * one_hots[..., :, None]
-        phi_taken_action = phi_sa_unflattened.reshape(*phi_s.shape[:-1], n_actions * k)
-        return phi_taken_action
-
-    def expected_next_sa_features(next_phi, Pi):
-        expected_next_sa = next_phi[..., None, :] * Pi[..., :, None]
-        return expected_next_sa.reshape(*next_phi.shape[:-1], -1)
-    
-    # def LinearModelVI(model_state: Dict, transitions, features, next_features):
+    # def LinearModelVI(model_state: Dict, transitions, features, next_features, ri_scale):
     #     """
-    #     Learns M (kA -> k) and w_r (kA), then performs weight-space VI.
-    #     Matches the expected_next_sa_features logic for the random policy.
+    #     Learns M (k -> k), w_e (k), w_i (k), and w_u (k).
+    #     Performs on-policy weight-space VI using the joint norm ||w_e + w_i||.
     #     """
     #     batch_axes = tuple(range(transitions.done.ndim))
     #     batch_size = transitions.done.size
     #     t = model_state["t"]
-    #     rho = transitions.intrinsic_reward
-    #     Φ = features            # phi(s, a) -> Shape: (Batch, Envs, k*n_actions)
-    #     next_phi = next_features # phi(s')   -> Shape: (Batch, Envs, k)
         
-    #     γ = config["GAMMA_i"]
+    #     r_e = transitions.reward
+    #     rho_i = transitions.intrinsic_reward
+        
+    #     Φ = features             # phi(s)   -> Shape: (Batch, Envs, k)
+    #     next_phi = next_features # phi(s')  -> Shape: (Batch, Envs, k)
+        
+    #     γ_e = config.get("GAMMA", 0.99)
+    #     γ_i = config.get("GAMMA_i", 0.99)
     #     k = config["RND_FEATURES"]
 
     #     # 1. Accumulate Empirical Statistics (EMA)
-    #     # Sigma (kA x kA): Second moment of state-action features
     #     Sigma_batch = jnp.einsum("nmi, nmj -> ij", Φ, Φ) / batch_size
-    #     # M_num (kA x k): Cross-correlation between phi(s, a) and phi(s')
     #     M_num_batch = jnp.einsum("nmi, nmj -> ij", Φ, next_phi) / batch_size
-    #     # w_r_num (kA): Correlation between phi(s, a) and reward
-    #     w_r_num_batch = (Φ * rho[..., None]).sum(axis=batch_axes) / batch_size
+    #     w_e_num_batch = (Φ * r_e[..., None]).sum(axis=batch_axes) / batch_size
+    #     w_i_num_batch = (Φ * rho_i[..., None]).sum(axis=batch_axes) / batch_size
+
+    #     # --- Linearized Uncertainty Targets ---
+    #     reg_val = config.get("A_REGULARIZATION_PER_STEP", 1e-4)
+    #     S_inv_prev = jnp.linalg.inv(model_state["Sigma"] + jnp.eye(k) * reg_val)
+    #     rho_local = jnp.sqrt(jnp.einsum("nmi,ij,nmj->nm", Φ, S_inv_prev, Φ))
+    #     w_u_num_batch = (Φ * rho_local[..., None]).sum(axis=batch_axes) / batch_size
 
     #     # 2. Absorbing Ghost Transitions
-    #     # We need phi_sa(C, random_policy) = [phi(C)/n_actions, phi(C)/n_actions, ...]
     #     absorb_mask = jnp.where(config.get("ABSORBING_TERMINAL_STATE", True), transitions.done, 0)
-    #     Pi_unif = jnp.ones((*transitions.done.shape, n_actions)) / n_actions
-    #     phi_C_sa = expected_next_sa_features(next_phi, Pi_unif) # Shape: (Batch, Envs, k*n_actions)
+    #     phi_C_s = next_phi 
         
-    #     # Ghost transitions: phi_sa(C) transitions to expected next features phi(C)
-    #     Sigma_abs = jnp.einsum("nmi, nmj -> ij", phi_C_sa * absorb_mask[..., None], phi_C_sa)
-    #     M_num_abs = jnp.einsum("nmi, nmj -> ij", phi_C_sa * absorb_mask[..., None], next_phi)
-    #     w_r_num_abs = (phi_C_sa * (rho[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+    #     Sigma_abs = jnp.einsum("nmi, nmj -> ij", phi_C_s * absorb_mask[..., None], phi_C_s)
+    #     M_num_abs = jnp.einsum("nmi, nmj -> ij", phi_C_s * absorb_mask[..., None], next_phi)
+        
+    #     w_e_num_abs = (phi_C_s * (r_e[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+    #     w_i_num_abs = (phi_C_s * (rho_i[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+        
+    #     rho_local_abs = jnp.sqrt(jnp.einsum("nmi,ij,nmj->nm", phi_C_s, S_inv_prev, phi_C_s))
+    #     w_u_num_abs = (phi_C_s * (rho_local_abs[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
 
     #     # Normalize and Update EMAs
     #     denom = batch_size + absorb_mask.sum()
     #     Sigma_i = helpers.EMA(alpha_fn_lstd(t), model_state["Sigma"], (Sigma_batch * batch_size + Sigma_abs) / denom)
     #     M_num_i = helpers.EMA(alpha_fn_lstd(t), model_state["M_num"], (M_num_batch * batch_size + M_num_abs) / denom)
-    #     w_r_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_r_num"], (w_r_num_batch * batch_size + w_r_num_abs) / denom)
-
-    #     # 3. Solve for explicit Model Components
-    #     reg = jnp.eye(k * n_actions) * config.get("A_REGULARIZATION_PER_STEP", 1e-4)
-    #     Sigma_inv = jnp.linalg.inv(Sigma_i + reg)
         
-    #     M = Sigma_inv @ M_num_i      # Transition Model M: R^{kA x k}
-    #     w_r = Sigma_inv @ w_r_num_i  # Reward Weights w_r: R^{kA}
+    #     w_e_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_e_num"], (w_e_num_batch * batch_size + w_e_num_abs) / denom)
+    #     w_i_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_i_num"], (w_i_num_batch * batch_size + w_i_num_abs) / denom)
+    #     w_u_num_i = helpers.EMA(alpha_fn_lstd(t), model_state["w_u_num"], (w_u_num_batch * batch_size + w_u_num_abs) / denom)
 
-    #     # 4. Weight-Space Value Iteration
-    #     # w_q = w_r + gamma * M * w_v
-    #     # where w_v = Mean(w_q.reshape(n_actions, k), axis=0)
-    #     def vi_step(w_q_in, _):
-    #         # Project w_q to w_v (the average weights for the random policy)
-    #         w_v = w_q_in.reshape(n_actions, k).mean(axis=0)
-    #         # Apply Bellman Operator in weight space
-    #         w_q_out = w_r + γ * (M @ w_v)
-    #         return w_q_out, None
+    #     # ------------------------------------------------------------
+    #     # 3. Solve for explicit Model Components
+    #     # ------------------------------------------------------------
+    #     Sigma_view = Sigma_i + jnp.eye(k) * reg_val
+    #     Sigma_inv = jnp.linalg.inv(Sigma_view)
+        
+    #     M = Sigma_inv @ M_num_i          # R^{k x k}
+    #     w_e_base = Sigma_inv @ w_e_num_i # Extrinsic base
+    #     w_i_base = Sigma_inv @ w_i_num_i # Intrinsic base
+        
+    #     # Scale the uncertainty weights down to match the decayed intrinsic reward scale
+    #     w_u = Sigma_inv @ w_u_num_i * ri_scale      
+
+    #     # 4. Concurrent Weight-Space Value Iteration
+    #     def vi_step(w_vs, _):
+    #         w_v_e, w_v_i = w_vs
+            
+    #         # The JOINT NORM for scaling the bonus
+    #         # Align the intrinsic scale before taking the norm
+    #         aligned_w_v_i = w_v_i * ri_scale
+    #         w_v_joint_norm = jnp.linalg.norm(w_v_e + aligned_w_v_i)
+            
+    #         # Cap the norm to prevent exponential explosion
+    #         w_v_joint_norm = jnp.minimum(w_v_joint_norm, model_state["V_max"])
+            
+    #         # Linearized Optimistic Bonus
+    #         beta_M = config.get("BETA_M", 0.05)
+    #         optimistic_bonus = (γ_i * w_v_joint_norm * beta_M) * w_u
+            
+    #         # On-Policy Bellman Updates
+    #         w_v_e_out = w_e_base + γ_e * (M @ w_v_e)
+    #         w_v_i_out = w_i_base + γ_i * (M @ w_v_i) + optimistic_bonus
+            
+    #         return (w_v_e_out, w_v_i_out), None
 
     #     num_vi_rounds = config.get("VI_ROUNDS", 100)
-    #     # We carry over the weights from the previous training step for warm-start
-    #     w_q_final, _ = jax.lax.scan(vi_step, model_state["w_q"], None, length=num_vi_rounds)
+    #     # (w_v_e_final, w_v_i_final), _ = jax.lax.scan(
+    #     #     vi_step, 
+    #     #     (model_state["w_v_e"], model_state["w_v_i"]), 
+    #     #     None, 
+    #     #     length=num_vi_rounds
+    #     # )
+
+    #     (w_v_e_final, w_v_i_final), _ = jax.lax.scan(
+    #         vi_step, 
+    #         (w_e_base, w_i_base), 
+    #         None, 
+    #         length=num_vi_rounds
+    #     )
+
 
     #     return {
     #         "Sigma": Sigma_i,
     #         "M_num": M_num_i,
-    #         "w_r_num": w_r_num_i,
-    #         "w_q": w_q_final, # Storing Q-weights
+    #         "w_e_num": w_e_num_i,
+    #         "w_i_num": w_i_num_i,
+    #         "w_u_num": w_u_num_i,
+    #         "w_v_e": w_v_e_final,
+    #         "w_v_i": w_v_i_final, 
     #         "t": t + 1,
     #         "Beta": model_state["Beta"],
-    # }
+    #         "V_max": model_state["V_max"],                 
+    #     }
 
-    def LinearModelVI(model_state: Dict, transitions, features, next_features):
+    def LinearModelVI(model_state: Dict, transitions, features, next_features, ri_scale):
         """
-        Learns M (kA -> k) and w_r (kA), then performs weight-space VI.
-        Matches the expected_next_sa_features logic for the random policy.
+        Learns M (k -> k), w_e (k), w_i (k), and w_u (k).
+        Performs on-policy weight-space VI using the joint norm ||w_e + w_i||.
         """
         batch_axes = tuple(range(transitions.done.ndim))
         batch_size = transitions.done.size
         t = model_state["t"]
-        rho = transitions.intrinsic_reward
-        Φ = features            # phi(s, a) -> Shape: (Batch, Envs, k*n_actions)
-        next_phi = next_features # phi(s')   -> Shape: (Batch, Envs, k)
         
-        γ = config["GAMMA_i"]
+        r_e = transitions.reward
+        
+        # rho_i is passed in from update_cov_and_get_rho. 
+        # It represents the global epistemic novelty of the NEXT state.
+        rho_i = transitions.intrinsic_reward
+        
+        Φ = features             # phi(s)   -> Shape: (Batch, Envs, k)
+        next_phi = next_features # phi(s')  -> Shape: (Batch, Envs, k)
+        
+        γ_e = config.get("GAMMA", 0.99)
+        γ_i = config.get("GAMMA_i", 0.99)
         k = config["RND_FEATURES"]
 
         # 1. Accumulate Empirical Statistics (EMA)
         Sigma_batch = jnp.einsum("nmi, nmj -> ij", Φ, Φ) / batch_size
         M_num_batch = jnp.einsum("nmi, nmj -> ij", Φ, next_phi) / batch_size
-        w_r_num_batch = (Φ * rho[..., None]).sum(axis=batch_axes) / batch_size
+        w_e_num_batch = (Φ * r_e[..., None]).sum(axis=batch_axes) / batch_size
+        
+        # Both intrinsic rewards and uncertainty targets are driven by rho(s')
+        w_i_num_batch = (Φ * rho_i[..., None]).sum(axis=batch_axes) / batch_size
+        w_u_num_batch = w_i_num_batch 
 
         # 2. Absorbing Ghost Transitions
         absorb_mask = jnp.where(config.get("ABSORBING_TERMINAL_STATE", True), transitions.done, 0)
-        Pi_unif = jnp.ones((*transitions.done.shape, n_actions)) / n_actions
-        phi_C_sa = expected_next_sa_features(next_phi, Pi_unif) 
+        phi_C_s = next_phi 
         
-        Sigma_abs = jnp.einsum("nmi, nmj -> ij", phi_C_sa * absorb_mask[..., None], phi_C_sa)
-        M_num_abs = jnp.einsum("nmi, nmj -> ij", phi_C_sa * absorb_mask[..., None], next_phi)
-        w_r_num_abs = (phi_C_sa * (rho[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+        Sigma_abs = jnp.einsum("nmi, nmj -> ij", phi_C_s * absorb_mask[..., None], phi_C_s)
+        M_num_abs = jnp.einsum("nmi, nmj -> ij", phi_C_s * absorb_mask[..., None], next_phi)
+        
+        w_e_num_abs = (phi_C_s * (r_e[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+        
+        # Ghost transitions loop to themselves, so the "next" state novelty is still rho_i
+        w_i_num_abs = (phi_C_s * (rho_i[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
+        w_u_num_abs = w_i_num_abs
 
         # Normalize and Update EMAs
         denom = batch_size + absorb_mask.sum()
         Sigma_i = helpers.EMA(alpha_fn_lstd(t), model_state["Sigma"], (Sigma_batch * batch_size + Sigma_abs) / denom)
         M_num_i = helpers.EMA(alpha_fn_lstd(t), model_state["M_num"], (M_num_batch * batch_size + M_num_abs) / denom)
-        w_r_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_r_num"], (w_r_num_batch * batch_size + w_r_num_abs) / denom)
-
-        # ------------------------------------------------------------
-        # 3. Track Diagonal Prior Counts
-        # ------------------------------------------------------------
-        batch_sa_precision = (Φ**2).sum(axis=batch_axes)
-        absorbing_sa_precision = (phi_C_sa**2 * absorb_mask[..., None]).sum(axis=batch_axes)
         
-        # Safe local immutable update
-        new_sa_diag_counts = model_state["sa_diag_counts"] + batch_sa_precision + absorbing_sa_precision
-
-        PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
-        lambda_kA = PRIOR_SAMPLES / (PRIOR_SAMPLES + new_sa_diag_counts)
-        lambda_kA = jnp.where(lambda_kA >= 0.1, lambda_kA, 0.0)
-        Lambda_mat = jnp.diag(lambda_kA) 
+        w_e_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_e_num"], (w_e_num_batch * batch_size + w_e_num_abs) / denom)
+        w_i_num_i = helpers.EMA(alpha_fn_lstd_b(t), model_state["w_i_num"], (w_i_num_batch * batch_size + w_i_num_abs) / denom)
+        w_u_num_i = helpers.EMA(alpha_fn_lstd(t), model_state["w_u_num"], (w_u_num_batch * batch_size + w_u_num_abs) / denom)
 
         # ------------------------------------------------------------
-        # 4. Apply Prior to solve for explicit Model Components
+        # 3. Solve for explicit Model Components
         # ------------------------------------------------------------
-        reg = jnp.eye(k * n_actions) * config.get("A_REGULARIZATION_PER_STEP", 1e-4)
-        
-        # Add prior to the precision matrix
-        Sigma_view = Sigma_i + Lambda_mat + reg
+        reg_val = config.get("A_REGULARIZATION_PER_STEP", 1e-4)
+        Sigma_view = Sigma_i + jnp.eye(k) * reg_val
         Sigma_inv = jnp.linalg.inv(Sigma_view)
         
-        # Add prior to the reward targets
-        prior_b = lambda_kA * model_state["V_max"]
-        w_r_view = w_r_num_i + prior_b
+        M = Sigma_inv @ M_num_i          # R^{k x k}
+        w_e_base = Sigma_inv @ w_e_num_i # Extrinsic base
+        w_i_base = Sigma_inv @ w_i_num_i # Intrinsic base
         
-        M = Sigma_inv @ M_num_i      # Optimistic Transition Model
-        w_r = Sigma_inv @ w_r_view   # Optimistic Reward Weights
+        # Uncertainty weights (Calculated in purely UNSCALED units)
+        w_u = Sigma_inv @ w_u_num_i      
 
-        # 5. Weight-Space Value Iteration
-        def vi_step(w_q_in, _):
-            w_v = w_q_in.reshape(n_actions, k).mean(axis=0)
-            w_q_out = w_r + γ * (M @ w_v)
-            return w_q_out, None
+        # 4. Concurrent Weight-Space Value Iteration
+        def vi_step(w_vs, _):
+            w_v_e, w_v_i = w_vs
+            
+            # The JOINT NORM for scaling the bonus
+            # Align the intrinsic scale before taking the norm
+            aligned_w_v_i = w_v_i * ri_scale
+            w_v_joint_norm = jnp.linalg.norm(w_v_e + aligned_w_v_i)
+            
+            # Cap the norm to prevent exponential explosion
+            w_v_joint_norm = jnp.minimum(w_v_joint_norm, model_state["V_max"])
+            
+            # Linearized Optimistic Bonus 
+            # (Scale by ri_scale HERE, preventing double-scaling)
+            beta_M = config.get("BETA_M", 0.05)
+            optimistic_bonus = (γ_i * w_v_joint_norm * beta_M * ri_scale) * w_u
+            
+            # On-Policy Bellman Updates
+            w_v_e_out = w_e_base + γ_e * (M @ w_v_e)
+            w_v_i_out = w_i_base + γ_i * (M @ w_v_i) + optimistic_bonus
+            
+            return (w_v_e_out, w_v_i_out), None
 
         num_vi_rounds = config.get("VI_ROUNDS", 100)
-        # warm start:
-        # w_q_final, _ = jax.lax.scan(vi_step, model_state["w_q"], None, length=num_vi_rounds)
-        # cold start:
-        w_q_final, _ = jax.lax.scan(vi_step, w_r, None, length=num_vi_rounds)
+        
+        # COLD START: Iterate from the empirical base to wash out stale optimism
+        (w_v_e_final, w_v_i_final), _ = jax.lax.scan(
+            vi_step, 
+            (w_e_base, w_i_base), 
+            None, 
+            length=num_vi_rounds
+        )
 
         return {
             "Sigma": Sigma_i,
             "M_num": M_num_i,
-            "w_r_num": w_r_num_i,
-            "w_q": w_q_final, 
+            "w_e_num": w_e_num_i,
+            "w_i_num": w_i_num_i,
+            "w_u_num": w_u_num_i,
+            "w_v_e": w_v_e_final,
+            "w_v_i": w_v_i_final, 
             "t": t + 1,
             "Beta": model_state["Beta"],
             "V_max": model_state["V_max"],                 
-            "sa_diag_counts": new_sa_diag_counts,          
         }
 
     def train(rng):
@@ -246,16 +307,18 @@ def make_train(config):
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
 
-        dim_kA = k * n_actions
+        dim_k = k
         initial_model_state = {
-            "Sigma": jnp.eye(dim_kA) * config["A_REGULARIZATION"],
-            "M_num": jnp.zeros((dim_kA, k)),
-            "w_r_num": jnp.zeros(dim_kA),
-            "w_q": jnp.zeros(dim_kA), 
+            "Sigma": jnp.eye(dim_k) * config["A_REGULARIZATION"],
+            "M_num": jnp.zeros((dim_k, k)),
+            "w_e_num": jnp.zeros(dim_k),
+            "w_i_num": jnp.zeros(dim_k),
+            "w_u_num": jnp.zeros(dim_k),
+            "w_v_e": jnp.zeros(dim_k),
+            "w_v_i": jnp.zeros(dim_k),
             "t": 1,
             "Beta": config["BONUS_SCALE"],
-            "V_max": V_max,                            # Added
-            "sa_diag_counts": jnp.zeros(dim_kA),       # Added
+            "V_max": V_max,
         }
         initial_sigma_state = {
             "S": jnp.zeros((k, k)),
@@ -313,26 +376,20 @@ def make_train(config):
             sqrt_n = jnp.maximum(1.0, jnp.sqrt(sigma_state["N"]))
             ri_scale = model_state["Beta"] / sqrt_n
 
-            # --- LSTD ---
+            # --- ON-POLICY LSTD ---
             phi_s = get_phi(traj_batch.obs) 
-            phi_sa = expand_to_sa_features(phi_s, n_actions, traj_batch.action)
             
-            # Use unified trace masking
             traces = helpers.calculate_traces(
-                traj_batch, phi_sa, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_episodic, is_absorbing
+                traj_batch, phi_s, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_episodic, is_absorbing
             )
             
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
-            model_state = LinearModelVI(model_state, traj_batch, phi_sa, phi_next_s)
+            model_state = LinearModelVI(model_state, traj_batch, phi_s, phi_next_s, ri_scale)
+            
             # Intrinsic values (scaled):
-
             def get_vi(obs):
                 phi = get_phi(obs) 
-                # This expands phi (k) to phi_sa (kA) using the uniform Pi
-                Pi = jnp.ones((*phi.shape[:-1], n_actions)) * (1.0 / n_actions)
-                phi_policy = expected_next_sa_features(phi, Pi)
-                # Dot product with the weights calculated via VI
-                return phi_policy @ model_state["w_q"] * ri_scale
+                return phi @ model_state["w_v_i"] * ri_scale
 
             v_i = get_vi(traj_batch.obs)
             next_v_i = get_vi(traj_batch.next_obs)
@@ -341,7 +398,6 @@ def make_train(config):
             traj_batch = traj_batch._replace(i_value=v_i, next_i_val=next_v_i, intrinsic_reward=rho * ri_scale)
 
             # --- GAE ---
-            # Using the exact same unified GAE function from standard LSTD
             gaes, targets = helpers.calculate_gae(
                 traj_batch,
                 config["GAMMA"],
