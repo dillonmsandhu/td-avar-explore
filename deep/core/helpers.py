@@ -939,3 +939,51 @@ def initialize_evaluator(config):
         evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], episodic, absorbing= absorbing)
     
     return evaluator 
+
+
+def update_cov(traj_batch, sigma_state, get_features_fn):
+    "Updates traj_batch and sigma_state based on feature visitations."
+
+    def cov_update_masked(
+        sigma_state: Dict,
+        features: jnp.ndarray,  # Shape: (..., k)
+        mask: jnp.ndarray,      # Shape: (...) matching the batch dimensions of features
+    ):
+        """
+        Masks out those that are included twice
+        Takes a mask that corresponds to what included feature vectors are valid for the update.
+        """
+        S = sigma_state['S']
+        S_update = jnp.einsum("...i, ...j -> ...ij", features, features)
+        
+        # 2. Apply Mask
+        # Expand mask to (..., 1, 1) so it broadcasts over the (k, k) matrix dimensions
+        # Zeros out the outer products corresponding to invalid/padding states
+        S_masked = S_update * mask[..., None, None]
+        
+        # 3. Compute Weighted Mean
+        batch_axes = tuple(range(mask.ndim))
+        total_valid = jnp.sum(mask)
+        S_batch_mean = jnp.sum(S_masked, axis=batch_axes) / total_valid
+        
+        # 4. Update & Force Symmetry
+        S_new = S + S_batch_mean
+        S_new = 0.5 * (S_new + S_new.T)
+
+        return {
+            'S': S_new, 
+        }
+
+    # --- 1. Update EMA of Gram Matrix ---
+    phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
+    next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
+    terminal_phi = next_phi * traj_batch.done[..., None]
+    # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
+    all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
+
+    # Update Sigma
+    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+    
+    sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
+    
+    return sigma_state
