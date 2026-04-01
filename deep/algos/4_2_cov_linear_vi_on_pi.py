@@ -26,21 +26,14 @@ def make_train(config):
     # Extract formulation flags directly from config
     is_episodic = config.get("EPISODIC", True)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
-    terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]  
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
 
-    calc_true_values = config.get("CALC_TRUE_VALUES", False)
     k = config.get("RND_FEATURES", 128)
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
-    n_actions = env.action_space(env_params).n
-
-    alpha_fn = lambda t: jnp.maximum(config.get("MIN_COV_LR", 1 / 10), 1 / t)
-    alpha_fn_lstd = helpers.get_alpha_schedule(config["ALPHA_SCHEDULE"], config["MIN_LSTD_LR"])
-    alpha_fn_lstd_b = helpers.get_alpha_schedule(config["ALPHA_SCHEDULE"], config["MIN_LSTD_LR_RI"])
     
     evaluator = helpers.initialize_evaluator(config)
 
@@ -54,7 +47,6 @@ def make_train(config):
         Evaluates the On-Policy state transitions directly.
         """
         batch_axes = tuple(range(transitions.done.ndim))
-        batch_size = transitions.done.size
         t = model_state["t"]
         rho = transitions.intrinsic_reward
         
@@ -92,7 +84,7 @@ def make_train(config):
         absorbing_s_precision = (phi_C_s**2 * absorb_mask[..., None]).sum(axis=batch_axes)
         
         # Safe local immutable update
-        new_s_diag_counts = model_state["s_diag_counts"] + batch_s_precision + absorbing_s_precision
+        new_s_diag_counts = model_state["s_diag_counts"] + batch_s_precision + absorbing_s_precision 
 
         PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
         lambda_k = PRIOR_SAMPLES / (PRIOR_SAMPLES + new_s_diag_counts)
@@ -179,7 +171,7 @@ def make_train(config):
             "s_diag_counts": jnp.zeros(dim_k),
         }
         initial_sigma_state = {
-            "S": jnp.zeros((k, k)),
+            "S": jnp.eye(k),
         }
 
         # TRAIN LOOP
