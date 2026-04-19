@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=run-all
-#SBATCH --time=12:00:00
+#SBATCH --job-name=run-exact
+#SBATCH --time=1:00:00
 #SBATCH --gres=gpu:a5000:1
 #SBATCH --partition=compsci-gpu
 
@@ -18,7 +18,11 @@ exec > >(tee -a "${LOGDIR}/log.out") 2> >(tee -a "${LOGDIR}/log.err")
 # ----------------------------
 # CONFIG & RUN
 # ----------------------------
-SUFFIX=$1
+FILE=$1
+SUFFIX=$2
 
 # python run_exact.py --script algos/3_26_true_val.py --suffix ${SUFFIX} --config '{"BONUS_SCALE": 1.0, "EPISODIC": true, "ABSORBING_TERMINAL_STATE": false}'
-python run_exact.py --script algos/3_30_true_val_beta_decay.py --suffix ${SUFFIX} --config '{"BONUS_SCALE": 50.0, "EPISODIC": true, "ABSORBING_TERMINAL_STATE": true, "MIN_COV_LR": 0.01}'
+python run_exact.py --script algos/${FILE} --suffix ${SUFFIX} --config '{"TOTAL_TIMESTEPS": 1000000, "N_SEEDS": 2, "CALC_TRUE_VALUES": true, "SCHEDULE_BETA": true, "GAMMA_i": 0.9}'
+
+
+#  --config '{"BONUS_SCALE": 0.01, "EPISODIC": true, "ABSORBING_TERMINAL_STATE": true, "TOTAL_TIMESTEPS": }'

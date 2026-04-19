@@ -13,14 +13,12 @@ class EnvState(environment.EnvState):
     goal: jax.Array
     time: int
 
-
 @struct.dataclass
 class EnvParams(environment.EnvParams):
     fail_prob: float = 0.0
     resample_init_pos: bool = False
     resample_goal_pos: bool = False
-    max_steps_in_episode: int = 1e5
-
+    max_steps_in_episode: int = int(1e6) # Ensure this is > chain_length
 
 def generate_four_rooms_map(size: int) -> jax.Array:
     """Build a standard Four Rooms free-space mask (True = free, False = wall)."""
@@ -79,7 +77,7 @@ class FourRooms(environment.Environment[EnvState, EnvParams]):
 
     @property
     def default_params(self) -> EnvParams:
-        return EnvParams(max_steps_in_episode=self.N * self.N)
+        return EnvParams()
 
     def _sample_coord(self, key: jax.Array) -> jax.Array:
         idx = jax.random.randint(key, (), 0, self.coords.shape[0], dtype=jnp.int32)
@@ -152,9 +150,8 @@ class FourRooms(environment.Environment[EnvState, EnvParams]):
         return jnp.stack([self.occupied_map, agent_map, goal_map], axis=-1)
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
-        done_steps = state.time >= params.max_steps_in_episode
         done_goal = jnp.all(state.pos == state.goal)
-        return jnp.logical_or(done_goal, done_steps)
+        return done_goal
 
     @property
     def name(self) -> str:
@@ -312,7 +309,6 @@ class FourRoomsExactValue:
         """Map per-state values to N x N grid (walls = 0)."""
         if values.shape[0] == self.num_total_states:
             values = values[: self.num_states]
-        print('shape of arg to get value grid is ', values.shape)
         grid = jnp.zeros((self.N, self.N), dtype=values.dtype)
         return grid.at[self.coords[:, 0], self.coords[:, 1]].set(values)
 
@@ -329,12 +325,12 @@ class FourRoomsExactValue:
         if len(out) == 3:
             pi_dist, v_net_ext, v_net_int = out
             v_net_tuple = (
-                v_net_ext.squeeze(),
-                v_net_int.squeeze(),
+                self.get_value_grid(v_net_ext.squeeze()),
+                self.get_value_grid(v_net_int.squeeze()),
             )
         else:
             pi_dist, v_net = out
-            v_net_tuple = v_net.squeeze()
+            v_net_tuple = self.get_value_grid(v_net.squeeze())
 
         pi = pi_dist.probs
         
@@ -355,3 +351,60 @@ class FourRoomsExactValue:
 
 
         return self.get_value_grid(v_e, all), self.get_value_grid(v_i, all), v_net_tuple
+
+    def compute_optimal_intrinsic_values(
+        self,
+        network: Any,
+        params: Any,
+        get_int_rew_per_state: Callable[[jax.Array], jax.Array],
+        all=False
+    ) -> Tuple[jax.Array, jax.Array, Any]:
+        # 1. Forward Pass (to maintain identical output signature)
+        out = network.apply(params, self.obs_stack)
+        
+        if len(out) == 3:
+            pi_dist, v_net_ext, v_net_int = out
+            v_net_tuple = (
+                self.get_value_grid(v_net_ext.squeeze()),
+                self.get_value_grid(v_net_int.squeeze()),
+            )
+        else:
+            pi_dist, v_net = out
+            v_net_tuple = self.get_value_grid(v_net.squeeze())
+
+        # 2. Extract and Process Intrinsic Rewards
+        r_int_s = get_int_rew_per_state(self.obs_stack)
+
+        # Mask goal state if purely Episodic (Not Absorbing)
+        if self.episodic and not self.absorbing:
+            r_int_s = r_int_s.at[self.goal_idx].set(0.0)
+
+        # Determine transition dynamics for intrinsic value
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+        R_int_sa = jnp.einsum("sam,m->sa", target_P, r_int_s)
+
+        # 3. Value Iteration for Optimal Intrinsic Value (V*i)
+        # We solve: V*(s) = max_a [ R(s,a) + gamma * sum( P(s'|s,a) * V*(s') ) ]
+        def value_iteration(P, R, gamma, eps=1e-8):
+            # We define the Bellman Optimality Operator as a pure JAX function
+            def bellman_step(v_curr):
+                # Q(s, a) = R(s, a) + gamma * sum_{s'} P(s'|s, a) V(s')
+                q = R + gamma * jnp.einsum("sam, m -> sa", P, v_curr)
+                return jnp.max(q, axis=1)
+
+            # Option A: Fixed-length loop (Highly recommended for JIT stability)
+            # 1000 iterations is a safe upper bound for gamma=0.99 convergence
+            v_final = jax.lax.fori_loop(0, 1000, lambda i, v: bellman_step(v), jnp.zeros(self.num_states))
+            
+            return v_final
+
+        v_i_star = value_iteration(target_P, R_int_sa, self.gamma)
+
+        # 4. Value Iteration for Optimal Extrinsic Value (V*e)
+        v_e_star = value_iteration(self.P, self.R_extrinsic, self.gamma)
+
+        return (
+            self.get_value_grid(v_e_star, all), 
+            self.get_value_grid(v_i_star, all), 
+            v_net_tuple
+        )

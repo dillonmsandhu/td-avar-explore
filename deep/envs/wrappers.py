@@ -33,8 +33,10 @@ class UniversalObservationWrapper(GymnaxWrapper):
 class TerminalInfoWrapper(GymnaxWrapper):
     """Wrapper that injects the true terminal state and observation into info."""
     
-    def __init__(self, env):
+    # FIX 1: Pass env_name into the initialization
+    def __init__(self, env, is_goal_env=""):
         super().__init__(env)
+        self.is_goal_env = is_goal_env
 
     def step(self, key, state, action, params=None):
         if params is None:
@@ -55,6 +57,21 @@ class TerminalInfoWrapper(GymnaxWrapper):
         info["real_next_obs"] = obs_st
         info["real_next_state"] = state_st
 
+        # Absorbing Logic: Is it a timeout?
+        is_timeout = (state_st.time >= params.max_steps_in_episode)
+
+        # 3. Build the boolean flag dynamically
+        if self.is_goal_env:
+            # It is a goal ONLY if it is done AND it is NOT a timeout.
+            terminal = jnp.logical_and(done, jnp.logical_not(is_timeout))
+            is_goal = jnp.logical_and(terminal, reward > 0)
+        else:
+            # For Breakout/Survival games, done is never a goal.
+            # FIX 2: Name the variable correctly to match the export
+            is_goal = jnp.array(False, dtype=jnp.bool_)
+
+        info["is_goal"] = is_goal
+            
         # 5. Apply the standard Gymnax auto-reset logic
         state = jax.tree.map(
             lambda x, y: jax.lax.select(done, x, y), state_re, state_st

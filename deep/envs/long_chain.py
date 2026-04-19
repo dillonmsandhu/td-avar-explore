@@ -19,7 +19,7 @@ class EnvState(environment.EnvState):
 class EnvParams(environment.EnvParams):
     fail_prob: float = 0.0
     resample_init_pos: bool = False
-    max_steps_in_episode: int = 1e6
+    max_steps_in_episode: int = int(1e6) # Ensure this is > chain_length
 
 
 class LongChain(environment.Environment[EnvState, EnvParams]):
@@ -92,9 +92,9 @@ class LongChain(environment.Environment[EnvState, EnvParams]):
         return jax.nn.one_hot(state.pos, num_classes=self.chain_length)
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jax.Array:
-        done_steps = state.time >= params.max_steps_in_episode
         done_goal = (state.pos == self.chain_length - 1)
-        return jnp.logical_or(done_goal, done_steps)
+        return done_goal
+        
 
     @property
     def name(self) -> str:
@@ -115,7 +115,7 @@ class LongChain(environment.Environment[EnvState, EnvParams]):
         return spaces.Dict(
             {
                 "pos": spaces.Discrete(self.chain_length),
-                "time": spaces.Discrete(params.max_steps_in_episode),
+                "time": spaces.Discrete(1e8),
             }
         )
 
@@ -226,6 +226,55 @@ class LongChainExactValue:
             return x[:self.num_playable]    
         else: return x 
 
+    def compute_optimal_intrinsic_values(self, network, params, get_int_rew_per_state, all=False):
+        # 1. Forward Pass (maintain identical output signature)
+        out = network.apply(params, self.obs_stack)
+        
+        if len(out) == 3:
+            pi_dist, v_net_ext, v_net_int = out
+            v_net_tuple = (
+                self.get_value_grid(v_net_ext.squeeze(), all), 
+                self.get_value_grid(v_net_int.squeeze(), all)
+            )
+        else:
+            pi_dist, v_net_all = out
+            v_net_tuple = self.get_value_grid(v_net_all.squeeze(), all)
+
+        # 2. Extract and Process Intrinsic Rewards
+        r_int_s = get_int_rew_per_state(self.obs_stack)
+        
+        if self.episodic and not self.absorbing:
+            r_int_s = r_int_s.at[self.terminal_idx].set(0.0)
+        
+        # Determine transition dynamics
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+        R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+
+        # 3. Value Iteration for Optimal Intrinsic Value (V*i)
+        def value_iteration(P, R, gamma, eps=1e-8):
+            # We define the Bellman Optimality Operator as a pure JAX function
+            def bellman_step(v_curr):
+                # Q(s, a) = R(s, a) + gamma * sum_{s'} P(s'|s, a) V(s')
+                q = R + gamma * jnp.einsum("sam, m -> sa", P, v_curr)
+                return jnp.max(q, axis=1)
+
+            # Option A: Fixed-length loop (Highly recommended for JIT stability)
+            # 1000 iterations is a safe upper bound for gamma=0.99 convergence
+            v_init = jnp.zeros(self.N)
+            v_final = jax.lax.fori_loop(0, 1000, lambda i, v: bellman_step(v), v_init)            
+            return v_final
+
+        v_i_star = value_iteration(target_P, R_int_sa, self.gamma)
+
+        # 4. Value Iteration for Optimal Extrinsic Value (V*e)
+        v_e_star = value_iteration(self.P, self.R_extrinsic, self.gamma)
+
+        return (
+            self.get_value_grid(v_e_star, all), 
+            self.get_value_grid(v_i_star, all), 
+            v_net_tuple
+        )
+
     def plot(self, v_e, v_i, v_pred_tuple):
         """ Visualizes the Value Functions along the 1D Chain.
             v_pred_tuple is assumed to be (v_e, v_i)
@@ -269,3 +318,4 @@ class LongChainExactValue:
             
         plt.tight_layout()
         return fig
+

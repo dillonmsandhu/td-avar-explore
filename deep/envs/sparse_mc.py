@@ -30,7 +30,7 @@ class EnvParams(environment.EnvParams):
     goal_velocity: float = 0.0
     force: float = 0.001
     gravity: float = 0.0025
-    max_steps_in_episode: int = 1e12
+    max_steps_in_episode: int = 200
 
 
 class MountainCar(environment.Environment[EnvState, EnvParams]):
@@ -87,13 +87,9 @@ class MountainCar(environment.Environment[EnvState, EnvParams]):
 
     def is_terminal(self, state: EnvState, params: EnvParams) -> jnp.ndarray:
         """Check whether state is terminal."""
-        done1 = (state.position >= params.goal_position) * (
+        done = (state.position >= params.goal_position) * (
             state.velocity >= params.goal_velocity
         )
-
-        # Check number of steps in episode termination condition
-        done_steps = state.time >= params.max_steps_in_episode
-        done = jnp.logical_or(done1, done_steps)
         return done
 
     @property

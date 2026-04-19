@@ -173,3 +173,61 @@ class DeepSeaExactValue:
             v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
             return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid
+    
+    def compute_optimal_intrinsic_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
+        ) -> Tuple[jax.Array, jax.Array, Any]:
+            
+            # 1. Forward Pass
+            out = network.apply(params, self.obs_stack)
+            def safe_squeeze(v): return v[..., 0] if v.ndim > 1 else v
+
+            if len(out) == 2:
+                pi_dist, v_net = out
+                v_net_grid = self.get_value_grid(safe_squeeze(v_net))
+            elif len(out) == 3:
+                pi_dist, v_net_ext, v_net_int = out
+                v_net_grid = (
+                    self.get_value_grid(safe_squeeze(v_net_ext)), 
+                    self.get_value_grid(safe_squeeze(v_net_int))
+                )
+
+            # 2. Extract Rewards
+            r_int_s = get_int_rew(self.obs_stack)
+            if self.episodic and not self.absorbing:
+                terminal_start_idx = (self.N - 1) * self.N
+                mask = jnp.ones_like(r_int_s).at[terminal_start_idx:].set(0.0)
+                r_int_s = r_int_s * mask
+
+            target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+            R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+
+            # 3. Solver
+            def solve_v_star(R_sa):
+                R_grid = R_sa.reshape((self.N, self.N, self.num_actions))
+                v_bottom = jnp.where(self.absorbing, R_grid[self.N-1, :, 0] / (1 - self.gamma), jnp.zeros(self.N))
+
+                def backward_row_step(v_next_row, r_row):
+                    v_left = jnp.roll(v_next_row, shift=1).at[0].set(v_next_row[0])
+                    v_right = jnp.roll(v_next_row, shift=-1).at[-1].set(v_next_row[-1])
+                    q_row = r_row + self.gamma * jnp.stack([v_left, v_right], axis=-1)
+                    v_curr_row = jnp.max(q_row, axis=-1)
+                    return v_curr_row, v_curr_row
+
+                rows_to_process = jnp.flip(R_grid[:-1], axis=0)
+                _, v_rest = jax.lax.scan(backward_row_step, v_bottom, rows_to_process)
+                return jnp.flip(jnp.concatenate([v_bottom[None, :], v_rest], axis=0), axis=0)
+
+            # 4. Extrinsic Logic
+            if self.dense:
+                R_ext_modified = (self.R_extrinsic - 1.0)
+                terminal_start_idx = (self.N - 1) * self.N
+                # Create mask to zero out row N-1
+                mask = jnp.ones_like(R_ext_modified).at[terminal_start_idx:, :].set(0.0)
+                Re = R_ext_modified * mask
+            else:
+                Re = self.R_extrinsic
+
+            v_i_star_grid = solve_v_star(R_int_sa)
+            v_e_star_grid = solve_v_star(Re)
+
+            return v_e_star_grid, v_i_star_grid, v_net_grid

@@ -20,5 +20,4 @@ exec > >(tee -a "${LOGDIR}/log.out") 2> >(tee -a "${LOGDIR}/log.err")
 # ----------------------------
 FILE=$1
 
-python run_discrete.py --script algos/${FILE} --suffix ${2} --config '{"BONUS_SCALE": 1.0, "LSTD_PRIOR_SAMPLES": 10.0, 
-"EPISODIC": true, "A_REGULARIZATION_PER_STEP": 1e-3, "ABSORBING_TERMINAL_STATE": true}'
+python run_discrete.py --script algos/${FILE} --suffix ${2} --config '{"TOTAL_TIMESTEPS": 1000000}'

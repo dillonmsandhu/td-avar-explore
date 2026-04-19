@@ -165,7 +165,7 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
         
-        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) 
+        V_max = (config['BONUS_SCALE']) / (1 - config["GAMMA_i"]) # maximum intrinsic values
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
 

@@ -7,6 +7,7 @@ import core.helpers as helpers
 import core.networks as networks
 
 SAVE_DIR = "4_2_cov_linear_vi_on_pi" 
+LEAK_FACTOR = (1 - 1e-3)
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -74,9 +75,9 @@ def make_train(config):
         w_r_num_abs = (phi_C_s * (rho[..., None] * absorb_mask[..., None])).sum(axis=batch_axes)
 
         # Normalize and Update EMAs
-        Sigma_i = model_state['Sigma'] + Sigma_batch + Sigma_abs
-        M_num_i = model_state['M_num'] + M_num_batch + M_num_abs
-        w_r_num_i = model_state['w_r_num'] + w_r_num_batch + w_r_num_abs
+        Sigma_i = LEAK_FACTOR * model_state['Sigma'] + Sigma_batch + Sigma_abs
+        M_num_i = LEAK_FACTOR * model_state['M_num'] + M_num_batch + M_num_abs
+        w_r_num_i = LEAK_FACTOR * model_state['w_r_num'] + w_r_num_batch + w_r_num_abs
         # ------------------------------------------------------------
         # 3. Track Diagonal Prior Counts
         # ------------------------------------------------------------
@@ -99,21 +100,21 @@ def make_train(config):
         # Add prior to the precision matrix
         Sigma_view = Sigma_i + Lambda_mat + reg
         Sigma_inv = jnp.linalg.inv(Sigma_view)
-        
         # Add prior to the reward targets
         prior_b = lambda_k * model_state["V_max"]
         w_r_view = w_r_num_i + prior_b
         
-        M = Sigma_inv @ M_num_i      # Transition Model M: R^{k x k}
-        w_r = Sigma_inv @ w_r_view   # Reward Weights w_r: R^{k}
-
+        M = jnp.linalg.solve(Sigma_view, M_num_i) # Transition Model M: R^{k x k}
+        w_r = jnp.linalg.solve(Sigma_view, w_r_view) # Reward Weights w_r: R^{k}
+        
         # 5. Weight-Space Value Iteration
         def vi_step(w_v_in, _):
             # Apply Bellman Operator directly on state weights
             w_v_out = w_r + γ * (M @ w_v_in)
+            w_v_out = jnp.clip(w_v_out, -1/(1-config['GAMMA_i']), 1/(1-config['GAMMA_i']))
             return w_v_out, None
 
-        num_vi_rounds = config.get("VI_ROUNDS", 100)
+        num_vi_rounds = config.get("VI_ROUNDS", 200)
         # w_v_final, _ = jax.lax.scan(vi_step, model_state["w_v"], None, length=num_vi_rounds)
         # COLD START:
         w_v_final, _ = jax.lax.scan(vi_step, w_r, None, length=num_vi_rounds)
@@ -154,7 +155,7 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
         
-        V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) 
+        V_max = (config['BONUS_SCALE']) / (1 - config["GAMMA_i"]) # maximum intrinsic values
         if config["NORMALIZE_FEATURES"]:
             V_max /= jnp.sqrt(k)
 
@@ -215,7 +216,7 @@ def make_train(config):
             )
             
             # --- Intrinsic Reward (due to Precision) ---
-            Sigma_inv = jnp.linalg.solve(sigma_state["S"] ,jnp.eye(k),)
+            Sigma_inv = jnp.linalg.solve(sigma_state["S"] + 1e-8 * jnp.eye(k) , jnp.eye(k),)
 
             ρ_from_phi = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
             phi_next_s = get_phi(traj_batch.next_obs)

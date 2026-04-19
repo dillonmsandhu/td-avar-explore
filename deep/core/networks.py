@@ -182,7 +182,11 @@ def make_torso(network_type: str, **kwargs):
     if network_type == "cnn_1d":
         return CNNTorso1D(**kwargs)
     if network_type == "cnn":
-        return CNNTorso(**kwargs)
+        return CNNTorso(
+            **kwargs,
+            base_channels=16, 
+            max_channels=64
+        )
     elif network_type == "mlp":
         return MLPTorso(**kwargs)
     else:
@@ -306,9 +310,11 @@ class ActorCritic3Head(nn.Module):
         self.pi_head = PolicyHead(action_dim=self.action_dim, is_continuous=self.is_continuous)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
         self.v_int_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
+        
     # ---------------- Policy ----------------
     def policy(self, x):
         return self.pi_head(self.actor_torso(x))
+        
     # ---------------- Value -----------------
 
     def get_value_features(self, x):
@@ -325,6 +331,16 @@ class ActorCritic3Head(nn.Module):
 
         return phi_ext, phi_int
 
+    def get_i_value_features(self, x):
+        """Returns ONLY the intrinsic value features for LSTD evaluation."""
+        _, phi_int = self.get_value_features(x)
+        return phi_int
+
+    def get_e_value_features(self, x):
+        """Returns ONLY the extrinsic value features (for completeness)."""
+        phi_ext, _ = self.get_value_features(x)
+        return phi_ext
+
     def value(self, x):
         phi_ext, phi_int = self.get_value_features(x)
         v_ext = self.v_ext_head(phi_ext).squeeze(-1)
@@ -337,3 +353,63 @@ class ActorCritic3Head(nn.Module):
         pi = self.policy(x)
         v_ext, v_int = self.value(x)
         return pi, v_ext, v_int
+
+class FeatureNet(nn.Module):
+    """
+    Dedicated network for Expressive LSTD and Intrinsic Value computation.
+    Returns: (v_int, phi_lstd, current_rnd_pred, next_rnd_pred)
+    """
+    network_type: str
+    k_rnd: int = 128      # Dimension of the fixed RND target
+    k_lstd: int = 64      # Dimension of the final features passed to LSTD solver
+    lstd_bias: bool = True
+
+    def setup(self):
+        # 1. Dedicated Intrinsic Torso
+        self.torso = make_torso(self.network_type, out_dim=128) 
+
+        # 2. LSTD Feature Component
+        # Determine the number of learned features so the final concatenated output equals k_lstd
+        learned_dim = self.k_lstd - 1 if self.lstd_bias else self.k_lstd
+        self.lstd_feature_layer = nn.Dense(learned_dim, kernel_init=orthogonal(jnp.sqrt(2)))
+        
+        # Disable internal bias to force a pure dot product (mirroring LSTD)
+        self.v_int_head = nn.Dense(1, use_bias=False, kernel_init=orthogonal(1.0))
+
+        # 3. Rank-Preserving Regularization Heads
+        self.current_rnd_head = nn.Dense(self.k_rnd, kernel_init=orthogonal(1.0))
+        self.next_rnd_head = nn.Dense(self.k_rnd, kernel_init=orthogonal(1.0))
+
+    def get_lstd_features(self, x):
+        """
+        Fast-path for LSTD matrix construction. 
+        """
+        z_int = nn.relu(self.torso(x))
+        phi_lstd = self.lstd_feature_layer(z_int) # Pure linear projection
+        
+        if self.lstd_bias:
+            bias = jnp.ones(phi_lstd.shape[:-1] + (1,))
+            phi_lstd = jnp.concatenate([phi_lstd, bias], axis=-1)
+            
+        return phi_lstd
+
+    def __call__(self, x):
+        # --- Base Representation ---
+        z_int = nn.relu(self.torso(x))
+        
+        # --- Value Features ---
+        phi_lstd = self.lstd_feature_layer(z_int)
+        
+        if self.lstd_bias:
+            # Explicit bias appendage to match LSTD matrix dimensions exactly
+            bias = jnp.ones(phi_lstd.shape[:-1] + (1,))
+            phi_lstd = jnp.concatenate([phi_lstd, bias], axis=-1)
+        
+        # Pure dot product (No ReLU, no internal layer bias)
+        v_int = self.v_int_head(phi_lstd).squeeze(-1)
+
+        # --- Regularization Predictions ---
+        current_rnd_pred = self.current_rnd_head(z_int)
+        next_rnd_pred = self.next_rnd_head(z_int)
+
+        return v_int, phi_lstd, current_rnd_pred, next_rnd_pred

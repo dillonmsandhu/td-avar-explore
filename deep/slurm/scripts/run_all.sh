@@ -20,5 +20,7 @@ exec > >(tee -a "${LOGDIR}/log.out") 2> >(tee -a "${LOGDIR}/log.err")
 # ----------------------------
 FILE=$1
 
-python run_all.py --script algos/${FILE} --suffix ${2} --config '{"LSTD_PRIOR_SAMPLES": 50.0, 
-"EPISODIC": true, "A_REGULARIZATION_PER_STEP": 1e-3, "ABSORBING_TERMINAL_STATE": true}'
+python run_all.py --script algos/${FILE} --suffix ${2} --config '{"GAE_LAMBDA_i": 0.6, "NUM_STEPS": 256, "NUM_ENVS": 32}'
+# VAL_LOSS_WEIGHT
+# RND_LOSS_WEIGHT
+# INV_LOSS_WEIGHT

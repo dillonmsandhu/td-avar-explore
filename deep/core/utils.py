@@ -6,13 +6,14 @@ import cloudpickle
 import matplotlib.pyplot as plt
 from core.networks import *
 
+# MAIN function in most algos.
 def run_experiment_main(make_train, SAVE_DIR):
     import argparse
     import datetime
     import traceback
     import core.helpers as helpers
     import core.configs as configs
-    # import warnings; warnings.simplefilter('ignore')
+    import jax
     
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser()
@@ -20,36 +21,58 @@ def run_experiment_main(make_train, SAVE_DIR):
     parser.add_argument('--run_suffix', type=str, default=run_timestamp)
     parser.add_argument('--n-seeds', type=int, default=0)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--base-config', type=str, default='shared', 
-                        choices=['shared','mc', 'ds', 'min', 'visual', 'chain', 'four_rooms'])
-    parser.add_argument('--env_ids', nargs='+', default=[])
+    parser.add_argument('--registry', type=str, default='FINAL_TESTING', 
+                        choices=['CONFIG_REGISTRY', 'FINAL_TESTING', 'FINAL_EXACT'])
+    parser.add_argument('--base-config', type=str, default='shared')
+    parser.add_argument('--env-ids', nargs='+', default=[])
 
     args = parser.parse_args()
-    config = helpers.load_config(args)
 
-    # Priority: CLI env_ids > Registry Defaults > Config ENV_NAME
+
+    target_registry = getattr(configs, args.registry, configs.CONFIG_REGISTRY)
+
+    # 2. Extract Registry Item (e.g., "maze_exact" or "ds_40")
+    registry_item = target_registry.get(args.base_config)
+    
+    if registry_item:
+        # Success: Use the specific merged config (e.g., CNN-based visual config)
+        config = registry_item["config_dict"].copy()
+        env_list = registry_item.get("envs", [])
+    else:
+        # Fallback: If not in the specific registry, try generic helpers
+        print(f"⚠️  Config '{args.base_config}' not found in registry {args.registry}. Falling back to shared.")
+        config = helpers.load_config(args)
+        env_list = [config.get('ENV_NAME')]
+
+    # 3. Environment Priority (CLI takes precedence)
     if args.env_ids:
         env_list = args.env_ids
-    else:
-        registry_item = configs.CONFIG_REGISTRY.get(args.base_config, {})
-        env_list = registry_item.get("envs", [config.get('ENV_NAME')])
 
     for i, env_name in enumerate(env_list):
-        print(f"\n{'='*50}")
-        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
-        print(f"Network: {config.get('NETWORK_TYPE')}")
-        print(f"{'='*50}")
-        
+        if env_name is None: continue
+            
+        # Create a clean copy for this specific environment run
         run_config = config.copy()
         run_config['ENV_NAME'] = env_name
         
-        # Override seeds if passed via CLI
+        # Apply command-line JSON overrides if they exist
+        if args.config:
+            from core.utils import parse_config_override
+            run_config.update(parse_config_override(args.config))
+            
         if args.n_seeds > 0:
             run_config['N_SEEDS'] = args.n_seeds
-            
-        rng = jax.random.PRNGKey(run_config['SEED'])
+
+        print(f"\n{'='*50}")
+        print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name}")
+        print(f"Registry: {args.registry} | Config: {args.base_config}")
+        print(f"Network: {run_config.get('NETWORK_TYPE')}")
+        print(f"{'='*50}")
+        
+        rng = jax.random.PRNGKey(run_config.get('SEED', 42))
         
         try:
+            # Note: make_train and evaluate should be defined in your scope
             evaluate(run_config, make_train, SAVE_DIR, args, rng)
         except Exception as e:
             print(f"!!! CRITICAL ERROR running {env_name} !!!")
@@ -221,18 +244,24 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
     print(f"[{run_config['ENV_NAME']}] Mean return: {jnp.mean(metrics['returned_episode_returns']):.4f}")
     print(f"[{run_config['ENV_NAME']}] Max return:  {jnp.max(metrics['returned_episode_returns']):.4f}")
 
-    # Directory structure: results/cov_lstd/timestamp/EnvName/
-    run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
-    env_dir = os.path.join(run_dir, run_config['ENV_NAME'])
+    # Directory structure: results/SAVE_DIR/timestamp/EnvName-Size/
+    base_env_name = run_config['ENV_NAME']
+    env_size = run_config.get("ENV_SIZE")
     
-    os.makedirs(run_dir, exist_ok=True)
+    # Create the full name (e.g., DeepSea-bsuite-45)
+    full_env_name = f"{base_env_name}-{env_size}" if env_size else base_env_name
+    
+    run_dir = os.path.join("results", f"{SAVE_DIR}/{args.run_suffix}")
+    env_dir = os.path.join(run_dir, full_env_name)
+    
     os.makedirs(env_dir, exist_ok=True)
-    print(f"Saving {run_config['ENV_NAME']} results to {env_dir}")
+    print(f"Saving {full_env_name} results to {env_dir}")
 
+    # Ensure save_results uses the full name for the filename
     if args.save_checkpoint:
-        save_results(out, run_config, run_config['ENV_NAME'], env_dir)
+        save_results(out, run_config, full_env_name, env_dir)
     else:
-        save_results(metrics, run_config, run_config['ENV_NAME'], env_dir)
+        save_results(metrics, run_config, full_env_name, env_dir)
     
     # --- Helper for Metrics extraction ---
     def _mean_over_seeds(data):
@@ -289,7 +318,19 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         'v_i_pred_opt': 'v_i_pred_opt',
         'v_e_pred': 'v_e_pred',
         "mean_rew": "mean_rew",
-        "raw_intrinsic_rew_mean": "raw_intrinsic_rew_mean"
+        "raw_intrinsic_rew_mean": "raw_intrinsic_rew_mean",
+        # Bellman residual diagnostics
+        "bellman_residual_non_done": "bellman_residual_non_done",
+        "bellman_residual_non_done_std": "bellman_residual_non_done_std",
+        # Goal/done diagnostics
+        "true_v_i_at_goal": "true_v_i_at_goal",
+        "true_next_v_i_on_done": "true_next_v_i_on_done",
+        "rho_on_done": "rho_on_done",
+        "true_v_i_on_done": "true_v_i_on_done",
+        "v_i_at_done_mean": "v_i_at_done_mean",
+        "cond_number_A": "cond_number",
+        "condition_number": "condition_number",
+        "num_goals": "num_goals"
     }
 
     for m_key, save_name in standard_plots.items():

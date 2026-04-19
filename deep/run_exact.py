@@ -43,7 +43,7 @@ def run_experiment():
             config_name,
             "--run_suffix",
             batch_id,
-            "--env_ids",
+            "--env-ids",
         ] + envs
 
         if args.config:

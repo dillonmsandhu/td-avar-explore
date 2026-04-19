@@ -4,7 +4,7 @@ import core.helpers as helpers
 import core.networks as networks
 
 SAVE_DIR = "4_2_cov_lstd"
-LEAK_FACTOR = (1-1e-2)
+LEAK_FACTOR = (1-1e-3)
 class Transition(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
@@ -19,6 +19,13 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
+
+def get_scale_free_bonus(S_inv, features):
+    """bonus = x^T Σ^{-1} X, where Σ^{-1} is the empriical second moment inverse."""
+    bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
+    return jnp.sqrt(bonus_sq)
+
+    
 def make_train(config):
     # terminate bootstrap in LSTD?
     is_episodic = config.get("EPISODIC", True)
@@ -36,10 +43,6 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
     evaluator = helpers.initialize_evaluator(config)
 
-    def get_scale_free_bonus(S_inv, features):
-        """bonus = x^T Σ^{-1} X, where Σ^{-1} is the empriical second moment inverse."""
-        bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
-        return jnp.sqrt(bonus_sq)
 
     def lstd_batch_update(lstd_state: Dict, transitions, features, next_features, traces):
             """
@@ -77,8 +80,8 @@ def make_train(config):
             # ------------------------------------------------------------
             # 3. Update EMA, then add optimism and solve
             # ------------------------------------------------------------
-            A_i = lstd_state["A"] * LEAK_FACTOR + A_batch + A_absorb
-            b_i = lstd_state["b"] * LEAK_FACTOR + b_batch + b_absorb
+            A_i = lstd_state["A"] + A_batch + A_absorb
+            b_i = lstd_state["b"] + b_batch + b_absorb
 
             # Optimistic Initialization (Diagonal Prior) 
             PRIOR_SAMPLES = config.get("LSTD_PRIOR_SAMPLES", 1.0)
@@ -114,7 +117,7 @@ def make_train(config):
                 "phi_diag_counts": new_phi_diag_counts, 
             }
     
-    V_max = (jnp.sqrt(1.0 / config["GRAM_REG"])) / (1 - config["GAMMA_i"]) # maximum intrinsic values
+    V_max = (config['BONUS_SCALE']) / (1 - config["GAMMA_i"]) # maximum intrinsic values
     if config["NORMALIZE_FEATURES"]:
         V_max /= jnp.sqrt(k)
 
@@ -226,7 +229,7 @@ def make_train(config):
 
             # --- Intrinsic Rewards ---
             # invert the covariance matrix
-            Sigma_inv = jnp.linalg.solve(sigma_state["S"], jnp.eye(k))
+            Sigma_inv = jnp.linalg.solve(sigma_state["S"] + 1e-8 * jnp.eye(k), jnp.eye(k))
             int_rew_from_features = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
             rho = int_rew_from_features(batch_get_features(traj_batch.next_obs)) # unscaled
             traj_batch = traj_batch._replace(intrinsic_reward=rho)

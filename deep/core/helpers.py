@@ -7,6 +7,8 @@ from gymnax.wrappers.purerl import FlattenObservationWrapper
 from envs.log_wrapper import LogWrapper
 from envs.long_chain import LongChain
 from envs.fourrooms_custom import FourRooms
+from envs.fourrooms_pixel import FourRoomsPixelExactValue, FourRoomsPixels
+from envs.maze import SparseMaze, SparseMazeExactValue
 from envs.wrappers import NormalizeObservationWrapper, NormalizeRewardWrapper, AddChannelWrapper, ClipAction, NormalizeRewardEnvState, NormalizeObsEnvState, TerminalInfoWrapper, SubtractOneRewardWrapper
 from gymnax.environments import spaces
 
@@ -30,10 +32,15 @@ def load_config(args):
     return config
 
 def make_env(config):
-    
-    if config['ENV_NAME'] in  ("FourRoomsCustom-v0"):
+    if config['ENV_NAME'] == 'Maze':
+        env = SparseMaze(N= config.get('ENV_SIZE',100))
+        env_params = env.default_params
+    elif config['ENV_NAME'] == 'FourRoomsPixels':
+        env = FourRoomsPixels(N=config.get('ENV_SIZE',21), pixel_size = config.get('FOURROOMS_PIXEL_SIZE', 84))
+        env_params = env.default_params
+    elif config['ENV_NAME'] in  ("FourRoomsCustom-v0"):
         env = FourRooms(
-            N=int(config.get("FOURROOMS_SIZE", 21)),
+            N=int(config.get("ENV_SIZE", 21)),
             use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
         )
         env_params = env.default_params.replace(
@@ -44,7 +51,7 @@ def make_env(config):
         )
     elif config["ENV_NAME"] in {"FourRooms-misc"}:
         env = FourRooms(
-            N=int(config.get("FOURROOMS_SIZE", 13)),
+            N=int(config.get("ENV_SIZE", 13)),
             use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
         )
         env_params = env.default_params.replace(
@@ -55,7 +62,7 @@ def make_env(config):
         )
     
     elif config['ENV_NAME'] == "Chain":
-        env = LongChain(config.get('CHAIN_LENGTH', 100))
+        env = LongChain(config.get('ENV_SIZE', 100))
         env_params = env.default_params.replace(
             fail_prob=float(config.get("CHAIN_FAIL_PROB", env.default_params.fail_prob)),
             resample_init_pos=bool(config.get("CHAIN_RESAMPLE_INIT_POS", env.default_params.resample_init_pos)),
@@ -67,9 +74,9 @@ def make_env(config):
         env_params = env.default_params
     
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
-        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("DEEPSEA_SIZE", 10))
+        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("ENV_SIZE", 10))
     elif config['ENV_NAME'] == 'DeepSea-Dense':
-        env, env_params = gymnax.make('DeepSea-bsuite', size = config.get("DEEPSEA_SIZE", 10))
+        env, env_params = gymnax.make('DeepSea-bsuite', size = config.get("ENV_SIZE", 10))
         env = SubtractOneRewardWrapper(env)
     
     else:
@@ -78,8 +85,14 @@ def make_env(config):
         print('Network:', config['NETWORK_TYPE'])
         print('Default Obs Shape:', env.observation_space(env_params).shape)
     
+    # "Goal" environments based on best of knowledge (in Atari we get a goal flag.)
+    goal_envs = [
+        'DeepSea', 'Chain', 'Maze', 'FourRooms', 'MountainCar', 
+        'Freeway-MinAtar', 'Catch', 'DiscountingChain', 'MetaMaze', 'Pong'
+    ]
+    is_goal_env = any(env in config['ENV_NAME'] for env in goal_envs)
     
-    env = TerminalInfoWrapper(env) # adds the terminal state to info.
+    env = TerminalInfoWrapper(env, is_goal_env) # adds the terminal state to info. also adds goal information.
     env = LogWrapper(env)
     
     if isinstance(env.action_space(env_params), spaces.Box):
@@ -100,158 +113,9 @@ def make_env(config):
     print('Action Shape:', env.action_space(env_params).shape)
     return env, env_params
 
-def cross_cov(traces, current_features, next_features, done, γ):
-    "One a sample of the LSTD A matrix - episodic"
-    td_features = current_features - γ  * next_features * (1-done)
-    A_sample = jnp.outer(traces, td_features)
-    return A_sample
-
-def cross_cov_continuing(traces, current_features, next_features, done, γ):
-    "One sample of the LSTD A matrix - continuing"
-    td_features = current_features - γ  * next_features
-    A_sample = jnp.outer(traces, td_features)
-    return A_sample
-
-def cosine_similarity(a, b):
-    dot = jnp.dot(a,b)
-    mag = jnp.linalg.norm(a) * jnp.linalg.norm(b)
-    return dot/mag
-
-def sigma_update(   sigma_state: Dict,
-                    transitions, # Explore_Transition
-                    features: jnp.ndarray,
-                    α: float,
-                    
-    ):
-    S, t = sigma_state['S'], sigma_state['t']
-    batch_axes = tuple(range(transitions.done.ndim))
-    N = transitions.done.size + sigma_state['N']  # total number of samples seen so far
-    S_update = jax.vmap(jax.vmap(lambda x: jnp.outer(x,x)))(features) # (L, B, k, k)
-    S_b = S_update.mean(axis=batch_axes) # Batch average
-    S = (1-α) * S + α * S_b # EMA
-    S = 0.5 * (S+ S.T) # symmetrize
-    return {'S': S, 'N': N, 't': t+1} # new sigma_state
 
 def EMA(coeff, x_old, x_new):
     return (1 - coeff) * x_old + coeff * x_new
-
-def sigma_update_masked(
-    sigma_state: Dict,
-    features: jnp.ndarray,  # Shape: (..., k)
-    mask: jnp.ndarray,      # Shape: (...) matching the batch dimensions of features
-    α: float,
-):
-    """
-    Masks out those that are included twice
-    Takes a mask that corresponds to what included feature vectors are valid for the update.
-    """
-    S = sigma_state['S']
-    S_update = jnp.einsum("...i, ...j -> ...ij", features, features)
-    
-    # 2. Apply Mask
-    # Expand mask to (..., 1, 1) so it broadcasts over the (k, k) matrix dimensions
-    # Zeros out the outer products corresponding to invalid/padding states
-    S_masked = S_update * mask[..., None, None]
-    
-    # 3. Compute Weighted Mean
-    batch_axes = tuple(range(mask.ndim))
-    total_valid = jnp.sum(mask)
-    S_batch_mean = jnp.sum(S_masked, axis=batch_axes) / total_valid
-    
-    # 4. Update & Force Symmetry
-    S_new = EMA(α, S, S_batch_mean)
-    S_new = 0.5 * (S_new + S_new.T)
-    
-    # 5. Update N
-    N_new = sigma_state['N'] + jnp.sum(mask)
-    
-    return {
-        'S': S_new, 
-        'N': N_new, 
-        't': sigma_state['t'] + 1
-    }
-
-def _get_all_traces(traj_batch, features, γ, λ):
-    """Get all traces for a batch of trajectories.
-    Returns: L x B x k
-    """
-    def get_lambda_traces(phis_s, dones, γ, λ,):
-        # We need to manage the carry (prev trace) separate from current trace output
-        def _step_trace(trace_prev, inputs):
-            phi, done = inputs
-            trace_current = trace_prev * γ * λ + phi
-            trace_next = trace_current * (1.0 - done)
-            # Return: (carry, out)
-            return trace_next, trace_current
-        init_traces = jnp.zeros_like(phis_s[0]) 
-        _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, dones))
-        return traces 
-    # Fix: Ensure dones are passed correctly to the inner function
-    traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(
-        features, traj_batch.done, γ, λ
-    )
-    return traces.transpose(1,0,2)
-
-# def _get_all_traces(traj_batch, features, γ, λ):
-#     """Get all traces for a batch of trajectories.
-#     Returns: L x B x k, where B is batch size, L is trajectory length, and k is number of features.
-#     """
-#     def get_lambda_traces(phis_s, traj_batch, γ, λ):
-#         def _step_trace(trace, inputs):
-#             phi, done = inputs
-#             trace = trace * (1-done) * γ * λ + phi
-#             return trace, trace
-#         # end step_trace
-#         init_traces = jnp.zeros_like(phis_s[-1])  # (k,)
-#         _, traces = jax.lax.scan(_step_trace, init_traces, (phis_s, traj_batch.done))
-#         return traces # L x k
-#     # end get_lambda_traces
-#     traces = jax.vmap(get_lambda_traces, in_axes=(1, 1, None, None))(features, traj_batch, γ, λ)
-#     return traces.transpose(1,0,2) # L x B x k (vmap puts batch axis (B) first)
-
-def _get_all_traces_continuing(traj_batch, features, γ, λ):
-    """Get all traces for a batch of trajectories.
-    Returns: L x B x k
-    """
-    def get_lambda_traces(phis_s, γ, λ,):
-        # We need to manage the carry (prev trace) separate from current trace output
-        def _step_trace(trace_prev, phi):
-            trace = trace_prev * γ * λ + phi
-            return trace, trace
-        
-        init_traces = jnp.zeros_like(phis_s[0]) 
-        _, traces = jax.lax.scan(_step_trace, init_traces, phis_s)
-        return traces 
-    # Fix: Ensure dones are passed correctly to the inner function
-    traces = jax.vmap(get_lambda_traces, in_axes=(1, None, None))(
-        features, γ, λ
-    )
-    return traces.transpose(1,0,2)
-
-def _calculate_gae(traj_batch, last_val, γ, λ):
-    def _get_advantages(gae_and_next_value, transition):
-        gae, next_value = gae_and_next_value
-        done, value, reward = (
-            transition.done,
-            transition.value,
-            transition.reward,
-        )
-        delta = reward + γ * next_value * (1 - done) - value
-        gae = (
-            delta
-            + γ * λ * (1 - done) * gae
-        )
-        return (gae, value), gae
-
-    _, advantages = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), last_val),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    return advantages, advantages + traj_batch.value
-
 
 class Explore_Transition(NamedTuple):
     done: jnp.ndarray
@@ -324,164 +188,6 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     )
     return total_loss, (value_loss, loss_actor, entropy)
 
-def calculate_gae_intrinsic_and_extrinsic(traj_batch, last_val, last_i_val, γ, λ, γi=None, λi=None):
-    """Continuing Intrinsic TD Target"""
-    if γi==None:
-        γi = γ
-    
-    if λi==None:
-        λi = λ
-
-    def _get_advantages(gae_and_next_value, transition):
-        gae, i_gae, next_value, i_next_value = gae_and_next_value
-        done, value, reward, i, i_value = (
-            transition.done,
-            transition.value,
-            transition.reward,
-            transition.intrinsic_reward,
-            transition.i_value,
-        )
-        
-        delta = reward + γ * next_value * (1 - done) - value
-        gae = delta + (γ * λ * (1 - done) * gae)
-        
-        # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γi * i_next_value - i_value 
-        i_gae = i_delta + (γi * λi * i_gae)
-        
-        return (gae, i_gae, value, i_value), (gae, i_gae)
-
-    _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
-
-def calculate_gae_intrinsic_and_extrinsic_episodic(traj_batch, last_val, last_i_val, γ, λ, λi=None, γi=None):
-    """Episodic Intrinsic TD Target"""
-    if λi is None:
-        λi = λ 
-    if γi is None:
-        γi = γ
-
-    def _get_advantages(gae_and_next_value, transition):
-        gae, i_gae, next_value, i_next_value = gae_and_next_value
-        done, value, reward, i, i_value = (
-            transition.done,
-            transition.value,
-            transition.reward,
-            transition.intrinsic_reward,
-            transition.i_value,
-        )
-
-        not_done = (1-done)
-        
-        delta = reward + γ * next_value * not_done - value
-        gae = delta + (γ * λ * not_done * gae)
-        
-        # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γi * not_done * i_next_value - i_value 
-        i_gae = i_delta + (γi * λi * not_done * i_gae )
-        
-        return (gae, i_gae, value, i_value), (gae, i_gae)
-
-    _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
-
-def calculate_i_and_e_gae_two_critic(traj_batch, last_val, last_i_val_fast, γ, λ, γi = None, λi=None):
-    """
-    Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
-    A = Q_fast - V_slow
-    Value Target = Q_fast
-    """
-    if λi is None:
-        λi = λ 
-
-    if γi is None:
-        γi = γ
-
-    def _get_advantages(gae_and_next_value, transition):
-        gae, i_gae, next_value, i_next_value = gae_and_next_value
-        done, value, reward, i, i_value_fast, i_value_slow = (
-            transition.done,
-            transition.value,
-            transition.reward,
-            transition.intrinsic_reward,
-            transition.i_value_fast,
-            transition.i_value_slow,
-        )
-        
-        delta = reward + γ * next_value * (1 - done) - value
-        gae = delta + (γ * λ * (1 - done) * gae)
-        
-        # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γi * i_next_value - i_value_slow 
-        i_gae = i_delta + (γi * λi * i_gae)
-        
-        return (gae, i_gae, value, i_value_fast), (gae, i_gae)
-
-    _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val_fast),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    
-    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value_slow)
-
-def calculate_i_and_e_gae_two_critic_episodic(traj_batch, last_val, last_i_val_fast, γ, λ, γi=None, λi=None):
-    """
-    Continuing Intrinsic TD Target using two intrinsic critics: fast (for TD(λ)) and slow (for baseline)
-    A = Q_fast - V_slow
-    Value Target = Q_fast
-    """
-    if λi is None:
-        λi = λ 
-
-    if γi is None:
-        γi = γ
-
-    def _get_advantages(gae_and_next_value, transition):
-        gae, i_gae, next_value, i_next_value = gae_and_next_value
-        done, value, reward, i, i_value_fast, i_value_slow = (
-            transition.done,
-            transition.value,
-            transition.reward,
-            transition.intrinsic_reward,
-            transition.i_value_fast,
-            transition.i_value_slow,
-        )
-
-        not_done = (1-done)
-        
-        delta = reward + γ * next_value * not_done - value
-        gae = delta + (γ * λ * not_done * gae)
-        
-        # Intrinsic is non-episodic (no done masking)
-        i_delta = i + γi * i_next_value * not_done- i_value_slow 
-        i_gae = i_delta + (γi * λi * not_done * i_gae)
-        
-        return (gae, i_gae, value, i_value_fast), (gae, i_gae)
-
-    _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val_fast),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    
-    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value_slow)
 
 def shuffle_and_batch(rng, transitions, n_minibatches):
     def preprocess_transition(x, rng):
@@ -491,41 +197,6 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
         return x
     minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
-
-def calculate_gae_intrinsic_and_extrinsic_done_mask(traj_batch, last_val, last_i_val, γ, λ, γi = None, λi = None):
-
-    if λi is None:
-        λi = λ 
-
-    if γi is None:
-        γi = γ
-        
-    def _get_advantages(gae_and_next_value, transition):
-        gae, i_gae, next_value, i_next_value = gae_and_next_value
-        done, value, reward, i, i_value = (
-            transition.done,
-            transition.value,
-            transition.reward,
-            transition.intrinsic_reward,
-            transition.i_value,
-        )
-        
-        delta = reward + γ * next_value * (1 - done) - value
-        gae = delta + (γ * λ * (1 - done) * gae)
-        
-        i_delta = i + γi * i_next_value * (1 - done) - i_value 
-        i_gae = i_delta + (γi * λi * i_gae)
-        
-        return (gae, i_gae, value, i_value), (gae, i_gae)
-
-    _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages,
-        (jnp.zeros_like(last_val), jnp.zeros_like(last_val), last_val, last_i_val),
-        traj_batch,
-        reverse=True,
-        unroll=16,
-    )
-    return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
 
 def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     targets, i_targets = targets
@@ -577,25 +248,6 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     )
     return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
 
-def get_alpha_schedule(a_schedule, min_lr=0.1):
-    """Returns a function that calculates alpha based on the update step t."""
-
-    if a_schedule == 'inv_t':
-        def alpha_fn(t):
-            return jnp.maximum(min_lr, 1.0 / (t + 1e-8))
-    
-    elif a_schedule == 'constant':
-        def alpha_fn(t):
-            return min_lr
-    else:
-        assert f'a_schedule={a_schedule} not recognized.'
-    return alpha_fn
-
-def schedule_extrinsic_to_intrinsic_ratio(percent, ratio_e_to_i = 1.0):
-    # Phase 1: Flat at 1 (0% -> 80%)
-    # Phase 3: Decay (80% -> 100%)
-    decay = jnp.clip((1.0 - percent) / 0.5, 0.0, 1.0)
-    return ratio_e_to_i * decay
 
 def warmup_env(rng, env, env_params, config):
     """
@@ -729,72 +381,94 @@ def warmup_env(rng, env, env_params, config):
 
     return final_state, final_obs, rng
 
-def update_cov_and_get_rho(traj_batch, sigma_state, get_features_fn, int_rew_from_features_fn, sigma_ema_alpha_fn):
-    "Updates traj_batch and sigma_state based on feature visitations."
-    # --- 1. Update EMA of Gram Matrix ---
-    phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
-    next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
-    terminal_phi = next_phi * traj_batch.done[..., None]
-    # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
-    all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
 
-    # Update Sigma
-    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta, network, train_state, traj_batch, get_vi = None, get_ve = None, compute_true_vals = True):
+    """Uses evaluator to compute the per-state quantities and append them to metric."""
     
-    sigma_state = sigma_update_masked(sigma_state, all_phi_sigma, mask_sigma, sigma_ema_alpha_fn(sigma_state['t']) )
-    
-    # A. Intrinsic Reward (Future Novelty)
-    rho = int_rew_from_features_fn(next_phi)
-    rho = rho - rho.min()
-    traj_batch = traj_batch._replace(intrinsic_reward=rho) # used by LSTD estimat
-
-    return traj_batch, sigma_state, rho
-
-
-def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta, network, train_state, traj_batch, get_vi = None, get_ve = None):
-    "Uses evaluator to compute the per-state quantities and append them to metric, quantities: ve, vi, ri"
-    ri = int_rew_from_state(evaluator.obs_stack)
-    ri = evaluator.get_value_grid(ri)
+    # 1. Intrinsic Reward Grid (Delegated to Evaluator)
+    ri = evaluator.get_value_grid(int_rew_from_state(evaluator.obs_stack))
     effective_visits = (old_beta / jnp.maximum(ri, 1e-8))**2
-    # 1. Compute Exact Values using the Evaluator
-    v_e, v_i, v_pred = evaluator.compute_true_values(network, train_state.params, int_rew_from_state)
-    if len(v_pred) ==2:
-        v_pred, vi_pred = v_pred # evaluator already returned these in grid form if the network returns them
+
+    # 2. Compute Oracle Values & Default Network Predictions
+    if compute_true_vals:
+        # The evaluator dictates the exact ground truth shapes here
+        v_e, v_i, v_net_tuple = evaluator.compute_true_values(network, train_state.params, int_rew_from_state)
+        
+        # Unpack network predictions
+        if isinstance(v_net_tuple, tuple) and len(v_net_tuple) == 2:
+            v_pred, vi_pred = v_net_tuple
+        else:
+            v_pred = v_net_tuple
+            vi_pred = jnp.zeros_like(v_i)
     else:
-        vi_pred = get_vi(evaluator.obs_stack)
-        v_pred = evaluator.get_value_grid(v_pred) if get_ve is None else evaluator.get_value_grid(get_ve(evaluator.obs_stack))
-        vi_pred = evaluator.get_value_grid(vi_pred)
-    
+        v_e = jnp.zeros_like(ri)
+        v_i = jnp.zeros_like(ri)
+        
+        # Memory-safe prediction scan if we aren't using the evaluator's exact solver
+        def _net_step(unused, x):
+            res = network.apply(train_state.params, x[None, ...])
+            return None, jax.tree.map(lambda arr: arr.squeeze(0), res)
+        _, out = jax.lax.scan(_net_step, None, evaluator.obs_stack)
+        
+        if len(out) == 3:
+            v_pred = evaluator.get_value_grid(out[1].squeeze())
+            vi_pred = evaluator.get_value_grid(out[2].squeeze())
+        else:
+            v_pred = evaluator.get_value_grid(out[1].squeeze())
+            vi_pred = jnp.zeros_like(ri)
+
+    # 3. Explicit Overrides (Crucial for LSPI Q-value maximization)
+    # We evaluate the whole stack, then trust the evaluator to format it.
+    if get_ve is not None:
+        v_pred = evaluator.get_value_grid(get_ve(evaluator.obs_stack))
+    if get_vi is not None:
+        vi_pred = evaluator.get_value_grid(get_vi(evaluator.obs_stack))
+
+    # 4. Visitation Logic
     obs = jnp.asarray(traj_batch.obs)
-    if config.get("ENV_NAME") in {"FourRooms-misc", "FourRoomsCustom-v0"}:
-        # Visual FourRooms obs: (T, B, H, W, C) where channel 1 is the agent one-hot map.
+    next_obs = jnp.asarray(traj_batch.next_obs)
+    env_name = config.get("ENV_NAME", "")
+    
+    if "DeepSea" in env_name:
+        metric['visitation_count'] = next_obs.sum(axis=(0, 1))    
+        
+    elif env_name == "FourRoomsPixels-v0":
+        metric['visitation_count'] = traj_batch.info["underlying_grid"][..., 1].sum(axis=(0, 1))
+        
+    elif env_name in {"FourRooms-misc", "FourRoomsCustom-v0"} or "SparseMaze" in env_name:
         if obs.ndim >= 5:
-            metric['visitation_count'] = obs[..., 1].sum(axis=(0, 1))
-        # Vector FourRooms obs: (T, B, 4) = [agent_y, agent_x, goal_y, goal_x].
+            metric['visitation_count'] = next_obs[..., 1].sum(axis=(0, 1))
         elif obs.ndim >= 3 and obs.shape[-1] >= 2:
-            size = int(config.get("FOURROOMS_SIZE", ri.shape[0]))
-            pos = obs[..., :2].astype(jnp.int32)
+            size = ri.shape[0] 
+            pos = next_obs[..., :2].astype(jnp.int32)
             y = jnp.clip(pos[..., 0], 0, size - 1).reshape(-1)
             x = jnp.clip(pos[..., 1], 0, size - 1).reshape(-1)
             counts = jnp.zeros((size, size), dtype=jnp.float32)
             metric['visitation_count'] = counts.at[y, x].add(1.0)
         else:
             metric['visitation_count'] = jnp.zeros_like(ri)
-    elif config['RND_NETWORK_TYPE'] == 'identity':
-        # One-hot tabular features: recover state visitation from observations.
-        visitation = obs.sum(0).sum(0)
+    
+    elif "Chain" in env_name:
+        # obs shape: [T, B, Chain_Len]
+        if obs.shape[-1] > 1 and obs.ndim == 3:
+            # It's One-Hot: Summing gives us the count per state index
+            metric['visitation_count'] = next_obs.sum(axis=(0, 1))
+
+    elif config.get('RND_NETWORK_TYPE') == 'identity':
+        visitation = next_obs.sum(0).sum(0)
         metric['visitation_count'] = evaluator.get_value_grid(visitation)
     else:
         metric['visitation_count'] = jnp.zeros_like(ri)
     
+    # 5. Error Metrics (Perfect shape alignment guaranteed by the evaluator)
     e_sq_err = (v_e - v_pred)**2
     i_sq_err = (v_i - vi_pred)**2
-    num_reachable = jnp.sum(evaluator.reachable_mask)
+    num_reachable = jnp.maximum(jnp.sum(evaluator.reachable_mask), 1.0)
     
     metric.update({
         "ri_grid": ri,
-        "vi_pred": vi_pred,
         "v_i_pred": vi_pred,
+        "vi_pred": vi_pred,
         "v_i": v_i,
         "v_e": v_e,
         "v_e_pred": v_pred,
@@ -802,29 +476,11 @@ def add_values_to_metric(config, metric, int_rew_from_state, evaluator, old_beta
         "i_value_error": jnp.sum(evaluator.reachable_mask * i_sq_err) / num_reachable,
         "effective_visits": effective_visits,
     })
-
+    
     return metric
 
-def update_beta(old_beta, i_values, e_values, progress, update=True):
-    "Scales rho. Normalizes the intrinsic value relative to the extrinsic value. "
-    "End result: ri is normalized by dividing the mean intinrisic value and multiplying by the mean extrinisc value."
-    "Let i = mean(|v_i|) and e = mean(|v_e|), where v_i is unscaled intrinsic value. c_t is on a schedule (usually = 1)"
-    "β = c_t * v / i"
-    "v_i_scaled = β v_i = (v_i / i) * ( c_t * e )"
-    if not update:
-        return old_beta
-    c_t = schedule_extrinsic_to_intrinsic_ratio(progress) # ratio of i_value to e_value, equal to 1 for most of learnings 
-    vi_mag = jnp.mean(jnp.abs(i_values))
-    ve_mag = jnp.mean(jnp.abs(e_values))
-    target_mag = jnp.maximum(ve_mag, 0.1) # Floor for extrinsic scale
-    beta = c_t * target_mag / (vi_mag + 1e-8)
-    # will get v_i / vi_mag times c_t times target mag.
-    # beta = EMA(0.95, old_beta, beta)
-    # beta = jnp.minimum(beta, 1000.0)
-    return beta
 
-
-def calculate_traces(traj_batch, features, γ, λ, is_episodic: bool, is_absorbing: bool):
+def calculate_traces(traj_batch, features, γ, λ, is_continuing: bool):
     """
     Unified trace calculation supporting 'episodic', 'continuing', and 'absorbing'.
     Input shapes:
@@ -835,7 +491,7 @@ def calculate_traces(traj_batch, features, γ, λ, is_episodic: bool, is_absorbi
     """
     # The trace is severed if the environment physically resets.
     # This is True for both Episodic and Absorbing states.
-    mask_trace = is_episodic or is_absorbing
+    cut_when_done = float(~is_continuing)
     
     def _step_trace(trace_prev, scan_inputs):
         phi, done = scan_inputs
@@ -843,7 +499,7 @@ def calculate_traces(traj_batch, features, γ, λ, is_episodic: bool, is_absorbi
         trace_current = trace_prev * γ * λ + phi
         # Determine what gets passed as the "history" for the NEXT step.
         # Convert boolean mask flag to float multiplier: True -> 1.0, False -> 0.0
-        trace_mult = 1.0 - (done * float(mask_trace))
+        trace_mult = 1.0 - (done * cut_when_done)
         trace_next = trace_current * trace_mult[..., None] 
         
         # Return: (carry_state, output_for_this_step)
@@ -854,39 +510,39 @@ def calculate_traces(traj_batch, features, γ, λ, is_episodic: bool, is_absorbi
     
     return traces
 
+
 def calculate_gae(
     traj_batch, 
     γ, λ, 
-    is_episodic: bool, 
-    is_absorbing: bool, 
+    is_continuing: bool, # False for Episodic/Absorbing
     γi=None, λi=None
 ):
-    """Unified extrinsic and intrinsic GAE, handles episodic, continuing, and abosrbing formulation."""
     if γi is None: γi = γ
     if λi is None: λi = λ
 
-    i_mask_boot = is_episodic and not is_absorbing
-    i_mask_gae = is_episodic or is_absorbing
-
-    # Scan natively over traj_batch
     def _get_advantages(gae_accs, transition):
         gae, i_gae = gae_accs
-        
-        done = transition.done 
-        i_boot_mult = 1.0 - (done * i_mask_boot)
-        i_gae_mult  = 1.0 - (done * i_mask_gae)
+        done = transition.done
+        is_goal = transition.goal
 
-        # Pull next values directly from the transition tuple!
-        delta = transition.reward + γ * transition.next_value * (1-done) - transition.value
-        gae = delta + (γ * λ * (1-done) * gae)
+        # --- Extrinsic ---
+        delta = transition.reward + γ * transition.next_value * (1 - done) - transition.value
+        gae = delta + (γ * λ * (1 - done) * gae)
         
-        i_delta = transition.intrinsic_reward + γi * transition.next_i_val * i_boot_mult - transition.i_value 
-        i_gae = i_delta + (γi * λi * i_gae_mult * i_gae)
+        # --- Intrinsic --- 
+        # If Continuing, we always bootstrap
+        # otherwise kill the bootstrap if it is not done, but not at a goal
+        cut_gae = done * (~is_continuing)
+        end_bootstrap = (~is_continuing) * done * (~is_goal)
+        
+        
+        
+        i_delta = transition.intrinsic_reward + γi * transition.next_i_val * (1-end_bootstrap) - transition.i_value 
+        i_gae = i_delta + (γi * λi * (1-cut_gae) * i_gae)
         
         return (gae, i_gae), (gae, i_gae)
 
     initial_accs = (jnp.zeros_like(traj_batch.value[0]), jnp.zeros_like(traj_batch.i_value[0]))
-
     _, (advantages, i_advantages) = jax.lax.scan(
         _get_advantages, initial_accs, traj_batch, reverse=True, unroll=16
     )
@@ -897,7 +553,7 @@ def initialize_evaluator(config):
     from envs.deepsea_v import DeepSeaExactValue
     from envs.fourrooms_custom import FourRoomsExactValue
     from envs.long_chain import LongChainExactValue
-
+    from envs.mountaincar import MountainCarExactValue
     absorbing = config.get('ABSORBING_TERMINAL_STATE', True)
     episodic = config.get('EPISODIC', True)
     
@@ -905,19 +561,32 @@ def initialize_evaluator(config):
         return None
     
     evaluator = None
+    if config['ENV_NAME'] == 'MountainCar-v0':
+        evaluator = MountainCarExactValue(gamma=config['GAMMA_i'], absorbing = absorbing, dense=False)
+    elif config['ENV_NAME'] == 'SparseMountainCar-v0':
+        evaluator = MountainCarExactValue(gamma=config['GAMMA_i'], absorbing = absorbing, dense=False)        
+    elif config['ENV_NAME'] == 'Maze':
+        evaluator = SparseMazeExactValue(size = config.get('ENV_SIZE', 100), episodic=episodic, absorbing = absorbing, gamma=config['GAMMA_i'], )
+    
+    elif config['ENV_NAME'] == 'FourRoomsPixels':
+        evaluator = FourRoomsPixelExactValue(            
+            gamma=config['GAMMA_i'], 
+            episodic=episodic,
+            absorbing=absorbing
+    )
     if config['ENV_NAME'] == 'DeepSea-bsuite':
         evaluator = DeepSeaExactValue(
-            size=config['DEEPSEA_SIZE'], 
+            size=config['ENV_SIZE'], 
             unscaled_move_cost=0.01, 
-            gamma=config['GAMMA'], 
+            gamma=config['GAMMA_i'], 
             episodic=episodic,
             absorbing=absorbing
         )
     if config['ENV_NAME'] == 'DeepSea-Dense': # all rewards minus 1.
         evaluator = DeepSeaExactValue(
-            size=config['DEEPSEA_SIZE'], 
+            size=config['ENV_SIZE'], 
             unscaled_move_cost=0.01, 
-            gamma=config['GAMMA'], 
+            gamma=config['GAMMA_i'], 
             episodic=episodic,
             absorbing=absorbing,
             dense=True,
@@ -927,16 +596,16 @@ def initialize_evaluator(config):
         if goal_pos is not None:
             goal_pos = tuple(goal_pos)
         evaluator = FourRoomsExactValue(
-            size=int(config.get("FOURROOMS_SIZE", 13)),
+            size=int(config.get("ENV_SIZE", 13)),
             fail_prob=float(config.get("FOURROOMS_FAIL_PROB", 1.0 / 3.0)),
-            gamma=config["GAMMA"],
+            gamma=config["GAMMA_i"],
             episodic=episodic,
             use_visual_obs=(config["NETWORK_TYPE"] == "cnn"),
             goal_pos=goal_pos,
             absorbing=absorbing
         )
     elif config['ENV_NAME'] == 'Chain':
-        evaluator = LongChainExactValue(config.get('CHAIN_LENGTH', 100), config['GAMMA'], episodic, absorbing= absorbing)
+        evaluator = LongChainExactValue(config.get('ENV_SIZE', 100), config['GAMMA_i'], episodic, absorbing= absorbing)
     
     return evaluator 
 
@@ -950,25 +619,27 @@ def update_cov(traj_batch, sigma_state, get_features_fn):
         mask: jnp.ndarray,      # Shape: (...) matching the batch dimensions of features
     ):
         """
-        Masks out those that are included twice
+        Pure summation covariance update.
         Takes a mask that corresponds to what included feature vectors are valid for the update.
         """
         S = sigma_state['S']
+        N = sigma_state.get('N', 0)
+        
         S_update = jnp.einsum("...i, ...j -> ...ij", features, features)
         
         # 2. Apply Mask
-        # Expand mask to (..., 1, 1) so it broadcasts over the (k, k) matrix dimensions
         # Zeros out the outer products corresponding to invalid/padding states
         S_masked = S_update * mask[..., None, None]
         
-        # 3. Compute Weighted Mean
+        # 3. PURE SUMMATION (No division!)
         batch_axes = tuple(range(mask.ndim))
-        total_valid = jnp.sum(mask)
-        S_batch_mean = jnp.sum(S_masked, axis=batch_axes) / total_valid
+        S_batch_sum = jnp.sum(S_masked, axis=batch_axes)
         
         # 4. Update & Force Symmetry
-        S_new = S + S_batch_mean
+        S_new = S + S_batch_sum
         S_new = 0.5 * (S_new + S_new.T)
+
+        total_valid = jnp.sum(mask)
 
         return {
             'S': S_new, 
@@ -977,13 +648,48 @@ def update_cov(traj_batch, sigma_state, get_features_fn):
     # --- 1. Update EMA of Gram Matrix ---
     phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
     next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
-    terminal_phi = next_phi * traj_batch.done[..., None]
+    terminal_phi = next_phi * traj_batch.goal[..., None]
     # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
     all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
 
-    # Update Sigma
-    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+    # Update Sigma (include the next state when it ends the episode.)
+    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.goal), traj_batch.goal], axis=0)
     
     sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
     
     return sigma_state
+
+def get_scale_free_bonus(S_inv, features):
+    """bonus = sqrt(x^T Σ^{-1} x)"""
+    bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
+    return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+
+def make_triangle_schedule(total_updates: int, max_beta: float, peak_at: float = 0.05):
+    """
+    Piecewise linear: 0 -> max_beta (at peak_at) -> 0 (at total_updates).
+    """
+    def schedule(step):
+        progress = step / total_updates
+        
+        # Use jax.lax.select for JIT-compatible branching
+        multiplier = jax.lax.select(
+            progress < peak_at,
+            # Ramp up: line from (0,0) to (peak_at, 1)
+            progress / peak_at,
+            # Ramp down: line from (peak_at, 1) to (1, 0)
+            (1.0 - progress) / (1.0 - peak_at)
+        )
+        
+        return max_beta * jnp.clip(multiplier, 0.0, 1.0)
+        
+    return schedule
+
+# FOR LSPI:
+def expand_to_sa_features(phi_s, n_actions, taken_actions, dim_kA):
+    one_hots = jax.nn.one_hot(taken_actions, n_actions)  
+    phi_sa_unflattened = phi_s[..., None, :] * one_hots[..., :, None]
+    return phi_sa_unflattened.reshape(*phi_s.shape[:-1], dim_kA)
+
+def expected_next_sa_features(next_phi, Pi, dim_kA):
+    expected_next_sa = next_phi[..., None, :] * Pi[..., :, None]
+    return expected_next_sa.reshape(*next_phi.shape[:-1], dim_kA)
