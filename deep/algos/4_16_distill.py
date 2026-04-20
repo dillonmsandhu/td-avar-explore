@@ -1,7 +1,8 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-
+from core.buffer import LSTDBufferState, FeatureTraceBufferManager
+from core.lstd import solve_lstd_lambda_from_buffer
 # jax.config.update("jax_enable_x64", True)
 
 SAVE_DIR = "4_16_distill"
@@ -82,60 +83,57 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
     
-    def _compile_metrics(traj_batch, next_phi, loss_info, gaes, targets, 
-                        rho_scale, sigma_state, lstd_state, train_state):
-        # 1. Base metrics from environment info
-        metric = {
-            k: v.mean() 
-            for k, v in traj_batch.info.items() 
-            if k not in ["real_next_obs", "real_next_state"]
-        }
-        
-        # 2. Extract Loss Information
-        total_loss_info, aux_loss_info = loss_info
-        
-        # 3. Covariance Matrix Diagnostics
-        eigvals_S = jnp.linalg.eigvalsh(sigma_state["S"])
-        cond_S = eigvals_S[-1] / jnp.maximum(eigvals_S[0], 1e-12)
-
-        # 4. Standard RL & Exploration Metrics
-        metric.update({
-            "ppo_loss": total_loss_info.mean(),
-            "i_value_loss": aux_loss_info[0].mean(),
-            "e_value_loss": aux_loss_info[1].mean(),
-            "pi_loss": aux_loss_info[2].mean(),
-            "entropy": aux_loss_info[3].mean(),
-            "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
-            "bonus_mean": gaes[1].mean(),
-            "bonus_std": gaes[1].std(),
-            "bonus_max": gaes[1].max(),
-            "lambda_ret_mean": targets[0].mean(),
-            "lambda_ret_std": targets[0].std(),
-            "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
-            "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
-            "mean_rew": traj_batch.reward.mean(),
-            "rho_scale": rho_scale,
-            "Condition_Number_S": cond_S,
-        })
-
-        # 5. Evaluator-based metrics (Value Accuracy / Coverage)
-        if evaluator is None: 
-            metric.update({
-                "vi_pred": traj_batch.i_value.mean(),
-                "v_e_pred": traj_batch.value.mean(),
-            })
-        else:
-            # Closure captures batch_get_features and int_rew_from_features
-            def int_rew_from_state(s): 
-                phi = batch_get_features(s)
-                return int_rew_from_features(phi) * rho_scale
-
-            metric = helpers.add_values_to_metric(
-                config, metric, int_rew_from_state, evaluator, 
-                rho_scale, network, train_state, traj_batch
-            )
+        def _compile_metrics(network,  batch_get_features, traj_batch, next_phi, loss_info, gaes, targets, 
+                            rho_scale, sigma_state, lstd_state, train_state, Sigma_inv):
+            # 1. Base metrics from environment info
+            metric = {
+                k: v.mean() 
+                for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }
             
-        return metric
+            # 2. Extract Loss Information
+            total_loss_info, aux_loss_info = loss_info
+            
+            # 3. Covariance Matrix Diagnostics
+            eigvals_S = jnp.linalg.eigvalsh(sigma_state["S"])
+            cond_S = eigvals_S[-1] / jnp.maximum(eigvals_S[0], 1e-12)
+
+            # 4. Standard RL & Exploration Metrics
+            metric.update({
+                "ppo_loss": total_loss_info.mean(),
+                "i_value_loss": aux_loss_info[0].mean(),
+                "e_value_loss": aux_loss_info[1].mean(),
+                "pi_loss": aux_loss_info[2].mean(),
+                "entropy": aux_loss_info[3].mean(),
+                "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
+                "bonus_mean": gaes[1].mean(),
+                "bonus_std": gaes[1].std(),
+                "bonus_max": gaes[1].max(),
+                "lambda_ret_mean": targets[0].mean(),
+                "lambda_ret_std": targets[0].std(),
+                "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
+                "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
+                "mean_rew": traj_batch.reward.mean(),
+                "rho_scale": rho_scale,
+                "Condition_Number_S": cond_S,
+            })
+
+            # 5. Evaluator-based metrics (Value Accuracy / Coverage)
+            if evaluator is None: 
+                metric.update({
+                    "vi_pred": traj_batch.i_value.mean(),
+                    "v_e_pred": traj_batch.value.mean(),
+                })
+            else:
+                int_rew_from_state = lambda s: helpers.get_scale_free_bonus(Sigma_inv, batch_get_features(s)) * rho_scale
+
+                metric = helpers.add_values_to_metric(
+                    config, metric, int_rew_from_state, evaluator, 
+                    rho_scale, network, train_state, traj_batch
+                )
+                
+            return metric
 
         def _update_step(runner_state, unused):
             train_state, lstd_state, sigma_state, buffer_state, rnd_state, env_state, last_obs, rng, idx = runner_state
@@ -283,9 +281,9 @@ def make_train(config):
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
             train_state, _, _, _, rng = update_state
             
-            metric = _compile_metrics(
+            metric = _compile_metrics(network, batch_get_features,
                 traj_batch, next_phi, loss_info, gaes, targets, 
-                rho_scale, sigma_state, lstd_state, train_state
+                rho_scale, sigma_state, lstd_state, train_state, Sigma_inv
             )
 
             runner_state = (train_state, lstd_state, sigma_state, buffer_state, rnd_state, env_state, last_obs, rng, idx + 1)
