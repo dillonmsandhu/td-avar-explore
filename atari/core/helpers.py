@@ -137,3 +137,41 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
         return x
     minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
+
+
+def _loss_fn(params, network, traj_batch, gae, targets, config):
+    # RERUN NETWORK
+    pi, value = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    
+    # VALUE LOSS
+    value_pred_clipped = traj_batch.value + (
+        value - traj_batch.value
+    ).clip(-config["VF_CLIP"], config["VF_CLIP"])
+    value_losses = jnp.square(value - targets)
+    value_losses_clipped = jnp.square(value_pred_clipped - targets)
+    value_loss = (
+        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+    )
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = (
+        loss_actor
+        + config["VF_COEF"] * value_loss
+        - config["ENT_COEF"] * entropy
+    )
+    return total_loss, (value_loss, loss_actor, entropy)

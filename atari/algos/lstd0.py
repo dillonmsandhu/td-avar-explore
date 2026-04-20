@@ -44,7 +44,7 @@ def make_train(config):
     
     # Env
     env, env_params = helpers.make_env(config)
-    obs_shape = env.single_observation_space
+    obs_shape = env.single_observation_space.shape
     n_actions = env.single_action_space.n
     
     if config.get('SCHEDULE_BETA', False):
@@ -92,7 +92,7 @@ def make_train(config):
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
 
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, config, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
             config, network, rnd_net, network_params, rnd_params, target_params
         )
