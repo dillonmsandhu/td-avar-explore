@@ -5,11 +5,10 @@ import core.helpers as helpers
 import core.networks as networks
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "4_16_grpo"
+SAVE_DIR = "4_16_ppo"
 
 class Transition(NamedTuple):
     done: jnp.ndarray
-    goal: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
     next_value: jnp.ndarray
@@ -23,12 +22,9 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
-    # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
-    assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
-    
+    terminate_lstd_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
@@ -39,12 +35,18 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
     # evaluator = helpers.initialize_evaluator(config)
-    evaluator = None 
+    evaluator = None # no intrinsic value so we don't need to debug it.
 
     if config.get('SCHEDULE_BETA', False):
         beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
+
+    def get_scale_free_bonus(S_inv, features):
+        """bonus = sqrt(x^T Σ^{-1} x)"""
+        bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
+        return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+
 
     def train(rng):
         
@@ -98,11 +100,15 @@ def make_train(config):
                     rng_step, env_state, action, env_params
                 )
                 true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
-                is_goal = info['is_goal']
-                dummy = jnp.zeros_like(reward)
+                
+                next_val = network.apply(train_state.params, true_next_obs, method=network.value)
+
+                intrinsic_reward = jnp.zeros_like(reward)
+                i_val = jnp.zeros_like(reward)
+                next_i_val = jnp.zeros_like(reward)
 
                 transition = Transition(
-                    done, is_goal, action, value, dummy, dummy, dummy, reward, dummy, log_prob, last_obs, true_next_obs, info
+                    done, action, value, next_val, i_val, next_i_val, reward, intrinsic_reward, log_prob, last_obs, true_next_obs, info
                 )
                 return (train_state, rnd_state, env_state, obsv, rng), transition
 
@@ -111,52 +117,29 @@ def make_train(config):
 
             # Feature Extraction for Current Batch
             next_phi = get_phi(traj_batch.next_obs)
-            terminals = jnp.where(~is_continuing, traj_batch.done, 0)
-            absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
+            terminals = jnp.where(terminate_lstd_bootstrap, traj_batch.done, 0)
+            absorb_masks = jnp.where(is_absorbing, traj_batch.done, 0)
 
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
 
-            rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
-            
-            # --- Absorbing overwrite ---
-            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, 0.0)
-
-            # --- Final traj_batch update for GAE ---
-            traj_batch = traj_batch._replace(
-                intrinsic_reward=rho, 
-                next_i_val=fixed_next_i_val
-            )
+            int_rew_from_features = lambda x: get_scale_free_bonus(Sigma_inv, x)
+            batch_next_rho = get_scale_free_bonus(Sigma_inv, next_phi)
+            rho_scale = beta_sch(idx)
+            traj_batch = traj_batch._replace(intrinsic_reward=batch_next_rho * rho_scale)
 
             # --- ADVANTAGE CALCULATION ---
             gaes, targets = helpers.calculate_gae(
                 traj_batch, config["GAMMA"], config["GAE_LAMBDA"],
-                is_continuing,
-                γi=config["GAMMA_i"], 
-                λi=1.0  # Forces pure Monte Carlo returns
+                is_episodic=is_episodic, is_absorbing=is_absorbing,
+                γi=0.0, 
+                λi=0.0  # Forces pure Monte Carlo returns
             )
             
             extrinsic_adv = gaes[0]
             extrinsic_target = targets[0]
-            
-            # raw_intrinsic_returns has shape (NUM_STEPS, NUM_ENVS)
-            raw_intrinsic_returns = gaes[1] 
-            
-            # --- THE TIME-DEPENDENT BASELINE ---
-            # Compute the mean and std across the NUM_ENVS axis (axis=1).
-            # This creates a unique baseline for EVERY timestep in the rollout chunk.
-            mean_int_ret_t = jnp.mean(raw_intrinsic_returns, axis=1, keepdims=True)
-            
-            # Normalize conditionally based on the timestep index
-            baselined_int_adv = (raw_intrinsic_returns - mean_int_ret_t)
-            
-            # Final combined advantage for the Actor
-            rho_scale = beta_sch(idx)
-            advantages = extrinsic_adv + (rho_scale * baselined_int_adv)
+            advantages = extrinsic_adv
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
@@ -179,7 +162,8 @@ def make_train(config):
             initial_update_state = (train_state, traj_batch, advantages, extrinsic_target, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
             train_state, _, _, _, rng = update_state
-
+            # update covariance to incorporate new data
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, get_phi)
             # --------- Metrics ---------
             metric = {
                 k: v.mean() 
@@ -201,11 +185,38 @@ def make_train(config):
                     "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                     "mean_rew": traj_batch.reward.mean(),
                     "rho_scale": rho_scale,
-                    "vi_pred": traj_batch.i_value.mean(),
-                    "v_e_pred": traj_batch.value.mean(),
-                    "num_goals": jnp.sum(traj_batch.goal)
                 }
             )
+
+            if evaluator is None:  # No way to compute true values, just record the batch average prediction.
+                metric.update(
+                    {
+                        "vi_pred": traj_batch.i_value.mean(),
+                        "v_e_pred": traj_batch.value.mean(),
+                    }
+                )
+            else:
+                all_phi = get_phi(evaluator.obs_stack) 
+                all_r_int = get_scale_free_bonus(Sigma_inv, all_phi) * rho_scale
+                ri_grid = evaluator.get_value_grid(all_r_int)
+                
+                def lookup_int_rew(unused_obs_input):
+                    return all_r_int
+
+                def get_vi(obs):
+                    return jnp.zeros(obs.shape[0])
+
+                metric = helpers.add_values_to_metric(
+                    config,
+                    metric,
+                    lookup_int_rew,
+                    evaluator,
+                    rho_scale,
+                    network,
+                    train_state,
+                    traj_batch,
+                    get_vi,
+                )
 
             runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx + 1)
             return runner_state, metric

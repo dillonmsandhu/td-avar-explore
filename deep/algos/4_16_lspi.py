@@ -146,7 +146,7 @@ def make_train(config):
                 true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
                 target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
-                next_val = network.apply(train_state.params, true_next_obs, method=network.value)
+                next_val = network.apply(train_state.params, target_next_obss, method=network.value)
 
                 intrinsic_reward = jnp.zeros_like(reward)
                 i_val = jnp.zeros_like(reward)

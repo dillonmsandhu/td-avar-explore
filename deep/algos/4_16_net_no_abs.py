@@ -8,7 +8,7 @@ from envs.deepsea_v import DeepSeaExactValue
 from envs.long_chain import LongChainExactValue
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = '4_16_net'
+SAVE_DIR = '4_16_net_no_abs'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -104,11 +104,7 @@ def make_train(config):
                 
                 # GET NEXT VALUES FOR UNIFIED GAE
                 true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
-                
-                is_goal = info['is_goal']
-                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
-
-                _, next_val, next_i_val = network.apply(train_state.params, target_next_obs)
+                _, next_val, next_i_val = network.apply(train_state.params, true_next_obs)
 
                 # Record
                 intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
@@ -123,7 +119,7 @@ def make_train(config):
                     intrinsic_reward,
                     log_prob,
                     last_obs,
-                    target_next_obs,
+                    true_next_obs,
                     info,
                 )
 
@@ -152,15 +148,15 @@ def make_train(config):
             # In the absorbing formulation, we mathematically know the infinite horizon value of the 
             # terminal state is exactly its intrinsic reward / (1 - gamma_i).
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            fixed_next_i_val = jnp.where(
-                jnp.logical_and(traj_batch.done, is_absorbing), 
-                exact_terminal_i_val, 
-                traj_batch.next_i_val
-            )
+            # fixed_next_i_val = jnp.where(
+            #     jnp.logical_and(traj_batch.done, is_absorbing), 
+            #     exact_terminal_i_val, 
+            #     traj_batch.next_i_val
+            # )
             # Update the batch with the unscaled rho and the fixed terminal values
             traj_batch = traj_batch._replace(
                 intrinsic_reward=rho,
-                next_i_val=fixed_next_i_val
+                # next_i_val=fixed_next_i_val
             )            
 
             # -------------------------------------------------------------

@@ -5,6 +5,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import math 
 from core.imports import *
+from gymnax.environments import spaces
 import core.helpers as helpers
 import core.networks as networks
 import flax
@@ -12,8 +13,32 @@ import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.linen.initializers import constant, orthogonal
 SAVE_DIR = "4_16_lstd_learned_feats"
-
+# jax.config.update("jax_enable_x64", True)
 from flax.training.train_state import TrainState
+
+class Transition(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    next_value: jnp.ndarray
+    i_value: jnp.ndarray
+    next_i_val: jnp.ndarray
+    i_val_net: jnp.ndarray
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    next_obs: jnp.ndarray
+    info: jnp.ndarray
+
+class LSTDBufferState(NamedTuple):
+    observations: jnp.ndarray
+    next_observations: jnp.ndarray
+    features: jnp.ndarray          
+    next_features: jnp.ndarray
+    terminals: jnp.ndarray
+    absorb_masks: jnp.ndarray
+    size: jnp.ndarray
 
 class TargetTrainState(TrainState):
     """Extension of TrainState to include EMA/Target parameters."""
@@ -74,7 +99,7 @@ class FeatureNet(nn.Module):
 
     def _get_normalized_lstd_features(self, x):
         """Internal helper to guarantee stable LSTD geometry."""
-        torso_out = self.torso(x)
+        torso_out = nn.remat(lambda model, val: model(val))(self.torso, x)
         
         # 1. Recenter to zero-mean to avoid collinear "cones" of features
         z_centered = self.lstd_norm(torso_out)
@@ -125,29 +150,68 @@ class FeatureNet(nn.Module):
 
         return v_int, phi_lstd, current_rnd_pred, next_rnd_pred, inv_logits
 
-class Transition(NamedTuple):
-    done: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    next_value: jnp.ndarray
-    i_value: jnp.ndarray
-    next_i_val: jnp.ndarray
-    i_val_net: jnp.ndarray
-    reward: jnp.ndarray
-    intrinsic_reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    next_obs: jnp.ndarray
-    info: jnp.ndarray
+# Inverse loss (flexible to continuous / discrete action types)
+def compute_inv_loss(inv_pred, actions, is_continuous: bool):
+    """
+    Computes inverse dynamics loss.
+    Discrete: Cross-entropy over action categories.
+    Continuous: Combined MSE and Cosine Distance for directional robustness.
+    """
+    if is_continuous:
+        # 1. Coordinate-wise error (Magnitude)
+        mse_loss = jnp.square(inv_pred - actions).mean()
+        
+        # 2. Directional error (Cosine Distance)
+        # We normalize to unit vectors to ensure the loss focuses on 
+        # how well the features predict the 'direction' of the action.
+        inv_unit = inv_pred / (jnp.linalg.norm(inv_pred, axis=-1, keepdims=True) + 1e-8)
+        act_unit = actions / (jnp.linalg.norm(actions, axis=-1, keepdims=True) + 1e-8)
+        
+        # Cosine similarity is 1.0 when perfect, -1.0 when opposite.
+        cosine_sim = jnp.sum(inv_unit * act_unit, axis=-1)
+        cosine_loss = (1.0 - cosine_sim).mean()
+        
+        # Summing them ensures features capture both the "what" and "how much"
+        return mse_loss + cosine_loss
+    
+    else:
+        # Discrete Case: Standard Categorical Cross-Entropy
+        # Note: actions is expected to be a batch of integer indices
+        n_actions = inv_pred.shape[-1]
+        labels = jax.nn.one_hot(actions, n_actions)
+        return optax.softmax_cross_entropy(logits=inv_pred, labels=labels).mean()
 
-class LSTDBufferState(NamedTuple):
-    observations: jnp.ndarray
-    next_observations: jnp.ndarray
-    features: jnp.ndarray          
-    next_features: jnp.ndarray
-    terminals: jnp.ndarray
-    absorb_masks: jnp.ndarray
-    size: jnp.ndarray
+def get_scale_free_bonus(S_inv, features):
+    """bonus = sqrt(x^T Σ^{-1} x)"""
+    bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
+    return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
+
+def update_buffer(buffer_state: LSTDBufferState, obs_shape, k_base, obs, next_obs, features, next_features, terminals, absorb_masks):
+    # Dynamically reshape based on the true observation shape
+    obs = obs.reshape((-1,) + obs_shape).astype(jnp.float32)
+    next_obs = next_obs.reshape((-1,) + obs_shape).astype(jnp.float32)
+    features = features.reshape(-1, k_base).astype(jnp.float32)
+    next_features = next_features.reshape(-1, k_base).astype(jnp.float32)
+    terminals = terminals.reshape(-1, 1).astype(jnp.float32)
+    absorb_masks = absorb_masks.reshape(-1, 1).astype(jnp.float32)
+    
+    B = obs.shape[0] 
+    start_idx = buffer_state.size
+    
+    new_obs = jax.lax.dynamic_update_slice(buffer_state.observations, obs, (start_idx,) + (0,)*len(obs_shape))
+    new_next_obs = jax.lax.dynamic_update_slice(buffer_state.next_observations, next_obs, (start_idx,) + (0,)*len(obs_shape))
+    new_features = jax.lax.dynamic_update_slice(buffer_state.features, features, (start_idx, 0))
+    new_next_features = jax.lax.dynamic_update_slice(buffer_state.next_features, next_features, (start_idx, 0))
+    new_terminals = jax.lax.dynamic_update_slice(buffer_state.terminals, terminals, (start_idx, 0))
+    new_absorb_masks = jax.lax.dynamic_update_slice(buffer_state.absorb_masks, absorb_masks, (start_idx, 0))
+    
+    return LSTDBufferState(
+        observations=new_obs, next_observations=new_next_obs, 
+        features=new_features, next_features=new_next_features,
+        terminals=new_terminals, absorb_masks=new_absorb_masks,
+        size=start_idx + B
+    )
+
 
 def make_train(config):
     is_episodic = config.get("EPISODIC", True)
@@ -161,7 +225,7 @@ def make_train(config):
     
     # --- Buffer Padding for Extended Collection and Chunking ---
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
-    CHUNK_SIZE = config.get('CHUNK_SIZE', 3 * config['NUM_ENVS'])
+    CHUNK_SIZE = config.get('CHUNK_SIZE', max(config['NUM_ENVS'], config['NUM_STEPS']))
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     
     if batch_size % CHUNK_SIZE != 0:
@@ -180,7 +244,18 @@ def make_train(config):
     
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
-    n_actions = env.action_space(env_params).n  # <-- Needed for inverse model
+    action_space = env.action_space(env_params)
+    
+    if isinstance(action_space, spaces.Discrete):
+        n_actions = action_space.n
+        is_continuous = False
+    elif isinstance(action_space, spaces.Box):
+        # For Box spaces, action_dim is the size of the continuous vector
+        n_actions = action_space.shape[0] if len(action_space.shape) > 0 else 1
+        is_continuous = True
+    else:
+        raise ValueError(f"Unsupported Gymnax action space: {type(action_space)}")
+    
     evaluator = helpers.initialize_evaluator(config)
     
     if config.get('SCHEDULE_BETA', False):
@@ -189,36 +264,6 @@ def make_train(config):
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
 
-    def get_scale_free_bonus(S_inv, features):
-        """bonus = sqrt(x^T Σ^{-1} x)"""
-        bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
-        return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
-    
-    def update_buffer(buffer_state: LSTDBufferState, obs, next_obs, features, next_features, terminals, absorb_masks):
-        # Dynamically reshape based on the true observation shape
-        obs = obs.reshape((-1,) + obs_shape).astype(jnp.float32)
-        next_obs = next_obs.reshape((-1,) + obs_shape).astype(jnp.float32)
-        features = features.reshape(-1, k_base).astype(jnp.float32)
-        next_features = next_features.reshape(-1, k_base).astype(jnp.float32)
-        terminals = terminals.reshape(-1, 1).astype(jnp.float32)
-        absorb_masks = absorb_masks.reshape(-1, 1).astype(jnp.float32)
-        
-        B = obs.shape[0]  # <-- Fixed
-        start_idx = buffer_state.size
-        
-        new_obs = jax.lax.dynamic_update_slice(buffer_state.observations, obs, (start_idx,) + (0,)*len(obs_shape))
-        new_next_obs = jax.lax.dynamic_update_slice(buffer_state.next_observations, next_obs, (start_idx,) + (0,)*len(obs_shape))
-        new_features = jax.lax.dynamic_update_slice(buffer_state.features, features, (start_idx, 0))
-        new_next_features = jax.lax.dynamic_update_slice(buffer_state.next_features, next_features, (start_idx, 0))
-        new_terminals = jax.lax.dynamic_update_slice(buffer_state.terminals, terminals, (start_idx, 0))
-        new_absorb_masks = jax.lax.dynamic_update_slice(buffer_state.absorb_masks, absorb_masks, (start_idx, 0))
-        
-        return LSTDBufferState(
-            observations=new_obs, next_observations=new_next_obs, 
-            features=new_features, next_features=new_next_features,
-            terminals=new_terminals, absorb_masks=new_absorb_masks,
-            size=start_idx + B
-        )
             
     def solve_lstd_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd_state, get_phi_lstd, config):
         # Load observationsfor the LSTD projection.
@@ -421,22 +466,29 @@ def make_train(config):
             target_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], bias = False, k=k_base
         )
         
-        def get_lstd_feature_map(params, bias = (k_lstd > k_base)): 
-            if bias:
-                def _get_features(obs):
-                    # Use rnd_net
-                    phi_base = rnd_net.apply(params, obs) 
-                    bias = jnp.ones(phi_base.shape[:-1] + (1,))
-                    phi_lstd = jnp.concatenate([bias, phi_base], axis=-1)
-                    return phi_lstd
-            else: 
-                def _get_features(obs):
-                    return rnd_net.apply(params, obs) 
-            
-            return _get_features
-        
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
+
+        # For RND, fixed function.
+        # def batch_get_features(obs_full):
+        #     # Identify how many dimensions belong to the observation itself
+        #     num_obs_dims = len(obs_shape)
+        #     batch_dims = obs_full.shape[:-num_obs_dims]
+            
+        #     # Flatten all batch dimensions into a single flat batch
+        #     obs_flat = obs_full.reshape((-1,) + obs_shape)
+        #     total_steps = obs_flat.shape[0]
+            
+        #     n_chunks = total_steps // CHUNK_SIZE
+        #     obs_reshaped = obs_flat.reshape((n_chunks, CHUNK_SIZE) + obs_shape)
+
+        #     def _base_scan_step(unused, x_chunk):
+        #         return None, get_features_fn(x_chunk)
+
+        #     _, phi_out = jax.lax.scan(_base_scan_step, None, obs_reshaped)
+            
+        #     # Dynamically restore whatever batch dimensions we started with
+        #     return phi_out.reshape(batch_dims + (-1,))
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
@@ -488,16 +540,16 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"]
-                next_val = network.apply(train_state.params, true_next_obs, method=network.value)
+                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
+                is_goal = info['is_goal']
+                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
+                dummy = jnp.zeros_like(reward)
+
+                next_val = network.apply(train_state.params, target_next_obs, method=network.value)
                 i_val_net = feature_net.apply(feat_train_state.params, last_obs, method = feature_net.i_value)
 
-                intrinsic_reward = jnp.zeros_like(reward)
-                i_val = jnp.zeros_like(reward)
-                next_i_val = jnp.zeros_like(reward)
-
                 transition = Transition(
-                    done, action, value, next_val, i_val, next_i_val, i_val_net, reward, intrinsic_reward, log_prob, last_obs, true_next_obs, info
+                    done, action, value, next_val, dummy, dummy, i_val_net, reward, dummy, log_prob, last_obs, true_next_obs, info
                 )
                 return (train_state, rnd_state, env_state, obsv, rng), transition
 
@@ -508,9 +560,10 @@ def make_train(config):
             phi_base = batch_get_features(traj_batch.obs)
             next_phi_base = batch_get_features(traj_batch.next_obs)
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_base))
-            # Sigma_inv = jnp.linalg.solve(sigma_state["S"], jnp.eye(k_lstd))
+            
             int_rew_from_features = lambda feats: get_scale_free_bonus(Sigma_inv, feats)
 
             # --- 2. SOLVE LSTD OVER EXTENDED BUFFER ---
@@ -518,7 +571,7 @@ def make_train(config):
             terminals = jnp.where(terminate_lstd_bootstrap, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.done, 0)
             buffer_state = update_buffer(
-                buffer_state, traj_batch.obs, traj_batch.next_obs, 
+                buffer_state, obs_shape, k_base, traj_batch.obs, traj_batch.next_obs, 
                 phi_base, next_phi_base, terminals, absorb_masks
             )
 
@@ -529,8 +582,24 @@ def make_train(config):
                     obs, 
                     method=feature_net.get_lstd_features
                 )
-            
             batch_get_phi_lstd = jax.vmap(get_phi_lstd)
+            
+            # def batch_get_phi_lstd(obs_full):
+            #     num_obs_dims = len(obs_shape)
+            #     batch_dims = obs_full.shape[:-num_obs_dims]
+            #     obs_flat = obs_full.reshape((-1,) + obs_shape)
+            #     total_steps = obs_flat.shape[0]
+                
+            #     n_chunks = total_steps // CHUNK_SIZE
+            #     obs_reshaped = obs_flat.reshape((n_chunks, CHUNK_SIZE) + obs_shape)
+
+            #     def _feat_scan_step(unused, x_chunk):
+            #         return None, get_phi_lstd(x_chunk)
+
+            #     _, phi_out = jax.lax.scan(_feat_scan_step, None, obs_reshaped)
+                
+            #     return phi_out.reshape(batch_dims + (-1,))
+            
             phi_lstd = batch_get_phi_lstd(traj_batch.obs)
             next_phi_lstd = batch_get_phi_lstd(traj_batch.next_obs)
 
@@ -542,28 +611,55 @@ def make_train(config):
             buffer_state = evict_buffer(buffer_state,get_phi_lstd, config, prb_rng)
 
             # --- BATCH INTRINSIC VALUES FOR GAE ---
-            batch_next_rho = get_scale_free_bonus(Sigma_inv, next_phi_base)
+            rho = get_scale_free_bonus(Sigma_inv, next_phi_base)
 
-            rho_scale = beta_sch(idx) # triangle schedule
-            v_i = phi_lstd @ lstd_state["w"] * rho_scale
-            next_v_i = next_phi_lstd @ lstd_state["w"] * rho_scale
+            # --- 1. RAW LSTD PREDICTIONS ---
+            # Do NOT apply rho_scale here. 
+            v_i = phi_lstd @ lstd_state["w"] 
+            next_v_i = next_phi_lstd @ lstd_state["w"] 
 
-            v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, rho_scale/(1-config['GAMMA_i'])) , (v_i, next_v_i) )
-            traj_batch = traj_batch._replace(i_value=v_i, intrinsic_reward=batch_next_rho * rho_scale, next_i_val=next_v_i)
+            # --- 2. RAW CLIPPING ---
+            # Clip to the pure mathematical bound (no rho_scale needed)
+            V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
+            v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
 
-            # --- ADVANTAGE CALCULATION ---
-            gaes, targets = helpers.calculate_gae(
-                traj_batch, config["GAMMA"], config["GAE_LAMBDA"],
-                is_episodic=is_episodic, is_absorbing=is_absorbing,
-                γi=config["GAMMA_i"], λi=config["GAE_LAMBDA_i"]
+            # --- 3. EXACT RAW ABSORBING OVERRIDE ---
+            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            # fixed_next_i_val = jnp.where(
+            #     jnp.logical_and(traj_batch.done, is_absorbing), 
+            #     exact_terminal_i_val, 
+            #     next_v_i
+            # )
+
+            # --- 4. UPDATE BATCH WITH RAW VALUES ---
+            traj_batch = traj_batch._replace(
+                i_value=v_i, 
+                intrinsic_reward=rho, 
+                next_i_val=next_v_i
             )
-            advantages = gaes[0] + gaes[1]
-            (extrinsic_target, distilled_i_target) = targets
+
+            # -------------------------------------------------------------
+            # --------- ADVANTAGE CALCULATION (Unified Absorbing) ---------
+            gaes, targets = helpers.calculate_gae(
+                traj_batch, 
+                config["GAMMA"], 
+                config["GAE_LAMBDA"], 
+                is_episodic=is_episodic, 
+                is_absorbing=is_absorbing, 
+                γi=config["GAMMA_i"], 
+                λi=config["GAE_LAMBDA_i"]
+            )
+            gae_e, gae_i = gaes
             
+            # --- 5. POST-GAE SCALING ---
+            rho_scale = beta_sch(idx) # triangle schedule
+            advantages = gae_e + (rho_scale * gae_i)
+            (extrinsic_target, distilled_i_target) = targets
+                    
             # Loss function for the feature module, called in update-epoch
             def _feat_loss_fn(feat_params, obs, next_obs, actions, target_i, i_val_net, true_c_rnd, true_n_rnd):
                 # Pass both obs and next_obs to trigger the inverse head
-                v_int, _, p_c_rnd, p_n_rnd, inv_logits = feature_net.apply(feat_params, obs, next_obs)
+                v_int, _, p_c_rnd, p_n_rnd, inv_pred = feature_net.apply(feat_params, obs, next_obs)
                 
                 # --- 3(a) Distillation with PPO-Style Clipping ---
                 clip_eps = config.get("FEAT_CLIP_EPS", 0.2)
@@ -583,11 +679,10 @@ def make_train(config):
                 # 3(b) RND matching anchors the rank of the representation (with Delta Residual)
                 c_rnd_loss = jnp.mean(jnp.square(p_c_rnd - jax.lax.stop_gradient(true_c_rnd)))
                 n_rnd_loss = jnp.mean(jnp.square(p_n_rnd - jax.lax.stop_gradient(true_n_rnd)))
-                
+
                 # 3(c) Inverse Dynamics forces features to capture controllable dynamics
-                action_one_hot = jax.nn.one_hot(actions, n_actions)
-                inv_loss = optax.softmax_cross_entropy(logits=inv_logits, labels=action_one_hot).mean()
-                
+                inv_loss = compute_inv_loss(inv_pred, actions, is_continuous)
+
                 # Weighted composition based on ablation config
                 total_feat_loss = (config.get("VAL_LOSS_WEIGHT", 1.0) * val_loss) + \
                                   (config.get("RND_LOSS_WEIGHT", 1.0) * (c_rnd_loss + n_rnd_loss)) + \
@@ -646,8 +741,6 @@ def make_train(config):
             ac_loss, ac_aux_info, feat_loss, feat_aux_info = loss_info
             feat_train_state = feat_train_state.apply_ema()
   
-            # update covariance to incorporate new data
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
             # --------- Metrics ---------
             metric = {
                 k: v.mean() 
