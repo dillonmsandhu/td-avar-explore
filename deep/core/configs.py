@@ -255,7 +255,7 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
     # 150-Chain Ablation: Tabular vs MLP
     FINAL_EXACT["chain_tabular_150_continuing"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 150, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 150, "CONTINUING": True, "ABSORBING_TERMINAL_STATE": False,
+            "ENV_SIZE": 150, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 150, "EPISODIC": False, "ABSORBING_TERMINAL_STATE": False,
             "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
         },
         "envs": ["Chain"]
@@ -264,7 +264,7 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
     # 150-Chain Ablation: Tabular vs MLP
     FINAL_EXACT["chain_tabular_150_ep"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 140, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 140, "CONTINUING": False, "ABSORBING_TERMINAL_STATE": False,
+            "ENV_SIZE": 140, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 140, "EPISODIC": True, "ABSORBING_TERMINAL_STATE": False,
             "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
         },
         "envs": ["Chain"]
@@ -273,16 +273,16 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
     # 150-Chain Ablation: Tabular vs MLP
     FINAL_EXACT["chain_tabular_160_absorbing"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 160, "CONTINUING": False, "ABSORBING_TERMINAL_STATE": True,
+            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 160, "EPISODIC": True, "ABSORBING_TERMINAL_STATE": True,
             "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
         },
         "envs": ["Chain"]
     }
 
 
-    FINAL_EXACT["chain_tabular_50_absorbing"] = {
+    FINAL_EXACT["chain_tabular_50_cont"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 50, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 50, "CONTINUING": False, "ABSORBING_TERMINAL_STATE": True,
+            "ENV_SIZE": 50, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 50, "EPISODIC": False, "ABSORBING_TERMINAL_STATE": False,
             "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
         },
         "envs": ["Chain"]

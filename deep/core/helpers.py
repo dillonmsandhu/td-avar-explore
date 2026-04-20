@@ -648,12 +648,12 @@ def update_cov(traj_batch, sigma_state, get_features_fn):
     # --- 1. Update EMA of Gram Matrix ---
     phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
     next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
-    terminal_phi = next_phi * traj_batch.goal[..., None]
+    terminal_phi = next_phi * traj_batch.done[..., None] 
     # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
     all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
 
     # Update Sigma (include the next state when it ends the episode.)
-    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.goal), traj_batch.goal], axis=0)
+    mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
     
     sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
     
