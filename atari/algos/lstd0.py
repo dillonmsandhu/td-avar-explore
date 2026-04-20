@@ -3,24 +3,10 @@ import core.helpers as helpers
 import core.networks as networks
 from core.buffer import FeatureBufferManager, FeatureBufferState
 from core.lstd import solve_lstd_0_from_buffer
+from core.helpers import Transition
 # jax.config.update("jax_enable_x64", True)
 
 SAVE_DIR = "lstd0" # performs the update to the covariance matrix FIRST.
-
-class Transition(NamedTuple):
-    done: jnp.ndarray
-    goal: jnp.ndarray
-    action: jnp.ndarray
-    value: jnp.ndarray
-    next_value: jnp.ndarray
-    i_value: jnp.ndarray
-    next_i_val: jnp.ndarray
-    reward: jnp.ndarray
-    intrinsic_reward: jnp.ndarray
-    log_prob: jnp.ndarray
-    obs: jnp.ndarray
-    next_obs: jnp.ndarray
-    info: jnp.ndarray
 
 def make_train(config):
     k_lstd = config.get("RND_FEATURES", 128)

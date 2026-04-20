@@ -5,7 +5,21 @@ from turtle import done
 import envpool
 from core.wrappers import JaxEnvPoolWrapper
 from core.imports import *
-# when done=True, the obs returned is the terminal state S_T
+
+class Transition(NamedTuple):
+    done: jnp.ndarray
+    goal: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    next_value: jnp.ndarray
+    i_value: jnp.ndarray
+    next_i_val: jnp.ndarray
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    next_obs: jnp.ndarray
+    info: jnp.ndarray
 
 def make_env(config):
     env = envpool.make(
