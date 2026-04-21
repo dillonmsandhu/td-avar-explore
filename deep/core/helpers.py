@@ -532,10 +532,8 @@ def calculate_gae(
         # --- Intrinsic --- 
         # If Continuing, we always bootstrap
         # otherwise kill the bootstrap if it is not done, but not at a goal
-        cut_gae = done * (~is_continuing)
-        end_bootstrap = (~is_continuing) * done * (~is_goal)
-        
-        
+        cut_gae = done * (not is_continuing)
+        end_bootstrap = (not is_continuing) * done * (1 - is_goal)
         
         i_delta = transition.intrinsic_reward + γi * transition.next_i_val * (1-end_bootstrap) - transition.i_value 
         i_gae = i_delta + (γi * λi * (1-cut_gae) * i_gae)
