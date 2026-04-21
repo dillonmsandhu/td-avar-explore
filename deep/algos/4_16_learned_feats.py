@@ -204,10 +204,15 @@ def make_train(config):
     # Replay Buffer
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
-    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
-    config['CHUNK_SIZE'] =  100_000 + batch_size # chunking for LSTD solver
+    mb_size = config["MINIBATCH_SIZE"]
+    # 2. Round 100,000 down to the nearest perfect multiple of 256 (gives 99,840)
+    aligned_base = (BUFFER_CAPACITY // mb_size) * mb_size 
+    # 3. Add your batch size. Because both numbers are perfect multiples of mb_size,
+    # the total CHUNK_SIZE is mathematically guaranteed to reshape perfectly.
+    config['CHUNK_SIZE'] = aligned_base + batch_size
+
     buffer_manager = DynamicFeatureBufferManager(
         config, k_base, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], obs_shape
     )
@@ -375,16 +380,15 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
-                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 dummy = jnp.zeros_like(reward)
 
                 next_val = network.apply(train_state.params, target_next_obs, method=network.value)
                 i_val_net = feature_net.apply(feat_train_state.params, last_obs, method = feature_net.i_value)
 
                 transition = Transition(
-                    done, is_goal, action, value, next_val, dummy, dummy, i_val_net, reward, dummy, log_prob, last_obs, true_next_obs, info
+                    done, is_goal, action, value, next_val, dummy, dummy, i_val_net, reward, dummy, log_prob, last_obs, target_next_obs, info
                 )
                 return (train_state, env_state, obsv, rng), transition
 
@@ -447,7 +451,7 @@ def make_train(config):
             next_phi_lstd = batch_get_phi_lstd(traj_batch.next_obs)
 
             # solve LSTD on the buffer
-            lstd_state = solve_lstd_buffer(buffer_state, Sigma_inv, lstd_state, get_phi_lstd, config)
+            lstd_state = solve_lstd_buffer(buffer_state, Sigma_inv, lstd_state, batch_get_phi_lstd, config)
 
             # --- 3 & 4. SCORE AND EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
@@ -468,15 +472,20 @@ def make_train(config):
 
             # --- 3. EXACT RAW ABSORBING OVERRIDE ---
             # --- Absorbing overwrite ---
-            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
+            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
+            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
+            # traj_batch = traj_batch._replace(
+            #     i_value=v_i, 
+            #     intrinsic_reward=rho, 
+            #     next_i_val=fixed_next_i_val
+            # )
 
             # --- Final traj_batch update for GAE ---
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 
-                next_i_val=fixed_next_i_val
+                next_i_val=next_v_i
             )
 
             # -------------------------------------------------------------

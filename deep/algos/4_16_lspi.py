@@ -35,7 +35,10 @@ def make_train(config):
     # Env
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
-    n_actions = env.action_space(env_params).n
+    try:
+        n_actions = env.action_space(env_params).n
+    except: 
+        exit('discrete actions only')
     config['N_ACTIONS'] = n_actions
     dim_kA = k_lstd * n_actions
     evaluator = helpers.initialize_evaluator(config)
@@ -143,9 +146,8 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
-                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 next_val = network.apply(train_state.params, target_next_obs, method=network.value)
 
                 intrinsic_reward = jnp.zeros_like(reward)
@@ -158,7 +160,7 @@ def make_train(config):
                 return (train_state, env_state, obsv, rng), transition
 
             env_step_state = (train_state, env_state, last_obs, rng)
-            (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            (_, env_state, laterminalsst_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Post-Process batch
             phi_s = batch_get_features(traj_batch.obs)
@@ -206,10 +208,15 @@ def make_train(config):
             fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
 
             # --- Final traj_batch update for GAE ---
+            # traj_batch = traj_batch._replace(
+            #     i_value=v_i, 
+            #     intrinsic_reward=rho, 
+            #     next_i_val=fixed_next_i_val
+            # )
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 
-                next_i_val=fixed_next_i_val
+                next_i_val=next_v_i
             )
 
             gaes, targets = helpers.calculate_gae(

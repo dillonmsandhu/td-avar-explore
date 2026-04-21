@@ -607,6 +607,54 @@ def initialize_evaluator(config):
     
     return evaluator 
 
+# def update_cov(traj_batch, sigma_state, get_features_fn):
+#     "Updates traj_batch and sigma_state based on feature visitations."
+
+#     def cov_update_masked(
+#         sigma_state: Dict,
+#         features: jnp.ndarray,  # Shape: (..., k)
+#         mask: jnp.ndarray,      # Shape: (...) matching the batch dimensions of features
+#     ):
+#         """
+#         Pure summation covariance update.
+#         Takes a mask that corresponds to what included feature vectors are valid for the update.
+#         """
+#         S = sigma_state['S']
+#         N = sigma_state.get('N', 0)
+        
+#         S_update = jnp.einsum("...i, ...j -> ...ij", features, features)
+        
+#         # 2. Apply Mask
+#         # Zeros out the outer products corresponding to invalid/padding states
+#         S_masked = S_update * mask[..., None, None]
+        
+#         # 3. PURE SUMMATION (No division!)
+#         batch_axes = tuple(range(mask.ndim))
+#         S_batch_sum = jnp.sum(S_masked, axis=batch_axes)
+        
+#         # 4. Update & Force Symmetry
+#         S_new = S + S_batch_sum
+#         S_new = 0.5 * (S_new + S_new.T)
+
+#         total_valid = jnp.sum(mask)
+
+#         return {
+#             'S': S_new, 
+#         }
+
+#     # --- 1. Update EMA of Gram Matrix ---
+#     phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
+#     next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
+#     terminal_phi = next_phi * traj_batch.done[..., None] 
+#     # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
+#     all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
+
+#     # Update Sigma (include the next state when it ends the episode.)
+#     mask_sigma = jnp.concatenate([jnp.ones_like(traj_batch.done), traj_batch.done], axis=0)
+    
+#     sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
+    
+#     return sigma_state
 
 def update_cov(traj_batch, sigma_state, phi, next_phi):
     "Updates traj_batch and sigma_state based on feature visitations."
@@ -644,8 +692,7 @@ def update_cov(traj_batch, sigma_state, phi, next_phi):
         }
 
     # --- 1. Update EMA of Gram Matrix ---
-    phi = get_features_fn(traj_batch.obs)          # inference of RND net for features:
-    next_phi = get_features_fn(traj_batch.next_obs)  # Contains s_T (Terminal)
+
     terminal_phi = next_phi * traj_batch.done[..., None] 
     # Sigma is updated based on only states visted as s, plus terminal states (Which are only ever visited as s')
     all_phi_sigma = jnp.concatenate([phi, terminal_phi], axis=0)
@@ -656,7 +703,6 @@ def update_cov(traj_batch, sigma_state, phi, next_phi):
     sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
     
     return sigma_state
-
 
 def get_scale_free_bonus(S_inv, features):
     """bonus = sqrt(x^T Σ^{-1} x)"""

@@ -136,9 +136,8 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
-                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 next_val = network.apply(train_state.params, target_next_obs, method=network.value)
 
                 intrinsic_reward = jnp.zeros_like(reward)
@@ -190,15 +189,21 @@ def make_train(config):
             v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
             
             # --- Absorbing overwrite ---
-            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
+            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
+            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
 
-            # --- Final traj_batch update for GAE ---
+            # # --- Final traj_batch update for GAE ---
+            # traj_batch = traj_batch._replace(
+            #     i_value=v_i, 
+            #     intrinsic_reward=rho, 
+            #     next_i_val=fixed_next_i_val
+            # )
+
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 
-                next_i_val=fixed_next_i_val
+                next_i_val=next_v_i
             )
 
             gaes, targets = helpers.calculate_gae(

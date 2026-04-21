@@ -100,9 +100,8 @@ def make_train(config):
                     rng_step, env_state, action, env_params
                 )
                 
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
-                target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 _, next_val, next_i_val = network.apply(train_state.params, target_next_obs)
 
                 # Record
@@ -151,7 +150,6 @@ def make_train(config):
                 λi=config["GAE_LAMBDA_i"]
             )
             gae_e, gae_i = gaes
-            
             rho_scale = beta_sch(idx) # triangle schedule
             # Total Advantage = Adv_Extrinsic + (Beta * Adv_Intrinsic)
             advantages = gae_e + (rho_scale * gae_i) # scale the gae.

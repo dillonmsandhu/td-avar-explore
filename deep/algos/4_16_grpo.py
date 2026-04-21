@@ -96,12 +96,12 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
                 dummy = jnp.zeros_like(reward)
 
                 transition = Transition(
-                    done, is_goal, action, value, dummy, dummy, dummy, reward, dummy, log_prob, last_obs, true_next_obs, info
+                    done, is_goal, action, value, dummy, dummy, dummy, reward, dummy, log_prob, last_obs, target_next_obs, info
                 )
                 return (train_state, env_state, obsv, rng), transition
 
@@ -109,9 +109,9 @@ def make_train(config):
             (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Feature Extraction for Current Batch
-            phi = get_phi(traj_batch.obs)
-            next_phi = get_phi(traj_batch.next_obs)
-            terminals = jnp.where(~is_continuing, traj_batch.done, 0)
+            phi = batch_get_features(traj_batch.obs)
+            next_phi = batch_get_features(traj_batch.next_obs)
+            terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
 
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
@@ -120,17 +120,18 @@ def make_train(config):
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
 
             rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
+            traj_batch = traj_batch._replace(intrinsic_reward = rho) # GRPO uses pure rho.
             
             # --- Absorbing overwrite ---
-            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, 0.0)
+            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
+            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, 0.0)
 
-            # --- Final traj_batch update for GAE ---
-            traj_batch = traj_batch._replace(
-                intrinsic_reward=rho, 
-                next_i_val=fixed_next_i_val
-            )
+            # # --- Final traj_batch update for GAE ---
+            # traj_batch = traj_batch._replace(
+            #     intrinsic_reward=rho, 
+            #     next_i_val=fixed_next_i_val
+            # )
 
             # --- ADVANTAGE CALCULATION ---
             gaes, targets = helpers.calculate_gae(

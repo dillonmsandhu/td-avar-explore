@@ -388,17 +388,27 @@ class DynamicFeatureBufferManager(BaseBufferManager[DynamicBufferState]):
         size = buffer_state.size
         
         # Reshape for chunked network inference
-        obs_chunks = buffer_state.observations.reshape((self.num_chunks, self.chunk_size) + self.obs_shape)
-        next_obs_chunks = buffer_state.next_observations.reshape((self.num_chunks, self.chunk_size) + self.obs_shape)
-        terminals_chunks = buffer_state.terminals.reshape((self.num_chunks, self.chunk_size, 1))
+        # Use a small chunk size for the CNN to prevent OOM
+        net_chunk = self.config.get("MINIBATCH_SIZE", 1024) 
+        n_net_chunks = self.padded_capacity // net_chunk
         
-        # Chunked network inference to get fresh features
-        def _compute_chunk_features(carry, obs_chunk):
+        # Reshape observations into tiny safe batches
+        obs_net_chunks = buffer_state.observations.reshape((n_net_chunks, net_chunk) + self.obs_shape)
+        next_obs_net_chunks = buffer_state.next_observations.reshape((n_net_chunks, net_chunk) + self.obs_shape)
+        
+        def _compute_net_features(carry, obs_chunk):
             return None, get_phi_lstd(obs_chunk)
 
-        _, phi_chunks = jax.lax.scan(_compute_chunk_features, None, obs_chunks)
-        _, next_phi_chunks = jax.lax.scan(_compute_chunk_features, None, next_obs_chunks)
-        k_val = phi_chunks.shape[-1]
+        _, phi_flat = jax.lax.scan(_compute_net_features, None, obs_net_chunks)
+        _, next_phi_flat = jax.lax.scan(_compute_net_features, None, next_obs_net_chunks)
+        
+        k_val = phi_flat.shape[-1]
+        
+        # Reshape BACK to LSTD chunks
+        phi_chunks = phi_flat.reshape(self.num_chunks, self.chunk_size, k_val)
+        next_phi_chunks = next_phi_flat.reshape(self.num_chunks, self.chunk_size, k_val)
+        terminals_chunks = buffer_state.terminals.reshape((self.num_chunks, self.chunk_size, 1))
+        # --------------------------------------------
         
         # LSTD matrices
         Z_chunks = phi_chunks

@@ -8,10 +8,11 @@ from envs.deepsea_v import DeepSeaExactValue
 from envs.long_chain import LongChainExactValue
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = '4_16_net_no_abs'
+SAVE_DIR = '4_16_net_no_abs_override'
 
 class Transition(NamedTuple):
     done: jnp.ndarray
+    goal: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray 
     next_value: jnp.ndarray       # Added for absorbing GAE
@@ -25,8 +26,11 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
-    is_episodic = config.get('EPISODIC', True)
+    # Episodic / Continuing / Absorbing
+    is_episodic = config.get("EPISODIC", True)
+    is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
@@ -34,7 +38,6 @@ def make_train(config):
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
     k = config.get('RND_FEATURES', 128)
-    alpha_fn = lambda t: jnp.maximum(config.get('MIN_COV_LR', 1/10), 1/t)
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
     evaluator = helpers.initialize_evaluator(config)
     
@@ -43,11 +46,6 @@ def make_train(config):
         beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
-
-    def get_scale_free_bonus(S_inv, features):
-        """bonus = x^T Σ^{-1} X, where Σ^{-1} is the empriical second moment inverse."""
-        bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
-        return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
@@ -83,11 +81,11 @@ def make_train(config):
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             
-            train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx = runner_state
+            train_state, sigma_state, env_state, last_obs, rng, idx = runner_state
             
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng = env_scan_state
+                train_state, env_state, last_obs, rng = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -102,71 +100,52 @@ def make_train(config):
                     rng_step, env_state, action, env_params
                 )
                 
-                # GET NEXT VALUES FOR UNIFIED GAE
-                true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
-                _, next_val, next_i_val = network.apply(train_state.params, true_next_obs)
+                is_goal = info['is_goal']
+                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
+                _, next_val, next_i_val = network.apply(train_state.params, target_next_obs)
 
                 # Record
                 intrinsic_reward = jnp.zeros_like(reward)  # placeholder, will be filled later
                 transition = Transition(
-                    done,
-                    action,
-                    value,
-                    next_val,    # Passed cleanly
-                    i_val,
-                    next_i_val,  # Passed cleanly
-                    reward,
-                    intrinsic_reward,
-                    log_prob,
-                    last_obs,
-                    true_next_obs,
-                    info,
+                    done, is_goal, action, value, next_val,i_val, next_i_val, 
+                    reward, intrinsic_reward, log_prob, last_obs, target_next_obs, info,
                 )
 
-                env_scan_state = (train_state, rnd_state, env_state, obsv, rng)
+                env_scan_state = (train_state, env_state, obsv, rng)
                 return env_scan_state, transition
             
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
-            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(
+            env_step_state = (train_state, env_state, last_obs, rng)
+            (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
             
+            phi = batch_get_features(traj_batch.obs)
+            next_phi = batch_get_features(traj_batch.next_obs)
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
-            
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) 
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k))
-            
-            int_rew_from_features = lambda phi: get_scale_free_bonus(Sigma_inv, phi)
 
-            rho = int_rew_from_features(batch_get_features(traj_batch.next_obs))
+            rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
             traj_batch = traj_batch._replace(intrinsic_reward=rho)
             
             # --- THE ABSORBING TERMINAL FIX ---
             # The value network never trains on the exact terminal state, making its prediction garbage.
             # In the absorbing formulation, we mathematically know the infinite horizon value of the 
             # terminal state is exactly its intrinsic reward / (1 - gamma_i).
-            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            # fixed_next_i_val = jnp.where(
-            #     jnp.logical_and(traj_batch.done, is_absorbing), 
-            #     exact_terminal_i_val, 
-            #     traj_batch.next_i_val
-            # )
-            # Update the batch with the unscaled rho and the fixed terminal values
-            traj_batch = traj_batch._replace(
-                intrinsic_reward=rho,
-                # next_i_val=fixed_next_i_val
-            )            
-
+            # --- Absorbing overwrite ---
+            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
+            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, traj_batch.next_i_val)
+            # traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val)
             # -------------------------------------------------------------
             # --------- ADVANTAGE CALCULATION (Unified Absorbing) ---------
             gaes, targets = helpers.calculate_gae(
                 traj_batch, 
                 config["GAMMA"], 
                 config["GAE_LAMBDA"], 
-                is_episodic=is_episodic, 
-                is_absorbing=is_absorbing, 
+                is_continuing, 
                 γi=config["GAMMA_i"], 
                 λi=config["GAE_LAMBDA_i"]
             )
@@ -202,14 +181,12 @@ def make_train(config):
             )
             train_state, _, _, _, rng = update_state
 
-
             # -------------------------------
             # --------- Update metrics ------
 
             # The value net is trained on an unscaled rho
             # but implicitly the value prediction is scaled by rho
             # this also makes it comperable to the oracle 
-
             scaled_reward = traj_batch.intrinsic_reward * rho_scale
             scaled_i_val = traj_batch.i_value * rho_scale
             
@@ -243,7 +220,7 @@ def make_train(config):
             else:
                 def int_rew_from_state(s):
                     phi = batch_get_features(s)
-                    rho = int_rew_from_features(phi) * rho_scale
+                    rho = helpers.get_scale_free_bonus(Sigma_inv, phi) * rho_scale
                     return rho
                 
                 metric = helpers.add_values_to_metric(config, 
@@ -255,12 +232,12 @@ def make_train(config):
                                                     train_state, 
                                                     traj_batch)
                 
-            runner_state = (train_state, sigma_state, rnd_state, env_state, last_obs, rng, idx+1)
+            runner_state = (train_state, sigma_state, env_state, last_obs, rng, idx+1)
             return runner_state, metric
             # end update_step
 
         rng, _rng = jax.random.split(rng)
-        init_runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 0)
+        init_runner_state = (train_state, initial_sigma_state, env_state, obsv, _rng, 1)
         runner_state, metrics = jax.lax.scan(
             _update_step, init_runner_state, None, config["NUM_UPDATES"]
         )
