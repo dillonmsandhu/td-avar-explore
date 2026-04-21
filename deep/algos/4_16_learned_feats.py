@@ -209,8 +209,8 @@ def make_train(config):
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
     config['CHUNK_SIZE'] =  100_000 + batch_size # chunking for LSTD solver
     buffer_manager = DynamicFeatureBufferManager(
-        config, k_lstd, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], obs_shape
-        ) 
+        config, k_base, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], obs_shape
+    )
     config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
     config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
     
