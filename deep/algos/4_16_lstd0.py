@@ -160,7 +160,7 @@ def make_train(config):
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)            
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)     
 
             # --- 1. UPDATE EXTENDED BUFFER ---
             buffer_batch = FeatureBufferState(phi, next_phi, terminals, absorb_masks, size=jnp.array(batch_size))

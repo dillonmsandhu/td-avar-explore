@@ -109,12 +109,13 @@ def make_train(config):
             (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Feature Extraction for Current Batch
+            phi = get_phi(traj_batch.obs)
             next_phi = get_phi(traj_batch.next_obs)
             terminals = jnp.where(~is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
 
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
 

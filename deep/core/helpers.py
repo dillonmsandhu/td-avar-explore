@@ -608,7 +608,7 @@ def initialize_evaluator(config):
     return evaluator 
 
 
-def update_cov(traj_batch, sigma_state, get_features_fn):
+def update_cov(traj_batch, sigma_state, phi, next_phi):
     "Updates traj_batch and sigma_state based on feature visitations."
 
     def cov_update_masked(
@@ -656,6 +656,7 @@ def update_cov(traj_batch, sigma_state, get_features_fn):
     sigma_state = cov_update_masked(sigma_state, all_phi_sigma, mask_sigma)
     
     return sigma_state
+
 
 def get_scale_free_bonus(S_inv, features):
     """bonus = sqrt(x^T Σ^{-1} x)"""

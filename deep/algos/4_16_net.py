@@ -120,11 +120,11 @@ def make_train(config):
                 _env_step, env_step_state , None, config["NUM_STEPS"]
             )
             
+            phi = batch_get_features(traj_batch.obs)
             next_phi = batch_get_features(traj_batch.next_obs)
             # -------------------------------------------------------------
             # --------- Update Sigma and compute intrinsic reward ---------
-            
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) 
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k))
 

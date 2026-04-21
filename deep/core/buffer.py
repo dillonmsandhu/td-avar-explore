@@ -350,13 +350,14 @@ class DynamicFeatureBufferManager(BaseBufferManager[DynamicBufferState]):
         super().__init__(config, k_lstd, buffer_capacity, extended_capacity, chunk_size)
         self.obs_shape = obs_shape
         self.chunk_size = chunk_size
+        self.k_base = k_lstd # for this class, features are stored to re-compute reward. LSTD features are computed online
 
     def init_state(self) -> DynamicBufferState:
         return DynamicBufferState(
             observations=jnp.zeros((self.padded_capacity,) + self.obs_shape, dtype=jnp.float32),
             next_observations=jnp.zeros((self.padded_capacity,) + self.obs_shape, dtype=jnp.float32),
-            features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
-            next_features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
+            features=jnp.zeros((self.padded_capacity, self.k_base), dtype=jnp.float32),
+            next_features=jnp.zeros((self.padded_capacity, self.k_base), dtype=jnp.float32),
             terminals=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
             absorb_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
             size=jnp.array(0, dtype=jnp.int32)
@@ -397,6 +398,7 @@ class DynamicFeatureBufferManager(BaseBufferManager[DynamicBufferState]):
 
         _, phi_chunks = jax.lax.scan(_compute_chunk_features, None, obs_chunks)
         _, next_phi_chunks = jax.lax.scan(_compute_chunk_features, None, next_obs_chunks)
+        k_val = phi_chunks.shape[-1]
         
         # LSTD matrices
         Z_chunks = phi_chunks
@@ -426,9 +428,9 @@ class DynamicFeatureBufferManager(BaseBufferManager[DynamicBufferState]):
                 A_c = jnp.einsum("ni, nj -> ij", z_c, x_c * m_c[:, None])
                 return carry_A + A_c, None
                 
-            A_curr, _ = jax.lax.scan(A_chunk, jnp.zeros((self.k_lstd, self.k_lstd)), (Z_chunks, X_chunks, mask_chunks))
-            A_curr += jnp.eye(self.k_lstd) * self.config.get("LSTD_L2_REG", 1e-3) * size
-            A_inv_curr = jnp.linalg.pinv(A_curr, rtol=1e-8)
+            A_curr, _ = jax.lax.scan(A_chunk, jnp.zeros((k_val, k_val)), (Z_chunks, X_chunks, mask_chunks))
+            A_curr += jnp.eye(k_val) * self.config.get("LSTD_L2_REG", 1e-3) * size
+            A_inv_curr = jnp.linalg.solve(A_curr, jnp.eye(k_val)) 
             
             # 2. Chunked Score computation
             def score_chunk(carry_unused, chunk_data):

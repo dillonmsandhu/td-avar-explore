@@ -154,7 +154,7 @@ def make_train(config):
             traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)            
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)          
 
             # --- 1. UPDATE EXTENDED BUFFER ---
             buffer_batch = LSTDBufferState(traces, phi, next_phi, terminals, absorb_masks, size=jnp.array(batch_size))

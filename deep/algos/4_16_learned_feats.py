@@ -395,7 +395,8 @@ def make_train(config):
             phi_base = batch_get_features(traj_batch.obs)
             next_phi_base = batch_get_features(traj_batch.next_obs)
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, batch_get_features)
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi_base, next_phi_base)            
+
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_base))
             
