@@ -331,3 +331,156 @@ class LSPIFeatureBufferManager(BaseBufferManager[LSPIBufferState]):
         new_size = jnp.minimum(size, self.buffer_capacity)
 
         return compacted_state._replace(size=new_size)
+
+# Dynamic Buffer
+
+class DynamicBufferState(NamedTuple):
+    observations: jnp.ndarray
+    next_observations: jnp.ndarray
+    features: jnp.ndarray          
+    next_features: jnp.ndarray
+    terminals: jnp.ndarray
+    absorb_masks: jnp.ndarray
+    size: jnp.ndarray
+
+class DynamicFeatureBufferManager(BaseBufferManager[DynamicBufferState]):
+    """Buffer manager that stores observations for on-demand feature extraction."""
+    
+    def __init__(self, config, k_lstd, buffer_capacity, extended_capacity, chunk_size, obs_shape):
+        super().__init__(config, k_lstd, buffer_capacity, extended_capacity, chunk_size)
+        self.obs_shape = obs_shape
+        self.chunk_size = chunk_size
+
+    def init_state(self) -> DynamicBufferState:
+        return DynamicBufferState(
+            observations=jnp.zeros((self.padded_capacity,) + self.obs_shape, dtype=jnp.float32),
+            next_observations=jnp.zeros((self.padded_capacity,) + self.obs_shape, dtype=jnp.float32),
+            features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
+            next_features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
+            terminals=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
+            absorb_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
+            size=jnp.array(0, dtype=jnp.int32)
+        )
+
+    def update_buffer(self, buffer_state: BufferStateT, new_batch: BufferStateT) -> BufferStateT:
+        """Generically appends a new batch of data using jax.tree.map."""
+        start_idx = buffer_state.size
+        
+        def _update_single_array(buffer_arr, new_arr):
+            if buffer_arr.ndim == 0: 
+                return buffer_arr
+            
+            # Dynamically reshape the incoming array to (batch_size, *remaining_dims)
+            target_shape = (self.batch_size,) + buffer_arr.shape[1:]
+            new_arr = new_arr.reshape(target_shape).astype(jnp.float32)
+            
+            # Create a tuple of start indices like (start_idx, 0, 0, ...) matching the array's rank
+            start_indices = (start_idx,) + (0,) * (buffer_arr.ndim - 1)
+            
+            return jax.lax.dynamic_update_slice(buffer_arr, new_arr, start_indices)
+
+        updated_state = jax.tree.map(_update_single_array, buffer_state, new_batch)
+        return updated_state._replace(size=start_idx + self.batch_size)
+
+    def evict_buffer(self, buffer_state: DynamicBufferState, get_phi_lstd, rng) -> DynamicBufferState:
+        """Computes IV Trace Leverage scores and evicts the lowest-scoring points iteratively."""
+        size = buffer_state.size
+        
+        # Reshape for chunked network inference
+        obs_chunks = buffer_state.observations.reshape((self.num_chunks, self.chunk_size) + self.obs_shape)
+        next_obs_chunks = buffer_state.next_observations.reshape((self.num_chunks, self.chunk_size) + self.obs_shape)
+        terminals_chunks = buffer_state.terminals.reshape((self.num_chunks, self.chunk_size, 1))
+        
+        # Chunked network inference to get fresh features
+        def _compute_chunk_features(carry, obs_chunk):
+            return None, get_phi_lstd(obs_chunk)
+
+        _, phi_chunks = jax.lax.scan(_compute_chunk_features, None, obs_chunks)
+        _, next_phi_chunks = jax.lax.scan(_compute_chunk_features, None, next_obs_chunks)
+        
+        # LSTD matrices
+        Z_chunks = phi_chunks
+        X_chunks = phi_chunks - self.config["GAMMA_i"] * (1 - terminals_chunks) * next_phi_chunks
+        
+        # Dynamic check: Are we actually full yet?
+        buffer_is_full = size > self.buffer_capacity
+        
+        # --- PHASE 1: FIFO Masking ---
+        indices = jnp.arange(self.padded_capacity)
+        
+        # Valid data only goes up to the current size
+        valid_mask = indices < size
+        
+        # If the buffer is full, mark the oldest 'static_fifo_drops' as False to kill them immediately
+        fifo_invalid_mask = jnp.logical_and(buffer_is_full, indices < self.static_fifo_drops)
+        initial_mask = jnp.logical_and(valid_mask, jnp.logical_not(fifo_invalid_mask))
+        
+        def cut_step(carry, step_idx):
+            mask_curr = carry
+            mask_chunks = mask_curr.reshape(self.num_chunks, self.chunk_size)
+            
+            # 1. Chunked A_curr computation (Avoids materializing massive valid_Z)
+            def A_chunk(carry_A, chunk_data):
+                z_c, x_c, m_c = chunk_data
+                # Multiply mask into one operand, saving ~1.6GB of VRAM
+                A_c = jnp.einsum("ni, nj -> ij", z_c, x_c * m_c[:, None])
+                return carry_A + A_c, None
+                
+            A_curr, _ = jax.lax.scan(A_chunk, jnp.zeros((self.k_lstd, self.k_lstd)), (Z_chunks, X_chunks, mask_chunks))
+            A_curr += jnp.eye(self.k_lstd) * self.config.get("LSTD_L2_REG", 1e-3) * size
+            A_inv_curr = jnp.linalg.pinv(A_curr, rtol=1e-8)
+            
+            # 2. Chunked Score computation
+            def score_chunk(carry_unused, chunk_data):
+                z_c, x_c = chunk_data
+                u_c = z_c @ A_inv_curr.T
+                v_c = x_c @ A_inv_curr
+                w_c = v_c @ A_inv_curr.T
+                
+                c = 1.0 - jnp.sum(x_c * u_c, axis=-1)
+                c = jnp.where(jnp.abs(c) < 1e-5, 1e-5, c)
+                
+                u_norm = jnp.sum(u_c * u_c, axis=-1)
+                v_norm = jnp.sum(v_c * v_c, axis=-1)
+                cross = jnp.sum(u_c * w_c, axis=-1)
+                
+                s_c = (2.0 * cross / c) + (u_norm * v_norm) / (c * c)
+                return None, s_c
+                
+            _, chunked_scores = jax.lax.scan(score_chunk, None, (Z_chunks, X_chunks))
+            scores = chunked_scores.flatten()
+            
+            # Stochastic Sampling (Gumbel-Max Trick)
+            drop_logits = -scores / self.config.get("STOCHASTIC_TEMP", 1.0)
+            drop_logits = jnp.where(mask_curr, drop_logits, -jnp.inf)
+            
+            rng_key = jax.random.fold_in(rng, step_idx) 
+            gumbel_noise = jax.random.gumbel(rng_key, drop_logits.shape)
+            noisy_logits = drop_logits + gumbel_noise
+            
+            _, drop_indices = jax.lax.top_k(noisy_logits, self.static_drops_per_cut)
+            
+            mask_next_candidate = mask_curr.at[drop_indices].set(False)
+            mask_next = jnp.where(buffer_is_full, mask_next_candidate, mask_curr)
+            
+            return mask_next, None
+
+        # Run the C-cut loop (statically defined from BaseBufferManager)
+        final_mask, _ = jax.lax.scan(cut_step, initial_mask, jnp.arange(self.num_cuts))
+        
+        # --- PHASE 3: Generic Compaction & Remainder Trimming ---
+        # selection_scores ensures surviving True masks = ~1.0, False masks = ~0.0.
+        # The tie-breaker (+ indices) prefers keeping NEWER items when resolving remainders.
+        selection_scores = jnp.where(final_mask, 1.0, 0.0) + (indices.astype(jnp.float32) * 1e-7)
+        _, keep_indices = jax.lax.top_k(selection_scores, self.buffer_capacity)
+
+        def _compact_array(arr):
+            if arr.ndim == 0: # Skips 'size' since it's a scalar
+                return arr
+            return jnp.zeros_like(arr).at[:self.buffer_capacity].set(arr[keep_indices])
+
+        # Automatically compacts observations, next_observations, features, etc.
+        compacted_state = jax.tree.map(_compact_array, buffer_state)
+        new_size = jnp.minimum(size, self.buffer_capacity)
+
+        return compacted_state._replace(size=new_size)

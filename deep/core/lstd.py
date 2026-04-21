@@ -9,8 +9,8 @@ def solve_lstd_0_from_buffer(buffer_state: FeatureBufferState, Sigma_inv, lstd_s
     """Solves LSTD over the entire extended buffer using a memory-safe chunked scan."""
     N = buffer_state.size
     # Reshape buffer into chunks
-    num_chunks = config['CHUNK_SIZE']
-    chunk_size = config['NUM_CHUNKS']
+    num_chunks = config['NUM_CHUNKS']
+    chunk_size = config['CHUNK_SIZE']
     padded_capacity = config['PADDED_CAPACITY']
 
     chunked_phi = buffer_state.features.reshape(num_chunks, chunk_size, -1)
@@ -65,8 +65,8 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
     """Solves LSTD over the entire extended buffer using a memory-safe chunked scan."""
     N = buffer_state.size
     # Reshape buffer into chunks
-    num_chunks = config['CHUNK_SIZE']
-    chunk_size = config['NUM_CHUNKS']
+    num_chunks = config['NUM_CHUNKS']
+    chunk_size = config['CHUNK_SIZE']
     padded_capacity = config['PADDED_CAPACITY']
 
     chunked_phi = buffer_state.features.reshape(num_chunks, chunk_size, -1)
@@ -142,39 +142,39 @@ def solve_lspi_buffer(buffer_state: FeatureBufferState, Sigma_inv, lstd_state, c
     def lspi_step(w_current, _):
         def process_chunk(carry, chunk_data):
             A_acc, b_acc = carry
-            c_phi_sa, c_next_phi_s, c_term, c_absorb, c_mask = chunk_data
+            phi_sa, next_phi_s, term, absorb, mask = chunk_data
             
-            next_rho = get_scale_free_bonus(Sigma_inv, c_next_phi_s)
+            next_rho = get_scale_free_bonus(Sigma_inv, next_phi_s)
             
             # 1. Greedy Policy Evaluation
             w_reshaped = w_current.reshape(n_actions, k_lstd)
-            Q_next = jnp.einsum("...k, ak -> ...a", c_next_phi_s, w_reshaped)
+            Q_next = jnp.einsum("...k, ak -> ...a", next_phi_s, w_reshaped)
             greedy_actions = jnp.argmax(Q_next, axis=-1)
             Pi_greedy = jax.nn.one_hot(greedy_actions, n_actions)
             
-            PΠφ = expected_next_sa_features(c_next_phi_s, Pi_greedy, dim_kA )
+            PΠφ = expected_next_sa_features(next_phi_s, Pi_greedy, dim_kA )
             
             # 2. Construction of A
-            c_traces_masked = c_phi_sa * c_mask
+            traces_masked = phi_sa * mask
             
-            S = jnp.einsum("ni, nj -> ij", c_traces_masked, c_phi_sa)
+            S = jnp.einsum("ni, nj -> ij", traces_masked, phi_sa)
             
             cut = term * (1.0 - absorb)
             cut_factor = 1.0 - cut
 
             γPΠφ = gamma_i * cut_factor * PΠφ
-            Z_γPΠΦ = jnp.einsum("ni, nj -> ij", c_traces_masked, γPΠφ)
+            Z_γPΠΦ = jnp.einsum("ni, nj -> ij", traces_masked, γPΠφ)
             A_std = S - Z_γPΠΦ
             
-            abs_features = PΠφ * c_absorb
-            abs_traces = c_phi_sa * c_absorb
-            A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces * c_mask, abs_features)
+            abs_features = PΠφ * absorb
+            abs_traces = phi_sa * absorb
+            A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces * mask, abs_features)
             
             A_batch = A_std + A_abs
             
             # 3. Construction of b
-            b_std = jnp.einsum("ni, n -> i", c_traces_masked, next_rho)
-            b_abs = jnp.einsum("ni, n -> i", abs_traces * c_mask, next_rho)
+            b_std = jnp.einsum("ni, n -> i", traces_masked, next_rho)
+            b_abs = jnp.einsum("ni, n -> i", abs_traces * mask, next_rho)
             b_batch = b_std + b_abs
             
             return (A_acc + A_batch, b_acc + b_batch), None

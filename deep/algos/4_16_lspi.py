@@ -27,7 +27,7 @@ def make_train(config):
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
+    is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
@@ -131,7 +131,7 @@ def make_train(config):
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng = env_scan_state
+                train_state, env_state, last_obs, rng = env_scan_state
 
                 rng, _rng = jax.random.split(rng)
                 pi, value = network.apply(train_state.params, last_obs)
@@ -146,7 +146,7 @@ def make_train(config):
                 true_next_obs = info["real_next_obs"].reshape(last_obs.shape)
                 is_goal = info['is_goal']
                 target_next_obs = jax.lax.select(is_continuing, obsv, true_next_obs)
-                next_val = network.apply(train_state.params, target_next_obss, method=network.value)
+                next_val = network.apply(train_state.params, target_next_obs, method=network.value)
 
                 intrinsic_reward = jnp.zeros_like(reward)
                 i_val = jnp.zeros_like(reward)
@@ -155,16 +155,16 @@ def make_train(config):
                 transition = Transition(
                     done, is_goal, action, value, next_val, i_val, next_i_val, reward, intrinsic_reward, log_prob, last_obs, target_next_obs, info
                 )
-                return (train_state, rnd_state, env_state, obsv, rng), transition
+                return (train_state, env_state, obsv, rng), transition
 
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
-            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            env_step_state = (train_state, env_state, last_obs, rng)
+            (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Post-Process batch
             phi_s = batch_get_features(traj_batch.obs)
             next_phi_s = batch_get_features(traj_batch.next_obs)
             phi_sa = helpers.expand_to_sa_features(phi_s, n_actions, traj_batch.action, dim_kA)
-            terminals = jnp.where(~is_continuing, traj_batch.done, 0)
+            terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
     
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---

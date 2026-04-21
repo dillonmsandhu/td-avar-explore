@@ -25,10 +25,9 @@ class Transition(NamedTuple):
 def make_train(config):
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
+    is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
-    
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
@@ -85,7 +84,7 @@ def make_train(config):
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng = env_scan_state
+                train_state, env_state, last_obs, rng = env_scan_state
 
                 rng, _rng = jax.random.split(rng)
                 pi, value = network.apply(train_state.params, last_obs)
@@ -104,10 +103,10 @@ def make_train(config):
                 transition = Transition(
                     done, is_goal, action, value, dummy, dummy, dummy, reward, dummy, log_prob, last_obs, true_next_obs, info
                 )
-                return (train_state, rnd_state, env_state, obsv, rng), transition
+                return (train_state, env_state, obsv, rng), transition
 
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
-            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            env_step_state = (train_state, env_state, last_obs, rng)
+            (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Feature Extraction for Current Batch
             next_phi = get_phi(traj_batch.next_obs)
@@ -163,18 +162,22 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    (total_loss, _), grads = grad_fn(
+                    
+                    (total_loss, (value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    
+                    return train_state, (total_loss, value_loss, loss_actor, entropy)
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
-                return (train_state, traj_batch, advantages, targets, rng), total_loss
+                
+                # loss_info is now a tuple of 4 arrays: (total_loss, value_loss, loss_actor, entropy)
+                train_state, loss_info = jax.lax.scan(_update_minbatch, train_state, minibatches)
+                return (train_state, traj_batch, advantages, targets, rng), loss_info
 
             initial_update_state = (train_state, traj_batch, advantages, extrinsic_target, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
@@ -189,8 +192,10 @@ def make_train(config):
             # Shared Metrics
             metric.update(
                 {
-                    "ppo_loss": loss_info[0],
-                    "rnd_loss": loss_info[1],
+                    "total_loss": loss_info[0].mean(),
+                    "value_loss": loss_info[1].mean(),
+                    "actor_loss": loss_info[2].mean(),
+                    "entropy": loss_info[3].mean(),
                     "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
                     "bonus_mean": gaes[1].mean(),
                     "bonus_std": gaes[1].std(),

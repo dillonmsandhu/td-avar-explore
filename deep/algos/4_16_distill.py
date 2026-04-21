@@ -27,7 +27,7 @@ def make_train(config):
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
+    is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -140,10 +140,10 @@ def make_train(config):
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng = env_scan_state
+                train_state, env_state, last_obs, rng = env_scan_state
 
                 rng, _rng = jax.random.split(rng)
-                pi, value = network.apply(train_state.params, last_obs)
+                pi, value, i_val = network.apply(train_state.params, last_obs)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
@@ -158,21 +158,19 @@ def make_train(config):
                 _, next_val, next_i_val = network.apply(train_state.params, target_next_obs)
 
                 intrinsic_reward = jnp.zeros_like(reward)
-                i_val = jnp.zeros_like(reward)
-                next_i_val = jnp.zeros_like(reward)
 
                 transition = Transition(
                     done, is_goal, action, value, next_val, i_val, next_i_val, reward, intrinsic_reward, log_prob, last_obs, target_next_obs, info
                 )
-                return (train_state, rnd_state, env_state, obsv, rng), transition
+                return (train_state, env_state, obsv, rng), transition
 
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
-            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            env_step_state = (train_state, env_state, last_obs, rng)
+            (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Post-Process batch
             phi = batch_get_features(traj_batch.obs)
             next_phi = batch_get_features(traj_batch.next_obs)
-            terminals = jnp.where(~is_continuing, traj_batch.done, 0)
+            terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
             traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
             

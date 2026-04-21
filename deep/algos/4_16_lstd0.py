@@ -151,7 +151,7 @@ def make_train(config):
             # Post-Process batch
             phi = batch_get_features(traj_batch.obs)
             next_phi = batch_get_features(traj_batch.next_obs)
-            terminals = jnp.where(~is_continuing, traj_batch.done, 0)
+            terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---

@@ -38,8 +38,8 @@ shared = {
     "NORMALIZE_FEATURES": True,
     "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
     "NORMALIZE_REWARDS": False,
-    "EPISODIC": False,
-    "ABSORBING_TERMINAL_STATE": False, 
+    "EPISODIC": True,
+    "ABSORBING_TERMINAL_STATE": True, 
     "BONUS_SCALE": 2.0,
     "SCHEDULE_BETA": True,
     "LSTD_L2_REG": 1e-3,
@@ -252,6 +252,11 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         "envs": ["FourRoomsCustom-v0"]
     }
 
+    FINAL_EXACT["four_rooms_29_exact"] = {
+        "config_dict": shared_base | visual_base | {"ENV_SIZE": 29, **fe_overrides}, 
+        "envs": ["FourRoomsCustom-v0"]
+    }
+
     # 150-Chain Ablation: Tabular vs MLP
     FINAL_EXACT["chain_tabular_150_continuing"] = {
         "config_dict": shared_base | chain_base | {
@@ -278,7 +283,6 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         },
         "envs": ["Chain"]
     }
-
 
     FINAL_EXACT["chain_tabular_50_cont"] = {
         "config_dict": shared_base | chain_base | {
