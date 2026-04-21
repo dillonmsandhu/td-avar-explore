@@ -287,7 +287,7 @@ def make_train(config):
         initial_lstd_state = {
                     "w": jnp.zeros(k_lstd), 
                     "cond_number": 0.0
-                }
+        }
             
         initial_buffer_state = buffer_manager.init_state()
         initial_sigma_state = {"S": jnp.eye(k_base, dtype=jnp.float64)} # global accumulation
@@ -302,28 +302,28 @@ def make_train(config):
         )
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
-        batch_get_features = jax.vmap(get_features_fn)
+        # batch_get_features = jax.vmap(get_features_fn)
 
         # For RND, fixed function.
-        # def batch_get_features(obs_full):
-        #     # Identify how many dimensions belong to the observation itself
-        #     num_obs_dims = len(obs_shape)
-        #     batch_dims = obs_full.shape[:-num_obs_dims]
+        def batch_get_features(obs_full):
+            # Identify how many dimensions belong to the observation itself
+            num_obs_dims = len(obs_shape)
+            batch_dims = obs_full.shape[:-num_obs_dims]
             
-        #     # Flatten all batch dimensions into a single flat batch
-        #     obs_flat = obs_full.reshape((-1,) + obs_shape)
-        #     total_steps = obs_flat.shape[0]
+            # Flatten all batch dimensions into a single flat batch
+            obs_flat = obs_full.reshape((-1,) + obs_shape)
+            total_steps = obs_flat.shape[0]
+            net_chunk = config["MINIBATCH_SIZE"] 
+            n_chunks = total_steps // net_chunk
+            obs_reshaped = obs_flat.reshape((n_chunks, net_chunk) + obs_shape)
             
-        #     n_chunks = total_steps // CHUNK_SIZE
-        #     obs_reshaped = obs_flat.reshape((n_chunks, CHUNK_SIZE) + obs_shape)
+            def _base_scan_step(unused, x_chunk):
+                return None, get_features_fn(x_chunk)
 
-        #     def _base_scan_step(unused, x_chunk):
-        #         return None, get_features_fn(x_chunk)
-
-        #     _, phi_out = jax.lax.scan(_base_scan_step, None, obs_reshaped)
+            _, phi_out = jax.lax.scan(_base_scan_step, None, obs_reshaped)
             
-        #     # Dynamically restore whatever batch dimensions we started with
-        #     return phi_out.reshape(batch_dims + (-1,))
+            # Dynamically restore whatever batch dimensions we started with
+            return phi_out.reshape(batch_dims + (-1,))
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
@@ -424,23 +424,23 @@ def make_train(config):
                     obs, 
                     method=feature_net.get_lstd_features
                 )
-            batch_get_phi_lstd = jax.vmap(get_phi_lstd)
+            # batch_get_phi_lstd = jax.vmap(get_phi_lstd)
             
-            # def batch_get_phi_lstd(obs_full):
-            #     num_obs_dims = len(obs_shape)
-            #     batch_dims = obs_full.shape[:-num_obs_dims]
-            #     obs_flat = obs_full.reshape((-1,) + obs_shape)
-            #     total_steps = obs_flat.shape[0]
-                
-            #     n_chunks = total_steps // CHUNK_SIZE
-            #     obs_reshaped = obs_flat.reshape((n_chunks, CHUNK_SIZE) + obs_shape)
+            def batch_get_phi_lstd(obs_full):
+                num_obs_dims = len(obs_shape)
+                batch_dims = obs_full.shape[:-num_obs_dims]
+                obs_flat = obs_full.reshape((-1,) + obs_shape)
+                total_steps = obs_flat.shape[0]
+                net_chunk = config["MINIBATCH_SIZE"] 
+                n_chunks = total_steps // net_chunk
+                obs_reshaped = obs_flat.reshape((n_chunks, net_chunk) + obs_shape)
 
-            #     def _feat_scan_step(unused, x_chunk):
-            #         return None, get_phi_lstd(x_chunk)
+                def _feat_scan_step(unused, x_chunk):
+                    return None, get_phi_lstd(x_chunk)
 
-            #     _, phi_out = jax.lax.scan(_feat_scan_step, None, obs_reshaped)
+                _, phi_out = jax.lax.scan(_feat_scan_step, None, obs_reshaped)
                 
-            #     return phi_out.reshape(batch_dims + (-1,))
+                return phi_out.reshape(batch_dims + (-1,))
             
             phi_lstd = batch_get_phi_lstd(traj_batch.obs)
             next_phi_lstd = batch_get_phi_lstd(traj_batch.next_obs)

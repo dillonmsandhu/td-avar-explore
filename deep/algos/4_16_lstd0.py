@@ -27,7 +27,7 @@ def make_train(config):
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
+    is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -56,9 +56,14 @@ def make_train(config):
     # Metrics Function
     def _compile_metrics(network, batch_get_features,  traj_batch, next_phi, loss_info, gaes, targets, rho_scale, Sigma_inv, lstd_state, train_state):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
+            total_loss_info, aux_loss_info = loss_info
+            
             metric.update({
-                "ppo_loss": loss_info[0],
-                "rnd_loss": loss_info[1],
+                "ppo_loss": total_loss_info.mean(),
+                # Make sure these indices match exactly what helpers._loss_fn returns
+                "value_loss": aux_loss_info[0].mean(), 
+                "actor_loss": aux_loss_info[1].mean(),
+                "entropy": aux_loss_info[2].mean(),
                 "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
@@ -216,11 +221,11 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    (total_loss, _), grads = grad_fn(
+                    (total_loss, aux_losses), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    return train_state, (total_loss, aux_losses)
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
