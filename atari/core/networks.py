@@ -102,7 +102,6 @@ class RND_Net(nn.Module):
     k: int = 128
     normalize: bool = False
     bias: bool = True
-    n_actions: int = 1
     
     def setup(self):
         # Base feature dimension before optional bias
@@ -235,7 +234,7 @@ class ActorCritic3Head(nn.Module):
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
-def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128, n_actions=1):
+def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128):
     """
     Initializes the RND network. 
     If state_action_features is True, returns shape (..., n_actions, k).
@@ -245,7 +244,6 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128,
         k=k, 
         normalize=normalize_features, 
         bias=bias, 
-        n_actions=n_actions
     )
     rng, init_rng = jax.random.split(rng)
     params = model.init(init_rng, jnp.zeros(obs_shape))
