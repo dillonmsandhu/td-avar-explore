@@ -6,6 +6,7 @@ from flax import struct
 from gymnax.environments import environment, spaces
 import numpy as np
 from typing import Any, Tuple, Callable, Optional
+from jax.experimental import sparse as jsparse
 PyTree = Any
 
 

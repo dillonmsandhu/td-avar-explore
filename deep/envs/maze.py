@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import struct
 from gymnax.environments import environment, spaces
+from jax.experimental import sparse as jsparse
 
 @struct.dataclass
 class EnvState(environment.EnvState):

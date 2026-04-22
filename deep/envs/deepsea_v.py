@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from typing import Any, Dict, Callable, Tuple, Optional
 PyTree = Any
+from jax.experimental import sparse as jsparse
 
 class DeepSeaExactValue:
     def __init__(self, size: int, unscaled_move_cost: float = 0.01, gamma: float = 0.99, episodic: bool = False, absorbing: bool = False, dense: bool=False):
