@@ -27,16 +27,19 @@ shared_config = {
     "NORMALIZE_FEATURES": True,
     "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
     "NORMALIZE_REWARDS": False,
-    "EPISODIC": False,
-    "ABSORBING_TERMINAL_STATE": False, 
+    "EPISODIC": True,
+    "ABSORBING_TERMINAL_STATE": True,
+    "LSTD_LAMBDA_i": 0.75 
     "BONUS_SCALE": 2.0,
     "SCHEDULE_BETA": True,
     "LSTD_L2_REG": 1e-3,
     "RND_FEATURES": 128,
+    "LSTD_FEATURES": 256,
     "NETWORK_TYPE": "mlp",
     "RND_NETWORK_TYPE": "mlp",
     "BIAS": True,
     "RB_SIZE": 100_000,
     "PERCENT_FIFO": .25,
+    "SEED": 42,
 
 }
