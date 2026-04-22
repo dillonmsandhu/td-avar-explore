@@ -52,6 +52,44 @@ class ImpalaCNN(nn.Module):
         
         return x
 
+class CNN(nn.Module):
+    out_dim: int = 256
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
+            x = x[None, ...]  # Shape becomes (1, H, W, C)
+        
+        x = jnp.transpose(x, (0, 2, 3, 1))
+        x = x / 255.0
+        
+        x = nn.Conv(
+            32,
+            kernel_size=(8, 8),
+            strides=(4, 4),
+            padding="VALID",
+            kernel_init=orthogonal(jnp.sqrt(2)),
+        )(x)
+        x = nn.relu(x)
+        x = nn.Conv(
+            64,
+            kernel_size=(4, 4),
+            strides=(2, 2),
+            padding="VALID",
+            kernel_init=orthogonal(jnp.sqrt(2)),
+        )(x)
+        x = nn.relu(x)
+        x = nn.Conv(
+            64,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="VALID",
+            kernel_init=orthogonal(jnp.sqrt(2)),
+        )(x) # 7 x 7 x 64
+        x = nn.relu(x)
+        x = x.reshape((x.shape[0], -1))
+        x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)),)(x)
+        return x
+
 
 # =====================================================
 # --------------------- RND ---------------------------
@@ -70,7 +108,7 @@ class RND_Net(nn.Module):
         # Base feature dimension before optional bias
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
-        self.torso = ImpalaCNN(self.feat_dim)
+        self.torso = CNN(self.feat_dim)
     def __call__(self, x):
         phi = self.torso(x)  
         

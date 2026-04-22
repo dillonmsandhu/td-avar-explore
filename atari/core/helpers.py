@@ -14,7 +14,12 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
-    info: jnp.ndarray
+    info: dict
+    # --- NEW FIELDS ---
+    phi: jnp.ndarray            # LSTD features
+    next_phi: jnp.ndarray 
+    rho_feat: jnp.ndarray       # Exploration/Intrinsic features
+    next_rho_feat: jnp.ndarray  
 
 def make_env(config):
     env = envpool.make(
@@ -22,7 +27,7 @@ def make_env(config):
         env_type="gym",
         num_envs=config["NUM_ENVS"],
         seed=config["SEED"],
-        num_threads=config.get('THREADS', 4),
+        num_threads=config.get("THREADS", 1),
         **config.get("ENV_KWARGS", {}),
     )
     

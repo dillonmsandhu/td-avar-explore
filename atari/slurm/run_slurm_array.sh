@@ -3,8 +3,8 @@
 #SBATCH --partition=compsci-gpu
 #SBATCH --gres=gpu:a5000:1
 #SBATCH --cpus-per-task=15
-#SBATCH --mem=16G
-#SBATCH --time=72:00:00
+#SBATCH --mem=32G
+#SBATCH --time=96:00:00
 
 # 1. Arguments
 SCRIPT=$1
@@ -14,7 +14,7 @@ NUM_SEEDS=$4
 DATE_STR=$5
 
 # 2. Corrected JAX Memory & Deterministic Settings
-export XLA_PYTHON_CLIENT_PREALLOCATE=false  # Use XLA_, not JAX_
+export XLA_PYTHON_CLIENT_PREALLOCATE=false  
 export XLA_PYTHON_CLIENT_ALLOCATOR="platform"
 export XLA_FLAGS="--xla_gpu_strict_conv_algorithm_picker=false"
 export TF_XLA_FLAGS="--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
@@ -70,10 +70,18 @@ touch "$MONITOR_FLAG"
 
 # 6. Launch Training
 THREADS_PER_SEED=$((SLURM_CPUS_PER_TASK / NUM_SEEDS))
+
+# FIX 2: Lock down greedy CPU libraries per process
+export OMP_NUM_THREADS=$THREADS_PER_SEED
+export OPENBLAS_NUM_THREADS=$THREADS_PER_SEED
+export MKL_NUM_THREADS=$THREADS_PER_SEED
+export VECLIB_MAXIMUM_THREADS=$THREADS_PER_SEED
+export NUMEXPR_NUM_THREADS=$THREADS_PER_SEED
+
 TRAINING_PIDS=()
 
 for ((i=0; i<NUM_SEEDS; i++)); do
-    SEED=$i # Or keep your START_SEED logic
+    SEED=$i 
     SEED_LOG="${LOG_BASE}/${SCRIPT}_${ENV_NAME}_s${SEED}.log"
     
     python ${SCRIPT}.py \
@@ -92,4 +100,4 @@ wait ${TRAINING_PIDS[*]}
 
 # Cleanup monitoring
 rm -f "$MONITOR_FLAG"
-sleep 5 # Give loops a second to notice the file is gone
+sleep 5

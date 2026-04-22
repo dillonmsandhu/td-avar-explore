@@ -22,7 +22,7 @@ def run_experiment_main(make_train, SAVE_DIR):
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--threads', type=int, default=1)
     parser.add_argument('--save-checkpoint', action='store_true')
-    parser.add_argument('--env-ids', nargs='+', default=[])
+    parser.add_argument('--envs', nargs='+', default=[])
     
     # WandB/Tuning args
     parser.add_argument('--output-dir', type=str, default=None)
@@ -47,7 +47,7 @@ def run_experiment_main(make_train, SAVE_DIR):
         pass # It was just a filepath
     
     # 2. Environment overwrite from CLI
-    env_list = args.env_ids if args.env_ids else [config.get('ENV_NAME')]
+    env_list = args.envs if args.envs else [config.get('ENV_NAME')]
 
     for i, env_name in enumerate(env_list):
         # Create a clean copy for this specific environment run

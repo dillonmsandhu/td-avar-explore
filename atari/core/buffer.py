@@ -10,9 +10,10 @@ BufferStateT = TypeVar("BufferStateT", bound=tuple)
 class BaseBufferManager(Generic[BufferStateT]):
     """Generic stateless buffer manager handling JAX PyTree updates."""
     
-    def __init__(self, config, k_lstd, buffer_capacity, extended_capacity, chunk_size):
+    def __init__(self, config, k_lstd, k_rho, buffer_capacity, extended_capacity, chunk_size):
         self.config = config
         self.k_lstd = k_lstd
+        self.k_rho = k_rho
         self.buffer_capacity = buffer_capacity
         
         self.num_chunks = (extended_capacity + chunk_size - 1) // chunk_size        
@@ -54,9 +55,11 @@ class LSTDBufferState(NamedTuple):
     traces: jnp.ndarray
     features: jnp.ndarray
     next_features: jnp.ndarray
+    rho_features: jnp.ndarray      # NEW: Required to re-evaluate bonuses from old memory
+    next_rho_features: jnp.ndarray # NEW
     continue_masks: jnp.ndarray
     absorb_masks: jnp.ndarray 
-    size: jnp.ndarray  
+    size: jnp.ndarray
 
 class FeatureTraceBufferManager(BaseBufferManager[LSTDBufferState]):
     
@@ -65,6 +68,8 @@ class FeatureTraceBufferManager(BaseBufferManager[LSTDBufferState]):
             traces=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
             features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
             next_features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
+            rho_features=jnp.zeros((self.padded_capacity, self.k_rho), dtype=jnp.float32),
+            next_rho_features=jnp.zeros((self.padded_capacity, self.k_rho), dtype=jnp.float32),
             continue_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.bool_), # post terminal step to S_0
             absorb_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.bool_), # reached goal tate
             size=jnp.array(0, dtype=jnp.int32)
