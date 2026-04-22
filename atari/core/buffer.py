@@ -42,7 +42,7 @@ class BaseBufferManager(Generic[BufferStateT]):
                 new_arr = new_arr.reshape(self.batch_size, -1).astype(jnp.float32)
                 return jax.lax.dynamic_update_slice(buffer_arr, new_arr, (start_idx, 0))
 
-            updated_state = jax.tree.map(_update_single_array, buffer_state, new_batch)
+            updated_state = jax.tree_util.tree_map(_update_single_array, buffer_state, new_batch)
             # Adding a static int to a dynamic tensor (start_idx) is perfectly safe
             return updated_state._replace(size=start_idx + self.batch_size)
 
@@ -134,7 +134,7 @@ class FeatureTraceBufferManager(BaseBufferManager[LSTDBufferState]):
                 return arr
             return jnp.zeros_like(arr).at[:self.buffer_capacity].set(arr[keep_indices])
 
-        compacted_state = jax.tree.map(_compact_array, buffer_state)
+        compacted_state = jax.tree_util.tree_map(_compact_array, buffer_state)
         new_size = jnp.minimum(size, self.buffer_capacity)
 
         return compacted_state._replace(size=new_size)
@@ -218,7 +218,7 @@ class FeatureBufferManager(BaseBufferManager[FeatureBufferState]):
                 return arr
             return jnp.zeros_like(arr).at[:self.buffer_capacity].set(arr[keep_indices])
 
-        compacted_state = jax.tree.map(_compact_array, buffer_state)
+        compacted_state = jax.tree_util.tree_map(_compact_array, buffer_state)
         new_size = jnp.minimum(size, self.buffer_capacity)
 
         return compacted_state._replace(size=new_size)
@@ -332,7 +332,7 @@ class LSPIFeatureBufferManager(BaseBufferManager[LSPIBufferState]):
                 return arr
             return jnp.zeros_like(arr).at[:self.buffer_capacity].set(arr[keep_indices])
 
-        compacted_state = jax.tree.map(_compact_array, buffer_state)
+        compacted_state = jax.tree_util.tree_map(_compact_array, buffer_state)
         new_size = jnp.minimum(size, self.buffer_capacity)
 
         return compacted_state._replace(size=new_size)

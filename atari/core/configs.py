@@ -24,6 +24,7 @@ shared_config = {
         "noop_max": 30,
     },
     # Exploration Specific
+    "GAMMA_i": 0.99,
     "NORMALIZE_FEATURES": True,
     "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
     "NORMALIZE_REWARDS": False,

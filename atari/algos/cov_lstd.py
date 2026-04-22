@@ -146,7 +146,7 @@ def make_train(config):
                 transition = Transition(
                     done, action, value, next_val, dummy, dummy, reward, dummy, log_prob, 
                     last_obs, obsv, info, phi=last_phi, next_phi=next_phi, 
-                    rho_feat=last_rho_feat, next_rho_feat=next_rho_feat
+                    rho_feats=last_rho_feat, next_rho_feats=next_rho_feat
                 )
 
                 # Pass the 'next' features forward as the 'last' features for the next step
@@ -180,8 +180,8 @@ def make_train(config):
                 traces=traces, 
                 features=traj_batch.phi, 
                 next_features=traj_batch.next_phi, 
-                rho_features=traj_batch.rho_feat,
-                next_rho_features=traj_batch.next_rho_feat,
+                rho_features=traj_batch.rho_feats,
+                next_rho_features=traj_batch.next_rho_feats,
                 continue_masks=continue_mask, 
                 absorb_masks=absorb_mask, 
                 size=jnp.array(batch_size)
@@ -196,7 +196,7 @@ def make_train(config):
             buffer_state = buffer_manager.evict_buffer(buffer_state, prb_rng)
             
             # --- 5. COMPUTE TARGETS ---
-            rho_feats_final = jnp.where(absorb_mask[..., None], traj_batch.rho_feat, traj_batch.next_rho_feat)
+            rho_feats_final = jnp.where(absorb_mask[..., None], traj_batch.rho_feats, traj_batch.next_rho_feats)
             rho = helpers.get_scale_free_bonus(Sigma_inv, rho_feats_final)
             
             # --- LSTD PREDICTIONS ---
@@ -205,7 +205,7 @@ def make_train(config):
             
             # --- Clip ---
             V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
-            v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
+            v_i, next_v_i = jax.tree_util.tree_map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
             
             # --- Final traj_batch update for GAE ---
             traj_batch = traj_batch._replace(i_value=v_i, intrinsic_reward=rho, next_i_val=next_v_i)

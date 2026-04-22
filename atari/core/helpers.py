@@ -18,8 +18,8 @@ class Transition(NamedTuple):
     # --- NEW FIELDS ---
     phi: jnp.ndarray            # LSTD features
     next_phi: jnp.ndarray 
-    rho_feat: jnp.ndarray       # Exploration/Intrinsic features
-    next_rho_feat: jnp.ndarray  
+    rho_feats: jnp.ndarray       # Exploration/Intrinsic features
+    next_rho_feats: jnp.ndarray  
 
 def make_env(config):
     env = envpool.make(
@@ -141,7 +141,7 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
         x = jax.random.permutation(rng, x)  # shuffle the transitions
         x = x.reshape(n_minibatches, -1, *x.shape[1:])  # num_mini_updates, batch_size/num_mini_updates, ...
         return x
-    minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
+    minibatches = jax.tree_util.tree_map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
 
 
