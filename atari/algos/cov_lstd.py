@@ -103,9 +103,7 @@ def make_train(config):
             config, network, rho_net, network_params, rho_params
         )
         
-        rng, _rng = jax.random.split(rng)
-        reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-        obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        obsv, env_state = env.reset()
         initial_phi = get_lstd_feats(obsv)
         initial_rho_feat = get_rho_feats(obsv)
 

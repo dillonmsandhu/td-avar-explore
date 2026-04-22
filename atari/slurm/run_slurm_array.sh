@@ -78,13 +78,17 @@ export MKL_NUM_THREADS=$THREADS_PER_SEED
 export VECLIB_MAXIMUM_THREADS=$THREADS_PER_SEED
 export NUMEXPR_NUM_THREADS=$THREADS_PER_SEED
 
+SCRIPT_NAME=$(basename $SCRIPT)
+
 TRAINING_PIDS=()
 
 for ((i=0; i<NUM_SEEDS; i++)); do
     SEED=$i 
-    SEED_LOG="${LOG_BASE}/${SCRIPT}_${ENV_NAME}_s${SEED}.log"
+    # Use the safe SCRIPT_NAME for the log file
+    SEED_LOG="${LOG_BASE}/${SCRIPT_NAME}_${ENV_NAME}_s${SEED}.log"
     
-    python ${SCRIPT}.py \
+    # Use the full SCRIPT path for Python
+    python -m algos.${SCRIPT} \
         --config ${CONFIG} \
         --run-suffix ${SUFFIX}_s${SEED} \
         --seed ${SEED} \
@@ -92,8 +96,8 @@ for ((i=0; i<NUM_SEEDS; i++)); do
         --envs ${ENV_NAME} > "$SEED_LOG" 2>&1 &
     
     TRAINING_PIDS+=($!)
-    sleep 30 # Staggered start is CRITICAL for 5-seed memory allocation
-done
+    sleep 30 # Staggered start is CRITICAL for memory allocation
+done 
 
 # Wait for training to finish
 wait ${TRAINING_PIDS[*]}
