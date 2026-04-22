@@ -185,7 +185,7 @@ def make_train(config):
             next_phi = batch_get_features(traj_batch.next_obs)
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
-            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LAMBDA_LSTD_i"], is_continuing)
+            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LSTD_LAMBDA_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
             sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
