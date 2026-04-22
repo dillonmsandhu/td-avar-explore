@@ -119,7 +119,7 @@ class DeepSeaExactValue:
     def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
         
-        # 2. Compute dense and convert to sparse
+        # Compute dense and convert to sparse
         P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
         P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
 
@@ -127,11 +127,8 @@ class DeepSeaExactValue:
             v_new = R_pi + self.gamma * (P_pi_sparse @ v)
             return v_new, None
 
-        # Initial state
-        init_v = jnp.zeros(self.num_states)
+        init_v = jnp.zeros(self.num_total_states)
 
-        # 4. Run the compiled scan loop. 
-        # We pass xs=None and specify the length explicitly.
         final_v, _ = jax.lax.scan(body_fn, init_v, None, length=500)
         
         return final_v

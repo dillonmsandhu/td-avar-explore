@@ -202,7 +202,7 @@ class LongChainExactValue:
             return v_new, None
 
         # Initial state
-        init_v = jnp.zeros(self.num_states)
+        init_v = jnp.zeros(self.num_total_states)
 
         # 4. Run the compiled scan loop. 
         # We pass xs=None and specify the length explicitly.
