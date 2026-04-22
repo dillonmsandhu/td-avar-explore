@@ -54,7 +54,7 @@ class LSTDBufferState(NamedTuple):
     traces: jnp.ndarray
     features: jnp.ndarray
     next_features: jnp.ndarray
-    terminals: jnp.ndarray
+    continue_masks: jnp.ndarray
     absorb_masks: jnp.ndarray 
     size: jnp.ndarray  
 
@@ -65,8 +65,8 @@ class FeatureTraceBufferManager(BaseBufferManager[LSTDBufferState]):
             traces=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
             features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
             next_features=jnp.zeros((self.padded_capacity, self.k_lstd), dtype=jnp.float32),
-            terminals=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
-            absorb_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.float32),
+            continue_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.bool_), # post terminal step to S_0
+            absorb_masks=jnp.zeros((self.padded_capacity, 1), dtype=jnp.bool_), # reached goal tate
             size=jnp.array(0, dtype=jnp.int32)
         )
 

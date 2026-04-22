@@ -128,10 +128,11 @@ class JaxEnvPoolWrapper(gym.Wrapper):
         )
 
         # 2. Terminal & Goal Logic Injection
-        terminated = infos.get("terminated", dones) 
-        truncated = infos.get("TimeLimit.truncated", jnp.zeros_like(dones, dtype=jnp.bool_))
+        dones = dones.astype(jnp.bool_)
+        terminated = infos.get("terminated", dones).astype(jnp.bool_)
+        truncated = infos.get("TimeLimit.truncated", jnp.zeros_like(dones)).astype(jnp.bool_)
         current_lives = infos.get("lives", jnp.zeros_like(dones, dtype=jnp.int32))
-        
+
         # Capture the previous step's flags BEFORE we update the state!
         is_dummy = state.was_done
         was_goal = state.was_goal
