@@ -27,6 +27,7 @@ shared = {
     "GAMMA_i": 0.99,
     "GAE_LAMBDA": 0.9,
     "GAE_LAMBDA_i": 0.9,
+    "LSTD_LAMBDA_i": 0.25,
     "CLIP_EPS": 0.2,
     "VF_CLIP": 0.5,
     "ENT_COEF": 0.001,
@@ -44,6 +45,7 @@ shared = {
     "SCHEDULE_BETA": True,
     "LSTD_L2_REG": 1e-3,
     "RND_FEATURES": 128,
+    "USE_ABSORBING_OVERWRITE": True,
     "NETWORK_TYPE": "mlp",
     "RND_NETWORK_TYPE": "mlp",
     "WARMUP": 1_000,
@@ -53,7 +55,6 @@ shared = {
     "PERCENT_FIFO": .25,
     "CALC_TRUE_VALUES": False,
     "N_SEEDS": 4,
-    "LSTD_PRIOR_SAMPLES": 10,
 }
 
 # --- Environment Specific Overrides ---
