@@ -29,7 +29,7 @@ shared_config = {
     "NORMALIZE_REWARDS": False,
     "EPISODIC": True,
     "ABSORBING_TERMINAL_STATE": True,
-    "LSTD_LAMBDA_i": 0.75 
+    "LSTD_LAMBDA_i": 0.75,
     "BONUS_SCALE": 2.0,
     "SCHEDULE_BETA": True,
     "LSTD_L2_REG": 1e-3,
