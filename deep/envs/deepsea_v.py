@@ -106,14 +106,35 @@ class DeepSeaExactValue:
             
         return jnp.array(P)
 
-    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
-        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
+    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+        
+    #     I = jnp.eye(self.num_total_states)
+    #     A_mat = I - self.gamma * P_pi
+        
+    #     return jnp.linalg.solve(A_mat, R_pi)
+    
+    # use value iteration due to sparse P matrix
+    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
         
-        I = jnp.eye(self.num_total_states)
-        A_mat = I - self.gamma * P_pi
+        # 2. Compute dense and convert to sparse
+        P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
+        P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
+
+        def body_fn(v, _):
+            v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+            return v_new, None
+
+        # Initial state
+        init_v = jnp.zeros(self.num_states)
+
+        # 4. Run the compiled scan loop. 
+        # We pass xs=None and specify the length explicitly.
+        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=500)
         
-        return jnp.linalg.solve(A_mat, R_pi)
+        return final_v
 
     def get_value_grid(self, V_flat: jax.Array) -> jax.Array:
         """Reshapes flat value vector to N x N grid."""
