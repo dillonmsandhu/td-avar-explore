@@ -18,6 +18,22 @@ def make_train(config):
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
+
+    def define_trace_logic(terminals, is_dummy, is_goal, was_goal):
+        if is_episodic: # standard, cut on terminal (also cut dummy transition's trace), and never absorb
+            cut_trace = terminals | is_dummy
+            absorb_mask = jnp.zeros_like(terminals, dtype=jnp.bool_)
+        elif is_continuing: # never cut trace, never absorb.
+            cut_trace = jnp.zeros_like(terminals, dtype=jnp.bool_)
+            absorb_mask = jnp.zeros_like(terminals, dtype=jnp.bool_)
+        elif is_absorbing:
+            # Cut on dummy steps (S_T -> S_0) and normal deaths (S_{T-1} -> S_T)
+            death = terminals & ~is_goal 
+            cut_trace = death | is_dummy 
+            # Goals are absorbing.
+            absorb_mask = was_goal 
+        continue_mask = jnp.logical_not(cut_trace) # 1.0 if continuing, 0.0 if cut    
+        return cut_trace, continue_mask, absorb_mask
     
     # Replay Buffer
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -151,22 +167,8 @@ def make_train(config):
             is_dummy = traj_batch.info.get("is_dummy", jnp.zeros_like(terminals))
             is_goal = traj_batch.info.get("is_goal", jnp.zeros_like(terminals))
             was_goal = traj_batch.info.get("was_goal", jnp.zeros_like(terminals))
+            cut_trace, continue_mask, absorb_mask = define_trace_logic(terminals, is_dummy, is_goal, was_goal)
             
-            if is_continuing:
-                cut_trace = jnp.zeros_like(terminals, dtype=jnp.bool_)
-                absorb_mask = jnp.zeros_like(terminals, dtype=jnp.bool_)
-            elif is_absorbing:
-                # Cut on ALL dummy steps (S_T -> S_0) and Normal deaths (S_{T-1} -> S_T)
-                death = terminals & ~is_goal 
-                cut_trace = death | is_dummy 
-                # Self-Loop if goal (will replace dummy with S_T->S_T)
-                absorb_mask = was_goal 
-            elif is_episodic:
-                cut_trace = terminals | is_dummy
-                absorb_mask = jnp.zeros_like(terminals, dtype=jnp.bool_)
-
-            # continue_mask and absorb_mask go into the buffer
-            continue_mask = jnp.logical_not(cut_trace) # 1.0 if continuing, 0.0 if cut
             # --- 2. Compute Trace and Add to Buffer ---
             traces = helpers.calculate_traces(traj_batch.phi, cut_trace, config["GAMMA_i"], config["LSTD_LAMBDA_i"])
             buffer_batch = LSTDBufferState(
