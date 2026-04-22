@@ -84,22 +84,33 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
         A_acc, b_acc = carry
         phi, next_phi, traces, term, absorb, mask = chunk_data
         
+        # Squeeze down to 1D (n,) for clean einsum math
+        mask = mask.squeeze()
+        absorb_1d = absorb.squeeze() 
+        
         next_rho = get_scale_free_bonus(Sigma_inv, next_phi)
         
+        # Ensure 'cut' broadcasts correctly against features (n, k)
         cut = term * (1.0 - absorb)
         cut_factor = 1.0 - cut
         delta_Phi = phi - gamma_i * next_phi * cut_factor
 
-        A_batch = jnp.einsum("ni, nj -> ij", traces, delta_Phi)
-        b_batch = jnp.einsum("ni, n -> i", traces, next_rho * mask.squeeze())
+        # 1. Standard Accumulation (Masked)
+        A_batch = jnp.einsum("n, ni, nj -> ij", mask, traces, delta_Phi)
+        b_batch = jnp.einsum("n, ni, n -> i", mask, traces, next_rho)
         
+        # 2. Absorbing Self-Loop Accumulation (Masked)
+        # Multiply features by the (n, 1) absorb mask to zero out non-goal states
         abs_features = next_phi * absorb
         abs_traces = abs_features 
-        A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces, abs_features)
-        b_abs = jnp.einsum("ni, n -> i", abs_traces, next_rho * absorb.squeeze() * mask.squeeze())
+        
+        A_abs = (1 - gamma_i) * jnp.einsum("n, ni, nj -> ij", mask, abs_traces, abs_features)
+        
+        # For b_abs, we need to ensure next_rho is only counted for absorbing states
+        rho_abs = next_rho * absorb_1d
+        b_abs = jnp.einsum("n, ni, n -> i", mask, abs_traces, rho_abs)
         
         return (A_acc + A_batch + A_abs, b_acc + b_batch + b_abs), None
-    
     k_lstd = chunked_phi.shape[-1]
     init_A = jnp.zeros((k_lstd, k_lstd))
     init_b = jnp.zeros(k_lstd)

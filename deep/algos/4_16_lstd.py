@@ -27,7 +27,7 @@ def make_train(config):
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
-    is_continuing = ~is_episodic
+    is_continuing = not is_episodic
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
     overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
@@ -189,7 +189,7 @@ def make_train(config):
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 
-                next_i_val=next_v_i
+                next_i_val=fixed_next_i_val
             )
 
             gaes, targets = helpers.calculate_gae(
