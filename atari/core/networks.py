@@ -95,9 +95,6 @@ class CNN(nn.Module):
 # --------------------- RND ---------------------------
 # =====================================================
 
-class RNDTrainState(TrainState):
-    target_params: Any
-
 class RND_Net(nn.Module):
     k: int = 128
     normalize: bool = False
@@ -234,6 +231,9 @@ class ActorCritic3Head(nn.Module):
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
+class RNDTrainState(TrainState):
+    target_params: Any
+    
 def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128):
     """
     Initializes the RND network. 

@@ -47,7 +47,7 @@ def make_train(config):
     config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
     
     # Env
-    env, env_params = helpers.make_env(config)
+    env = helpers.make_env(config)
     obs_shape = env.single_observation_space.shape
     n_actions = env.single_action_space.n
     
