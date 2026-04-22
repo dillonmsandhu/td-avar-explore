@@ -91,6 +91,13 @@ def make_train(config):
         lstd_net, lstd_params = networks.initialize_rnd_network( # Or a different architecture
             rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=True, k=k_lstd
         ) # will be the same params if the same network
+
+        def get_rho_feats(obs):
+            return rho_net.apply(rho_params, obs)
+        
+        def get_lstd_feats(obs):
+            return lstd_net.apply(lstd_params, obs)
+
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
             config, network, rho_net, network_params, rho_params
@@ -99,8 +106,8 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
-        initial_phi = lstd_net.apply(lstd_params, obsv)
-        initial_rho_feat = rho_net.apply(rho_params, obsv)
+        initial_phi = get_lstd_feats(obsv)
+        initial_rho_feat = get_rho_feats(obsv)
 
         def _update_step(runner_state, unused):
 
@@ -133,8 +140,8 @@ def make_train(config):
                 next_val = network.apply(train_state.params, obsv, method=network.value)
 
                 # --- NEW: IN-LOOP FEATURE EXTRACTION ---
-                next_phi = lstd_net.apply(lstd_params, obsv)
-                next_rho_feat = rho_net.apply(rho_params, obsv)
+                next_phi = get_lstd_feats(obsv)
+                next_rho_feat = get_rho_feats(obsv)
 
                 dummy = jnp.zeros_like(reward)
 
