@@ -29,6 +29,7 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = ~is_episodic
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     # Replay Buffer
@@ -150,7 +151,7 @@ def make_train(config):
             next_phi = batch_get_features(traj_batch.next_obs)
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
-            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
+            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LSTD_LAMBDA_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
             sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)          
@@ -181,17 +182,10 @@ def make_train(config):
             V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
             v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
             
-            # --- Absorbing overwrite ---
-            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
-
-            # # --- Final traj_batch update for GAE ---
-            # traj_batch = traj_batch._replace(
-            #     i_value=v_i, 
-            #     intrinsic_reward=rho, 
-            #     next_i_val=fixed_next_i_val
-            # )
+            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
+            # Seamlessly select between the network prediction and the analytical value
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 

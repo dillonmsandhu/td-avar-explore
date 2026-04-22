@@ -1,3 +1,6 @@
+# 4_22_distill.py
+# uses a blended value for the TD target and GAE.
+# blends the LSTD prediction and network target.
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
@@ -5,7 +8,7 @@ from core.buffer import LSTDBufferState, FeatureTraceBufferManager
 from core.lstd import solve_lstd_lambda_from_buffer
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "4_16_distill_override"
+SAVE_DIR = "4_22_distill"
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -23,12 +26,14 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
+
     k_lstd = config.get("RND_FEATURES", 128)
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     # Replay Buffer
@@ -52,6 +57,9 @@ def make_train(config):
         beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
+    
+    # mixing coefficient
+    mixing_coeff = optax.linear_schedule(init_value=1.0, end_value=0.0, transition_steps=config["NUM_UPDATES"])
 
     def train(rng):
         initial_lstd_state = {"w": jnp.zeros(k_lstd)}
@@ -83,8 +91,7 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
     
-        def _compile_metrics(network,  batch_get_features, traj_batch, next_phi, loss_info, gaes, targets, 
-                            rho_scale, sigma_state, lstd_state, train_state, Sigma_inv):
+        def _compile_metrics(network,  batch_get_features, traj_batch, next_phi, loss_info, gaes, targets, rho_scale, sigma_state, lstd_state, train_state, Sigma_inv, alpha):
             # 1. Base metrics from environment info
             metric = {
                 k: v.mean() 
@@ -117,6 +124,9 @@ def make_train(config):
                 "mean_rew": traj_batch.reward.mean(),
                 "rho_scale": rho_scale,
                 "Condition_Number_S": cond_S,
+                "alpha_mix": alpha,
+                "lstd_v_mean": lstd_v_i.mean(),
+                "student_v_mean": traj_batch.i_value.mean(),
             })
 
             # 5. Evaluator-based metrics (Value Accuracy / Coverage)
@@ -127,10 +137,14 @@ def make_train(config):
                 })
             else:
                 int_rew_from_state = lambda s: helpers.get_scale_free_bonus(Sigma_inv, batch_get_features(s)) * rho_scale
+                def get_vi(obs):
+                    lstd_pred = batch_get_features(obs) @ lstd_state["w"] * rho_scale
+                    _, _, network_pred = network.apply(train_state.params, obs)
+                    final_pred = alpha * lstd_pred + (1-alpha) * network_pred
 
                 metric = helpers.add_values_to_metric(
                     config, metric, int_rew_from_state, evaluator, 
-                    rho_scale, network, train_state, traj_batch
+                    rho_scale, network, train_state, traj_batch, get_vi
                 )
                 
             return metric
@@ -171,7 +185,7 @@ def make_train(config):
             next_phi = batch_get_features(traj_batch.next_obs)
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
-            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
+            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LAMBDA_LSTD_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
             sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
@@ -205,42 +219,26 @@ def make_train(config):
             V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
             lstd_v_i, lstd_next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (lstd_v_i, lstd_next_v_i))
 
+            # Mix:
+            def mix(alpha, lstd_pred, network_pred):
+                return alpha * lstd_pred + (1-alpha) * network_pred # alpha decays from 1-> 0
+            vi_target = mix(mixing_coeff(idx), lstd_v_i, traj_batch.i_value)
+            next_vi_target = mix(mixing_coeff(idx), lstd_next_v_i, traj_batch.next_i_val)
+            
             # --- Overwrite next vi---
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, traj_batch.next_i_val)
-
+            should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_vi_target)
+            # Traj batch is used for the GAE.
             traj_batch = traj_batch._replace(
-                intrinsic_reward=rho,
+                i_value=vi_target, 
+                intrinsic_reward=rho, 
                 next_i_val=fixed_next_i_val
             )
-            
-            # 3b. Overwrite LSTD path
-            fixed_lstd_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, lstd_next_v_i)
-            # lstd_traj = traj_batch._replace(
-            #     i_value=lstd_v_i, 
-            #     next_i_val=fixed_lstd_next_i_val
-            # )
-            lstd_traj = traj_batch._replace(
-                i_value=lstd_v_i, 
-                next_i_val=fixed_lstd_next_i_val
-            )
 
-            # --- 4. CALCULATE DUAL GAES ---
-            
-            # Path A: LSTD Targets (To train the Neural Network Critic)
-            _, lstd_targets = helpers.calculate_gae(
-                lstd_traj, 
-                config["GAMMA"], 
-                config["GAE_LAMBDA"],
-                is_continuing,
-                γi=config["GAMMA_i"], 
-                λi=config["GAE_LAMBDA_i"]
-            )
-            distilled_i_target = lstd_targets[1] # RAW TD(lambda) LSTD Target
-
+            # --- 4. CALCULATE GAE ---
             # Path B: Network GAEs (To train the PPO Actor)
-            gaes, targets = helpers.calculate_gae(
+            gaes, combined_targets = helpers.calculate_gae(
                 traj_batch, 
                 config["GAMMA"], 
                 config["GAE_LAMBDA"],
@@ -255,8 +253,6 @@ def make_train(config):
             # Scale the Actor's advantage
             advantages = gaes[0] + (rho_scale * gaes[1])
             
-            # Package the Extrinsic Target and RAW Distilled Target for the network loss
-            combined_targets = (targets[0], distilled_i_target)
             # ------------------------------------------------------------------
 
             # UPDATE NETWORK
@@ -283,7 +279,7 @@ def make_train(config):
             train_state, _, _, _, rng = update_state
             
             metric = _compile_metrics(network, batch_get_features,
-                traj_batch, next_phi, loss_info, gaes, targets, 
+                traj_batch, next_phi, loss_info, gaes, combined_targets, 
                 rho_scale, sigma_state, lstd_state, train_state, Sigma_inv
             )
 

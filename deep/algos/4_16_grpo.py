@@ -27,6 +27,7 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -120,18 +121,13 @@ def make_train(config):
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
 
             rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
-            traj_batch = traj_batch._replace(intrinsic_reward = rho) # GRPO uses pure rho.
             
             # --- Absorbing overwrite ---
-            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, 0.0)
-
-            # # --- Final traj_batch update for GAE ---
-            # traj_batch = traj_batch._replace(
-            #     intrinsic_reward=rho, 
-            #     next_i_val=fixed_next_i_val
-            # )
+            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
+            # Seamlessly select between the network prediction and the analytical value
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
+            traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val, intrinsic_reward = rho)
 
             # --- ADVANTAGE CALCULATION ---
             gaes, targets = helpers.calculate_gae(
@@ -151,6 +147,8 @@ def make_train(config):
             # Compute the mean and std across the NUM_ENVS axis (axis=1).
             # This creates a unique baseline for EVERY timestep in the rollout chunk.
             mean_int_ret_t = jnp.mean(raw_intrinsic_returns, axis=1, keepdims=True)
+            # std_int_ret_t = jnp.std(raw_intrinsic_returns, axis=1, keepdims=True)
+            # baselined_int_adv = (raw_intrinsic_returns - mean_int_ret_t) / (std_int_ret_t + 1e-8)
             
             # Normalize conditionally based on the timestep index
             baselined_int_adv = (raw_intrinsic_returns - mean_int_ret_t)

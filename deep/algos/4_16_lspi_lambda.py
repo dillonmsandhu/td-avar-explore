@@ -1,11 +1,11 @@
 from core.imports import *
 import core.helpers as helpers
 import core.networks as networks
-from core.buffer import FeatureBufferManager, FeatureBufferState
-from core.lstd import solve_lstd_0_from_buffer
+from core.buffer import LSPIλFeatureBufferManager, LSPIλBufferState
+from core.lstd import solve_lspiλ_buffer
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "4_16_lstd0" # performs the update to the covariance matrix FIRST.
+SAVE_DIR = "4_16_lspi_lambda" # performs the update to the covariance matrix FIRST.
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -29,7 +29,19 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
+    
+    # Env
+    env, env_params = helpers.make_env(config)
+    obs_shape = env.observation_space(env_params).shape
+    try:
+        n_actions = env.action_space(env_params).n
+    except: 
+        exit('discrete actions only')
+    config['N_ACTIONS'] = n_actions
+    dim_kA = k_lstd * n_actions
+    evaluator = helpers.initialize_evaluator(config)
     
     # Replay Buffer
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -37,16 +49,11 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
-    config['CHUNK_SIZE'] =  100_000 + batch_size # chunking for LSTD solver
-    buffer_manager = FeatureBufferManager(config, k_lstd, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
+    config['CHUNK_SIZE'] =  20_000 + batch_size # chunking for LSTD solver
+    buffer_manager = LSPIλFeatureBufferManager(config, k_lstd, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], dim_kA, n_actions) # stateless buffer manager.
     config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
     config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
-    
-    # Env
-    env, env_params = helpers.make_env(config)
-    obs_shape = env.observation_space(env_params).shape
-    evaluator = helpers.initialize_evaluator(config)
-    
+
     if config.get('SCHEDULE_BETA', False):
         # goes up until peak and then linearly decays to 0.
         beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
@@ -56,14 +63,9 @@ def make_train(config):
     # Metrics Function
     def _compile_metrics(network, batch_get_features,  traj_batch, next_phi, loss_info, gaes, targets, rho_scale, Sigma_inv, lstd_state, train_state):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
-            total_loss_info, aux_loss_info = loss_info
-            
             metric.update({
-                "ppo_loss": total_loss_info.mean(),
-                # Make sure these indices match exactly what helpers._loss_fn returns
-                "value_loss": aux_loss_info[0].mean(), 
-                "actor_loss": aux_loss_info[1].mean(),
-                "entropy": aux_loss_info[2].mean(),
+                "ppo_loss": loss_info[0],
+                "rnd_loss": loss_info[1],
                 "feat_norm": jnp.linalg.norm(next_phi, axis=-1).mean(),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
@@ -83,8 +85,16 @@ def make_train(config):
                     "v_e_pred": traj_batch.value.mean(),
                 })
             else:
-                int_rew_from_state = lambda s: helpers.get_scale_free_bonus(Sigma_inv, batch_get_features(s)) * rho_scale
-                get_vi = lambda obs: batch_get_features(obs) @ lstd_state["w"] * rho_scale
+                def int_rew_from_state(s,):  
+                    phi = batch_get_features(s)
+                    rho = helpers.get_scale_free_bonus(Sigma_inv, phi) * rho_scale
+                    return rho
+
+                def get_vi(obs):
+                    phi = batch_get_features(obs)
+                    w_r = lstd_state["w"].reshape(n_actions, k_lstd)
+                    Q_v = jnp.einsum("...k, ak -> ...a", phi, w_r)
+                    return jnp.max(Q_v, axis=-1) * rho_scale
 
                 metric = helpers.add_values_to_metric(
                     config, metric, int_rew_from_state, evaluator, rho_scale,
@@ -93,7 +103,7 @@ def make_train(config):
             return metric
 
     def train(rng):
-        initial_lstd_state = {"w": jnp.zeros(k_lstd), }
+        initial_lstd_state = {"w": jnp.zeros(dim_kA), }
         initial_buffer_state = buffer_manager.init_state()
         initial_sigma_state = {"S": jnp.eye(k_lstd, dtype=jnp.float64)} # global accumulation
 
@@ -124,7 +134,7 @@ def make_train(config):
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
-                train_state, rnd_state, env_state, last_obs, rng = env_scan_state
+                train_state, env_state, last_obs, rng = env_scan_state
 
                 rng, _rng = jax.random.split(rng)
                 pi, value = network.apply(train_state.params, last_obs)
@@ -147,22 +157,24 @@ def make_train(config):
                 transition = Transition(
                     done, is_goal, action, value, next_val, i_val, next_i_val, reward, intrinsic_reward, log_prob, last_obs, target_next_obs, info
                 )
-                return (train_state, rnd_state, env_state, obsv, rng), transition
+                return (train_state, env_state, obsv, rng), transition
 
-            env_step_state = (train_state, rnd_state, env_state, last_obs, rng)
-            (_, _, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            env_step_state = (train_state, env_state, last_obs, rng)
+            (_, env_state, laterminalsst_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Post-Process batch
-            phi = batch_get_features(traj_batch.obs)
-            next_phi = batch_get_features(traj_batch.next_obs)
+            phi_s = batch_get_features(traj_batch.obs)
+            next_phi_s = batch_get_features(traj_batch.next_obs)
+            phi_sa = helpers.expand_to_sa_features(phi_s, n_actions, traj_batch.action, dim_kA)
+            traces = helpers.calculate_traces(traj_batch, phi_sa, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
-            
+    
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
-            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)     
+            sigma_state = helpers.update_cov(traj_batch, sigma_state, phi_s, next_phi_s)                   
 
             # --- 1. UPDATE EXTENDED BUFFER ---
-            buffer_batch = FeatureBufferState(phi, next_phi, terminals, absorb_masks, size=jnp.array(batch_size))
+            buffer_batch = LSPIλBufferState(traces, phi_sa, next_phi_s, terminals, absorb_masks, size=jnp.array(batch_size))
             buffer_state = buffer_manager.update_buffer(buffer_state, buffer_batch)
             
             # --- 2. GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
@@ -170,36 +182,38 @@ def make_train(config):
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
 
             # --- 3. SOLVE LSTD ON BUFFER ---
-            lstd_state = solve_lstd_0_from_buffer(buffer_state, Sigma_inv, lstd_state, config)
+            lstd_state = solve_lspiλ_buffer(buffer_state, Sigma_inv, lstd_state, config)
 
             # --- 4. EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
-            buffer_state = buffer_manager.evict_buffer(buffer_state, prb_rng)
+            buffer_state = buffer_manager.evict_buffer(buffer_state, prb_rng, lstd_state)
             
             # --- 5. COMPUTE TARGETS ---
+            rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi_s)
             
-            rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
-            
-            # --- LSTD PREDICTIONS ---
-            v_i = phi @ lstd_state["w"] 
-            next_v_i = next_phi @ lstd_state["w"] 
+            # --- LSPI PREDICTIONS ---
+            w_reshaped = lstd_state["w"].reshape(n_actions, k_lstd)
+            Q_curr = jnp.einsum("...k, ak -> ...a", phi_s, w_reshaped)
+            v_i = jnp.max(Q_curr, axis=-1)
+
+            Q_next = jnp.einsum("...k, ak -> ...a", next_phi_s, w_reshaped)
+            next_v_i = jnp.max(Q_next, axis=-1)
             
             # --- Clip ---
             V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
             v_i, next_v_i = jax.tree.map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
             
             # --- Absorbing overwrite ---
-            # exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            # overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            # fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
+            exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
+            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
+            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, next_v_i)
 
-            # # --- Final traj_batch update for GAE ---
+            # --- Final traj_batch update for GAE ---
             # traj_batch = traj_batch._replace(
             #     i_value=v_i, 
             #     intrinsic_reward=rho, 
             #     next_i_val=fixed_next_i_val
             # )
-
             traj_batch = traj_batch._replace(
                 i_value=v_i, 
                 intrinsic_reward=rho, 
@@ -226,11 +240,11 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    (total_loss, aux_losses), grads = grad_fn(
+                    (total_loss, _), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, (total_loss, aux_losses)
+                    return train_state, total_loss
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
@@ -245,7 +259,7 @@ def make_train(config):
 
             # --------- Metrics ---------
             metric = _compile_metrics(
-                network, batch_get_features, traj_batch, next_phi, loss_info, gaes, targets, 
+                network, batch_get_features, traj_batch, next_phi_s, loss_info, gaes, targets, 
                 rho_scale, Sigma_inv, lstd_state, train_state
             )
 

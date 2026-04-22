@@ -29,6 +29,7 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     # Replay Buffer
@@ -171,7 +172,7 @@ def make_train(config):
             next_phi = batch_get_features(traj_batch.next_obs)
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
-            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["GAE_LAMBDA_i"], is_continuing)
+            traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LAMBDA_LSTD_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
             sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
@@ -207,23 +208,19 @@ def make_train(config):
 
             # --- Overwrite next vi---
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, traj_batch.next_i_val)
-
+            should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
+            # Traj batch is used for the GAE.
             traj_batch = traj_batch._replace(
-                intrinsic_reward=rho,
+                i_value=v_i, 
+                intrinsic_reward=rho, 
                 next_i_val=fixed_next_i_val
             )
-            
-            # 3b. Overwrite LSTD path
-            fixed_lstd_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, lstd_next_v_i)
-            # lstd_traj = traj_batch._replace(
-            #     i_value=lstd_v_i, 
-            #     next_i_val=fixed_lstd_next_i_val
-            # )
+            # LSTD traj is used for the value network's TD targets
+            fixed_lstd_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, lstd_next_vi)
             lstd_traj = traj_batch._replace(
                 i_value=lstd_v_i, 
-                next_i_val=lstd_next_v_i
+                next_i_val=fixed_lstd_next_i_val
             )
 
             # --- 4. CALCULATE DUAL GAES ---

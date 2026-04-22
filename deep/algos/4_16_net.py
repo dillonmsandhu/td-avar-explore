@@ -30,6 +30,7 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -128,7 +129,6 @@ def make_train(config):
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k))
 
             rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
-            traj_batch = traj_batch._replace(intrinsic_reward=rho)
             
             # --- THE ABSORBING TERMINAL FIX ---
             # The value network never trains on the exact terminal state, making its prediction garbage.
@@ -136,9 +136,11 @@ def make_train(config):
             # terminal state is exactly its intrinsic reward / (1 - gamma_i).
             # --- Absorbing overwrite ---
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
-            overwrite_val = jnp.logical_and(traj_batch.goal, is_absorbing)
-            fixed_next_i_val = jnp.where(overwrite_val, exact_terminal_i_val, traj_batch.next_i_val)
-            traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val)
+            should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
+            # Seamlessly select between the network prediction and the analytical value
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
+            traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val, intrinsic_reward=rho)
+
             # -------------------------------------------------------------
             # --------- ADVANTAGE CALCULATION (Unified Absorbing) ---------
             gaes, targets = helpers.calculate_gae(
