@@ -54,6 +54,16 @@ shared = {
     "CALC_TRUE_VALUES": False,
     "N_SEEDS": 4,
     "LSTD_PRIOR_SAMPLES": 10,
+    # Feature type for LSTD and intrinsic reward (used by cov_lstd_vf)
+    "LSTD_FEATURE_TYPE": "rnd",  # "rnd" | "value" | "value_target" | "tabular" | "pretrained"
+    "RI_FEATURE_TYPE": "rnd",    # "rnd" or "tabular"
+    # value_target mode: frozen critic features synced periodically
+    "FEATURE_TARGET_UPDATE_PERIOD": 10,  # sync every N outer updates
+    "FEATURE_TARGET_TAU": 1.0,          # 1.0 = hard copy, <1.0 = Polyak average
+    "RESET_LSTD_ON_SYNC": False,        # reset A,b,w on target sync
+    # pretrained mode: offline feature cache lookup (e.g. DINOv2 ViT-S/14)
+    "PRETRAINED_CACHE_PATH": None,       # path to .npz from precompute script
+    "PRETRAINED_MODEL_TAG": "dinov2_vits14",  # informational only
 }
 
 # --- Environment Specific Overrides ---
