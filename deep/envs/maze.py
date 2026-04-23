@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import struct
 from gymnax.environments import environment, spaces
+from jax.experimental import sparse as jsparse
 
 @struct.dataclass
 class EnvState(environment.EnvState):
@@ -241,11 +242,31 @@ class SparseMazeExactValue:
 
         return self.get_value_grid(v_e_star, all), self.get_value_grid(v_i_star, all), v_net_tuple
 
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    #     P_pi = jnp.einsum("sa,sam->sm", pi, P_env)
+    #     R_pi = jnp.einsum("sa,sa->s", pi, R_env)
+    #     A = jnp.eye(self.num_states) - self.gamma * P_pi
+    #     return jnp.linalg.solve(A, R_pi)
+
     def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
-        P_pi = jnp.einsum("sa,sam->sm", pi, P_env)
-        R_pi = jnp.einsum("sa,sa->s", pi, R_env)
-        A = jnp.eye(self.num_states) - self.gamma * P_pi
-        return jnp.linalg.solve(A, R_pi)
+        R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+        
+        # 2. Compute dense and convert to sparse
+        P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
+        P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
+
+        def body_fn(v, _):
+            v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+            return v_new, None
+
+        # Initial state
+        init_v = jnp.zeros(self.num_states)
+
+        # 4. Run the compiled scan loop. 
+        # We pass xs=None and specify the length explicitly.
+        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1_000)
+        
+        return final_v
         
     def compute_true_values(
         self,

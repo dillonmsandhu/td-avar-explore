@@ -204,10 +204,11 @@ def make_train(config):
     # Replay Buffer
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
+    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
     mb_size = config["MINIBATCH_SIZE"]
-    # 2. Round 100,000 down to the nearest perfect multiple of 256 (gives 99,840)
+    # 2. Round the buffer size down to the nearest perfect multiple of mb_size (gives e.g. 100,000 -> 99,840)
     aligned_base = (BUFFER_CAPACITY // mb_size) * mb_size 
     # 3. Add your batch size. Because both numbers are perfect multiples of mb_size,
     # the total CHUNK_SIZE is mathematically guaranteed to reshape perfectly.
@@ -455,7 +456,7 @@ def make_train(config):
 
             # --- 3 & 4. SCORE AND EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
-            buffer_state = buffer_manager.evict_buffer(buffer_state,get_phi_lstd, prb_rng)
+            buffer_state = buffer_manager.evict_buffer(buffer_state, batch_get_phi_lstd, prb_rng)
 
             # --- BATCH INTRINSIC VALUES FOR GAE ---
             rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi_base)
@@ -637,7 +638,7 @@ def make_train(config):
                     return rho
 
                 def get_vi(obs):
-                    phi_lstd = get_phi_lstd(obs)
+                    phi_lstd = batch_get_phi_lstd(obs)
                     return  phi_lstd @ lstd_state["w"] * rho_scale
 
                 metric = helpers.add_values_to_metric(

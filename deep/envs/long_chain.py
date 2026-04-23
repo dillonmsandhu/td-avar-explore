@@ -6,6 +6,7 @@ from flax import struct
 from gymnax.environments import environment, spaces
 import numpy as np
 from typing import Any, Tuple, Callable, Optional
+from jax.experimental import sparse as jsparse
 PyTree = Any
 
 
@@ -184,11 +185,30 @@ class LongChainExactValue:
         P[self.terminal_idx, :, self.terminal_idx] = 1.0 # Dummy loop for shape stability
         return jnp.array(P)
 
-    def solve_linear_system(self, pi, P_env, R_env):
-        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    # def solve_linear_system(self, pi, P_env, R_env):
+    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+    #     A = jnp.eye(self.num_total_states) - self.gamma * P_pi
+    #     return jnp.linalg.solve(A, R_pi)
+
+    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
-        A = jnp.eye(self.num_total_states) - self.gamma * P_pi
-        return jnp.linalg.solve(A, R_pi)
+        
+        # 2. Compute dense and convert to sparse
+        P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
+        P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
+
+        def body_fn(v, _):
+            v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+            return v_new, None
+
+        # Initial state
+        init_v = jnp.zeros(self.num_total_states)
+
+        # 4. Run the compiled scan loop. 
+        # We pass xs=None and specify the length explicitly.
+        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1_000)
+        
 
     def compute_true_values(self, network, params, get_int_rew_per_state, all=False):
         out = network.apply(params, self.obs_stack)

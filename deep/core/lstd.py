@@ -2,7 +2,7 @@
 # contains code to solve LSTD with a replay buffer
 import jax
 import jax.numpy as jnp
-from core.buffer import LSTDBufferState, FeatureBufferState
+from core.buffer import LSTDBufferState, FeatureBufferState, LSPIλBufferState, LSPIBufferState
 from core.helpers import get_scale_free_bonus, expected_next_sa_features
 
 def solve_lstd_0_from_buffer(buffer_state: FeatureBufferState, Sigma_inv, lstd_state, config):
@@ -84,22 +84,33 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
         A_acc, b_acc = carry
         phi, next_phi, traces, term, absorb, mask = chunk_data
         
+        # Squeeze down to 1D (n,) for clean einsum math
+        mask = mask.squeeze()
+        absorb_1d = absorb.squeeze() 
+        
         next_rho = get_scale_free_bonus(Sigma_inv, next_phi)
         
+        # Ensure 'cut' broadcasts correctly against features (n, k)
         cut = term * (1.0 - absorb)
         cut_factor = 1.0 - cut
         delta_Phi = phi - gamma_i * next_phi * cut_factor
 
-        A_batch = jnp.einsum("ni, nj -> ij", traces, delta_Phi)
-        b_batch = jnp.einsum("ni, n -> i", traces, next_rho * mask.squeeze())
+        # 1. Standard Accumulation (Masked)
+        A_batch = jnp.einsum("n, ni, nj -> ij", mask, traces, delta_Phi)
+        b_batch = jnp.einsum("n, ni, n -> i", mask, traces, next_rho)
         
+        # 2. Absorbing Self-Loop Accumulation (Masked)
+        # Multiply features by the (n, 1) absorb mask to zero out non-goal states
         abs_features = next_phi * absorb
         abs_traces = abs_features 
-        A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces, abs_features)
-        b_abs = jnp.einsum("ni, n -> i", abs_traces, next_rho * absorb.squeeze() * mask.squeeze())
+        
+        A_abs = (1 - gamma_i) * jnp.einsum("n, ni, nj -> ij", mask, abs_traces, abs_features)
+        
+        # For b_abs, we need to ensure next_rho is only counted for absorbing states
+        rho_abs = next_rho * absorb_1d
+        b_abs = jnp.einsum("n, ni, n -> i", mask, abs_traces, rho_abs)
         
         return (A_acc + A_batch + A_abs, b_acc + b_batch + b_abs), None
-    
     k_lstd = chunked_phi.shape[-1]
     init_A = jnp.zeros((k_lstd, k_lstd))
     init_b = jnp.zeros(k_lstd)
@@ -117,7 +128,7 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
     
     return {"w": w_i,}
 
-def solve_lspi_buffer(buffer_state: FeatureBufferState, Sigma_inv, lstd_state, config):
+def solve_lspi_buffer(buffer_state: LSPIBufferState, Sigma_inv, lstd_state, config):
     """Solves LSPI over the entire extended buffer using a memory-safe chunked scan."""
     N = buffer_state.size
     # Reshape buffer into chunks
@@ -186,6 +197,92 @@ def solve_lspi_buffer(buffer_state: FeatureBufferState, Sigma_inv, lstd_state, c
             process_chunk, 
             (init_A, init_b), 
             (chunked_phi_sa, chunked_next_phi_s, chunked_terminals, chunked_absorb, chunked_mask)
+        )
+        
+        
+        reg = jnp.eye(dim_kA) * config.get("LSTD_L2_REG", 1e-3) * N
+        A_view = final_A + reg
+        w_new = jnp.linalg.solve(A_view, final_b)
+        
+        return w_new, None
+
+    w_init = lstd_state["w"]
+    w_final, _ = jax.lax.scan(lspi_step, w_init, None, length=config.get("LSPI_NUM_ITERS", 3))
+    
+    return {
+        "w": w_final,
+    }
+    
+def solve_lspiλ_buffer(buffer_state: LSPIλBufferState, Sigma_inv, lstd_state, config):
+    """Solves LSPI over the entire extended buffer using a memory-safe chunked scan."""
+    N = buffer_state.size
+    # Reshape buffer into chunks
+    num_chunks = config['CHUNK_SIZE']
+    chunk_size = config['NUM_CHUNKS']
+    padded_capacity = config['PADDED_CAPACITY']
+    n_actions = config['N_ACTIONS']
+    
+    chunked_trace_sa = buffer_state.traces.reshape(num_chunks, chunk_size, -1)
+    chunked_phi_sa = buffer_state.features.reshape(num_chunks, chunk_size, -1)
+    chunked_next_phi_s = buffer_state.next_features.reshape(num_chunks, chunk_size, -1)
+    chunked_terminals = buffer_state.terminals.reshape(num_chunks, chunk_size, 1)
+    chunked_absorb = buffer_state.absorb_masks.reshape(num_chunks, chunk_size, 1)
+
+    dim_kA = chunked_phi_sa.shape[-1]
+    k_lstd = chunked_next_phi_s.shape[-1]
+    
+    valid_mask = (jnp.arange(padded_capacity) < buffer_state.size)[..., None]
+    chunked_mask = valid_mask.reshape(num_chunks, chunk_size, 1)
+    
+    gamma_i = config["GAMMA_i"]
+
+    def lspi_step(w_current, _):
+        def process_chunk(carry, chunk_data):
+            A_acc, b_acc = carry
+            trace_sa, phi_sa, next_phi_s, term, absorb, mask = chunk_data
+            
+            next_rho = get_scale_free_bonus(Sigma_inv, next_phi_s)
+            
+            # 1. Greedy Policy Evaluation
+            w_reshaped = w_current.reshape(n_actions, k_lstd)
+            Q_next = jnp.einsum("...k, ak -> ...a", next_phi_s, w_reshaped)
+            greedy_actions = jnp.argmax(Q_next, axis=-1)
+            Pi_greedy = jax.nn.one_hot(greedy_actions, n_actions)
+            
+            PΠφ = expected_next_sa_features(next_phi_s, Pi_greedy, dim_kA )
+            
+            # 2. Construction of A
+            traces_masked = trace_sa * mask
+            
+            S = jnp.einsum("ni, nj -> ij", traces_masked, phi_sa)
+            
+            cut = term * (1.0 - absorb)
+            cut_factor = 1.0 - cut
+
+            γPΠφ = gamma_i * cut_factor * PΠφ
+            Z_γPΠΦ = jnp.einsum("ni, nj -> ij", traces_masked, γPΠφ)
+            A_std = S - Z_γPΠΦ
+            
+            abs_features = PΠφ * absorb
+            abs_traces = phi_sa * absorb
+            A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces * mask, abs_features)
+            
+            A_batch = A_std + A_abs
+            
+            # 3. Construction of b
+            b_std = jnp.einsum("ni, n -> i", traces_masked, next_rho)
+            b_abs = jnp.einsum("ni, n -> i", abs_traces * mask, next_rho)
+            b_batch = b_std + b_abs
+            
+            return (A_acc + A_batch, b_acc + b_batch), None
+
+        init_A = jnp.zeros((dim_kA, dim_kA))
+        init_b = jnp.zeros(dim_kA)
+        
+        (final_A, final_b), _ = jax.lax.scan(
+            process_chunk, 
+            (init_A, init_b), 
+            (chunked_trace_sa, chunked_phi_sa, chunked_next_phi_s, chunked_terminals, chunked_absorb, chunked_mask)
         )
         
         

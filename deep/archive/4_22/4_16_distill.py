@@ -5,7 +5,7 @@ from core.buffer import LSTDBufferState, FeatureTraceBufferManager
 from core.lstd import solve_lstd_lambda_from_buffer
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "4_16_distill_override"
+SAVE_DIR = "4_16_distill"
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -223,7 +223,7 @@ def make_train(config):
             # )
             lstd_traj = traj_batch._replace(
                 i_value=lstd_v_i, 
-                next_i_val=fixed_lstd_next_i_val
+                next_i_val=lstd_next_v_i
             )
 
             # --- 4. CALCULATE DUAL GAES ---

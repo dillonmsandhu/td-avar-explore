@@ -44,11 +44,37 @@ class ImpalaCNN(nn.Module):
         # Stack 3: [32 channels] -> Result: 11x11x32
         x = ImpalaStack(channels=32)(x)
         
-        x = nn.relu(x) # Final activation before flattening
+        # x = nn.relu(x) # Final activation before flattening
         x = x.reshape((x.shape[0], -1)) # Flatten
         
         # Finally linear layer
         x = nn.Dense(self.out_dim, kernel_init=nn.initializers.orthogonal(jnp.sqrt(2)))(x)
+        
+        return x
+
+# used for Rho featus and random LSTD feats
+class CNN(nn.Module): 
+    out_dim: int = 128
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        # 1. Standardize Input
+        if x.ndim == 3:
+            x = x[None, ...]
+        x = jnp.transpose(x, (0, 2, 3, 1))
+        x = x / 255.0
+        
+        # 2. Random Convolutional Torso
+        x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
+        x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
+        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
+        x = x.reshape((x.shape[0], -1))
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        # 4. Final Projection
+        x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
         
         return x
 
@@ -57,20 +83,16 @@ class ImpalaCNN(nn.Module):
 # --------------------- RND ---------------------------
 # =====================================================
 
-class RNDTrainState(TrainState):
-    target_params: Any
-
 class RND_Net(nn.Module):
-    k: int = 128
+    k: int = 384 # same as small dino
     normalize: bool = False
     bias: bool = True
-    n_actions: int = 1
     
     def setup(self):
         # Base feature dimension before optional bias
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
-        self.torso = ImpalaCNN(self.feat_dim)
+        self.torso = CNN(self.feat_dim)
     def __call__(self, x):
         phi = self.torso(x)  
         
@@ -105,10 +127,11 @@ class ActorCritic2Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
-    
+    out_dim: int = 384
+
     def setup(self):
-        self.actor_torso = ImpalaCNN(out_dim=128)
-        self.critic_torso = ImpalaCNN(out_dim=128)
+        self.actor_torso = ImpalaCNN(self.out_dim)
+        self.critic_torso = ImpalaCNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -141,11 +164,12 @@ class ActorCritic3Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
+    out_dim: int= 384
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(128)
-        self.critic_ext = ImpalaCNN(out_dim=128)
-        self.critic_int = ImpalaCNN(out_dim=128)
+        self.actor_torso = ImpalaCNN(self.out_dim)
+        self.critic_ext = ImpalaCNN(self.out_dim)
+        self.critic_int = ImpalaCNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -197,7 +221,10 @@ class ActorCritic3Head(nn.Module):
 # --------------- INITIALIZATION ----------------------
 # =====================================================
 
-def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128, n_actions=1):
+class RNDTrainState(TrainState):
+    target_params: Any
+    
+def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128):
     """
     Initializes the RND network. 
     If state_action_features is True, returns shape (..., n_actions, k).
@@ -207,7 +234,6 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128,
         k=k, 
         normalize=normalize_features, 
         bias=bias, 
-        n_actions=n_actions
     )
     rng, init_rng = jax.random.split(rng)
     params = model.init(init_rng, jnp.zeros(obs_shape))

@@ -4,7 +4,6 @@ from core.imports import *
 
 class Transition(NamedTuple):
     done: jnp.ndarray
-    goal: jnp.ndarray
     action: jnp.ndarray
     value: jnp.ndarray
     next_value: jnp.ndarray
@@ -15,7 +14,12 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
-    info: jnp.ndarray
+    info: dict
+    # --- NEW FIELDS ---
+    phi: jnp.ndarray            # LSTD features
+    next_phi: jnp.ndarray 
+    rho_feats: jnp.ndarray       # Exploration/Intrinsic features
+    next_rho_feats: jnp.ndarray  
 
 def make_env(config):
     env = envpool.make(
@@ -23,7 +27,7 @@ def make_env(config):
         env_type="gym",
         num_envs=config["NUM_ENVS"],
         seed=config["SEED"],
-        num_threads=config.get('THREADS', 4),
+        num_threads=config.get("THREADS", 1),
         **config.get("ENV_KWARGS", {}),
     )
     
@@ -53,57 +57,49 @@ def update_cov(sigma_state, phi):
 def calculate_gae(
     traj_batch, 
     γ, λ, 
-    is_continuing: bool, 
-    is_absorbing: bool, 
+    cut_i_trace,  # Precomputed boolean array (T, B)
+    absorb_mask,  # Precomputed boolean array (T, B)
     γi=None, λi=None
 ):
     if γi is None: γi = γ
     if λi is None: λi = λ
 
-    def _get_advantages(gae_accs, transition):
+    # Extrinsic is always strictly episodic. Cut on death OR the dummy step.
+    # (Since you precompute cut_i_trace, we can just quickly grab the extrinsic cuts here)
+    done = traj_batch.done
+    is_dummy = traj_batch.info.get('is_dummy', jnp.zeros_like(done))
+    cut_e_trace = done | is_dummy
+
+    # Convert cut masks to float multipliers for clean math inside the scan
+    cut_e_mult = 1.0 - cut_e_trace.astype(jnp.float32)
+    cut_i_mult = 1.0 - cut_i_trace.astype(jnp.float32)
+
+    # Package everything into a single tuple for the scan
+    scan_inputs = (traj_batch, cut_e_mult, cut_i_mult, absorb_mask)
+
+    def _get_advantages(gae_accs, inputs):
         gae, i_gae = gae_accs
-        
-        done = transition.done              # True at S_{T-1} -> S_T
-        is_dummy = transition.info['is_dummy'] # True at S_T -> S_0 
-        is_goal = transition.info['is_goal']   # True at S_{T-1} -> S_T 
-        was_goal = transition.info['was_goal'] # True at S_T -> S_0 (if S_T was a goal)
+        transition, continue_e, continue_i, absorb = inputs
         
         # --- Extrinsic ---
-        # Extrinsic is always episodic. We cut at the end of the game AND at the teleportation.
-        cut_e_trace = done | is_dummy
-        delta = transition.reward + γ * transition.next_value * (1 - cut_e_trace) - transition.value
-        gae = delta + (γ * λ * (1 - cut_e_trace) * gae)
+        delta = transition.reward + γ * transition.next_value * continue_e - transition.value
+        gae = delta + (γ * λ * continue_e * gae)
         
         # --- Intrinsic --- 
-        target_i_val = transition.next_i_val
-        
-        if is_continuing: # Continuing: Never cut. S_T bootstraps directly from S_0.
-            cut_i_trace = jnp.zeros_like(done, dtype=jnp.bool_)
-            
-        elif is_absorbing:
-            # Absorbing: Cut normal deaths, but keep goals open to absorb.
-            death = (done & ~is_goal) # died this turn.
-            dummy_after_death = (is_dummy & ~was_goal) # died last turn
-            dummy_after_goal = is_dummy & was_goal # suceeded last turn.
-            
-            cut_i_trace = death | dummy_after_death
-            target_i_val = jnp.where(dummy_after_goal, 
-                                transition.intrinsic_reward / (1.0 - γi), 
-                                transition.next_i_val
-            )
-            
-        else: # Pure Episodic: Exactly like extrinsic.  
-            cut_i_trace = cut_e_trace
+        # If absorb is True, override the next value with the infinite sum of the intrinsic reward
+        target_i_val = jnp.where(absorb, 
+                            transition.intrinsic_reward / (1.0 - γi), 
+                            transition.next_i_val)
 
-        # Compute intrinsic GAE
-        i_delta = transition.intrinsic_reward + γi * target_i_val * (1 - cut_i_trace) - transition.i_value 
-        i_gae = i_delta + (γi * λi * (1 - cut_i_trace) * i_gae)
+        i_delta = transition.intrinsic_reward + γi * target_i_val * continue_i - transition.i_value 
+        i_gae = i_delta + (γi * λi * continue_i * i_gae)
         
         return (gae, i_gae), (gae, i_gae)
 
     initial_accs = (jnp.zeros_like(traj_batch.value[0]), jnp.zeros_like(traj_batch.i_value[0]))
+    
     _, (advantages, i_advantages) = jax.lax.scan(
-        _get_advantages, initial_accs, traj_batch, reverse=True, unroll=16
+        _get_advantages, initial_accs, scan_inputs, reverse=True, unroll=16
     )
     
     return (advantages, i_advantages), (advantages + traj_batch.value, i_advantages + traj_batch.i_value)
@@ -145,7 +141,7 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
         x = jax.random.permutation(rng, x)  # shuffle the transitions
         x = x.reshape(n_minibatches, -1, *x.shape[1:])  # num_mini_updates, batch_size/num_mini_updates, ...
         return x
-    minibatches = jax.tree.map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
+    minibatches = jax.tree_util.tree_map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
 
 
@@ -166,6 +162,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -2.0, 2.0) # outlier clipping for the policy. 95% unclipped with 2.
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -185,3 +182,35 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (value_loss, loss_actor, entropy)
+
+
+def calculate_traces(features, cut_trace, γ, λ):
+    """
+    Unified trace calculation supporting all configurations cleanly.
+    Input shapes:
+        features: (T, B, k)
+        cut_trace: (T, B) - The precomputed boolean mask
+    Returns:
+        traces: (T, B, k)
+    """
+    def _step_trace(trace_prev, scan_inputs):
+        phi, cut = scan_inputs
+        
+        # 1. Calculate current trace (has history!)
+        trace_current = trace_prev * γ * λ + phi
+        
+        # 2. Determine history for the NEXT step
+        # If cut is True, trace_mult is 0.0, completely severing the link to the next step
+        trace_mult = 1.0 - cut.astype(jnp.float32)
+        trace_next = trace_current * trace_mult[..., None] 
+        
+        return trace_next, trace_current
+
+    # Scan over the time dimension (T)
+    _, traces = jax.lax.scan(
+        _step_trace, 
+        jnp.zeros_like(features[0]), 
+        (features, cut_trace)
+    )
+    
+    return traces
