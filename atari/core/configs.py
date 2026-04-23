@@ -1,12 +1,13 @@
 # ClearRL RND: https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_rnd_envpool.py
 shared_config = {
     "TOTAL_TIMESTEPS": int(5e7),
-    "NUM_ENVS": 128, # CleanRL: 8, museli 768(?)
-    "NUM_STEPS": 128, # CleanRL: 128
-    "GAMMA": 0.999,
-    "GAE_LAMBDA": 0.95, # CleanRL: 0.95
-    "CLIP_EPS": 0.1, # CleanRL: 0.1
-    "ENT_COEF": 0.001, # CleanRL 0.01
+    "NUM_ENVS": 128, # CleanRL RND: 128
+    "NUM_STEPS": 128, # CleanRL RND: 128, Clean
+    "GAMMA": 0.999, # CleanRL RND
+    "GAE_LAMBDA": 0.95, # CleanRL RND
+    "CLIP_EPS": 0.1, # CleanRL RND
+    "VF_CLIP": 0.5, # Seperate, based on Museli's high clipping and other claims that vf clipping doesn't help
+    "ENT_COEF": 0.001, # CleanRL 0.01, CleanRL RND: 0.001.
     "ENV_NAME": "Pong-v5",
     "LAYER_NORM" : True,
     'LR': 3e-4, # CleanRL: 2e-4, museli 3e-4
@@ -24,20 +25,17 @@ shared_config = {
         "noop_max": 30,
     },
     # Exploration Specific
-    "GAMMA_i": 0.99,
-    "NORMALIZE_FEATURES": True,
-    "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
-    "NORMALIZE_REWARDS": False,
-    "EPISODIC": True,
+    "GAMMA_i": 0.99, # CleanRL RND
+    "GAE_LAMBDA_i": 0.95, # CleanRL RND
+    "LSTD_LAMBDA_i": 0.75, # New
+    "NORMALIZE_FEATURES": True, # New
+    "EPISODIC": True,  # CleanRL does continuous
     "ABSORBING_TERMINAL_STATE": True,
-    "LSTD_LAMBDA_i": 0.75,
-    "BONUS_SCALE": 2.0,
-    "SCHEDULE_BETA": True,
+    "BONUS_SCALE": 2.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
+    "SCHEDULE_BETA": True, # New
     "LSTD_L2_REG": 1e-3,
     "RND_FEATURES": 128,
-    "LSTD_FEATURES": 256,
-    "NETWORK_TYPE": "mlp",
-    "RND_NETWORK_TYPE": "mlp",
+    "LSTD_FEATURES": 384, # DinoV2 small has this many so let's see how that does.
     "BIAS": True,
     "RB_SIZE": 100_000,
     "PERCENT_FIFO": .25,

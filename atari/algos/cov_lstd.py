@@ -85,9 +85,11 @@ def make_train(config):
         initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
 
         rnd_rng, rng = jax.random.split(rng)
+        # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
         rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=False, k=k_rho
+            rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=True, k=k_rho 
         )
+        # 
         lstd_net, lstd_params = networks.initialize_rnd_network( # Or a different architecture
             rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=True, k=k_lstd
         ) # will be the same params if the same network

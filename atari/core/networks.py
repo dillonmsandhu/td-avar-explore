@@ -44,7 +44,7 @@ class ImpalaCNN(nn.Module):
         # Stack 3: [32 channels] -> Result: 11x11x32
         x = ImpalaStack(channels=32)(x)
         
-        x = nn.relu(x) # Final activation before flattening
+        # x = nn.relu(x) # Final activation before flattening
         x = x.reshape((x.shape[0], -1)) # Flatten
         
         # Finally linear layer
@@ -52,42 +52,30 @@ class ImpalaCNN(nn.Module):
         
         return x
 
-class CNN(nn.Module):
-    out_dim: int = 256
+# used for Rho featus and random LSTD feats
+class CNN(nn.Module): 
+    out_dim: int = 128
+
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
-            x = x[None, ...]  # Shape becomes (1, H, W, C)
-        
+        # 1. Standardize Input
+        if x.ndim == 3:
+            x = x[None, ...]
         x = jnp.transpose(x, (0, 2, 3, 1))
         x = x / 255.0
         
-        x = nn.Conv(
-            32,
-            kernel_size=(8, 8),
-            strides=(4, 4),
-            padding="VALID",
-            kernel_init=orthogonal(jnp.sqrt(2)),
-        )(x)
-        x = nn.relu(x)
-        x = nn.Conv(
-            64,
-            kernel_size=(4, 4),
-            strides=(2, 2),
-            padding="VALID",
-            kernel_init=orthogonal(jnp.sqrt(2)),
-        )(x)
-        x = nn.relu(x)
-        x = nn.Conv(
-            64,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding="VALID",
-            kernel_init=orthogonal(jnp.sqrt(2)),
-        )(x) # 7 x 7 x 64
-        x = nn.relu(x)
+        # 2. Random Convolutional Torso
+        x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
+        x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
+        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
         x = x.reshape((x.shape[0], -1))
-        x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)),)(x)
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        # 4. Final Projection
+        x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
+        
         return x
 
 
@@ -96,7 +84,7 @@ class CNN(nn.Module):
 # =====================================================
 
 class RND_Net(nn.Module):
-    k: int = 128
+    k: int = 384 # same as small dino
     normalize: bool = False
     bias: bool = True
     
@@ -139,10 +127,11 @@ class ActorCritic2Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
-    
+    out_dim: int = 384
+
     def setup(self):
-        self.actor_torso = ImpalaCNN(out_dim=128)
-        self.critic_torso = ImpalaCNN(out_dim=128)
+        self.actor_torso = ImpalaCNN(self.out_dim)
+        self.critic_torso = ImpalaCNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -175,11 +164,12 @@ class ActorCritic3Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
+    out_dim: int= 384
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(128)
-        self.critic_ext = ImpalaCNN(out_dim=128)
-        self.critic_int = ImpalaCNN(out_dim=128)
+        self.actor_torso = ImpalaCNN(self.out_dim)
+        self.critic_ext = ImpalaCNN(self.out_dim)
+        self.critic_int = ImpalaCNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])

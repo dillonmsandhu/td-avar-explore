@@ -162,6 +162,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -2.0, 2.0) # outlier clipping for the policy. 95% unclipped with 2.
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
