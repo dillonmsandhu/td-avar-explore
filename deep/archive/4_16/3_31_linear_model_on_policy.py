@@ -25,7 +25,7 @@ class Transition(NamedTuple):
 def make_train(config):
     # Extract formulation flags directly from config
     is_episodic = config.get("EPISODIC", True)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -74,7 +74,7 @@ def make_train(config):
 
         # 2. Absorbing Ghost Transitions
         # Terminal states transition to themselves
-        absorb_mask = jnp.where(config.get("ABSORBING_TERMINAL_STATE", True), transitions.done, 0)
+        absorb_mask = jnp.where(config.get("ABSORBING_GOAL_STATE", True), transitions.done, 0)
         phi_C_s = next_phi 
         
         Sigma_abs = jnp.einsum("nmi, nmj -> ij", phi_C_s * absorb_mask[..., None], phi_C_s)

@@ -21,8 +21,8 @@ exec > >(tee -a "${LOGDIR}/log.out") 2> >(tee -a "${LOGDIR}/log.err")
 FILE=$1
 SUFFIX=$2
 
-# python run_exact.py --script algos/3_26_true_val.py --suffix ${SUFFIX} --config '{"BONUS_SCALE": 1.0, "EPISODIC": true, "ABSORBING_TERMINAL_STATE": false}'
+# python run_exact.py --script algos/3_26_true_val.py --suffix ${SUFFIX} --config '{"BONUS_SCALE": 1.0, "EPISODIC": true, "ABSORBING_GOAL_STATE": false}'
 python run_exact.py --script algos/${FILE} --suffix ${SUFFIX} --config '{"TOTAL_TIMESTEPS": 1000000, "N_SEEDS": 2, "CALC_TRUE_VALUES": true, "SCHEDULE_BETA": true, "GAMMA_i": 0.9}'
 
 
-#  --config '{"BONUS_SCALE": 0.01, "EPISODIC": true, "ABSORBING_TERMINAL_STATE": true, "TOTAL_TIMESTEPS": }'
+#  --config '{"BONUS_SCALE": 0.01, "EPISODIC": true, "ABSORBING_GOAL_STATE": true, "TOTAL_TIMESTEPS": }'

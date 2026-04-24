@@ -150,6 +150,14 @@ class LongChainExactValue:
         self.P, self.R_extrinsic = self._build_env_dynamics()
         self.P_cont = self._build_env_dynamics_continuing()
 
+        # Each state i connects to i-1 and i+1
+        rows = jnp.repeat(jnp.arange(self.N), 2)
+        # Indices for Left and Right actions
+        cols_left = jnp.clip(jnp.arange(self.N) - 1, 0, self.N - 1)
+        cols_right = jnp.clip(jnp.arange(self.N) + 1, 0, self.N - 1)
+        # Combine them so they match a flattened pi (N, 2)
+        self.indices = jnp.stack([rows, jnp.stack([cols_left, cols_right], axis=1).flatten()], axis=1)
+
     def _build_env_dynamics(self):
         """Episodic/Absorbing Dynamics. End of chain -> Terminal Self-Loop."""
         num_S = self.num_total_states
@@ -185,30 +193,48 @@ class LongChainExactValue:
         P[self.terminal_idx, :, self.terminal_idx] = 1.0 # Dummy loop for shape stability
         return jnp.array(P)
 
-    # def solve_linear_system(self, pi, P_env, R_env):
-    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
-    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
-    #     A = jnp.eye(self.num_total_states) - self.gamma * P_pi
-    #     return jnp.linalg.solve(A, R_pi)
-
-    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    def solve_linear_system(self, pi, P_env, R_env):
+        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+        A = jnp.eye(self.num_total_states) - self.gamma * P_pi
+        return jnp.linalg.solve(A, R_pi)
+
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
         
-        # 2. Compute dense and convert to sparse
-        P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
-        P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
+    #     # 2. Compute dense and convert to sparse
+    #     P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     static_nse = 2 * self.num_total_states 
+    
+    #     P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense, nse=static_nse)
 
-        def body_fn(v, _):
-            v_new = R_pi + self.gamma * (P_pi_sparse @ v)
-            return v_new, None
+    #     def body_fn(v, _):
+    #         v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+    #         return v_new, None
 
-        # Initial state
-        init_v = jnp.zeros(self.num_total_states)
+    #     # Initial state
+    #     init_v = jnp.zeros(self.num_total_states)
 
-        # 4. Run the compiled scan loop. 
-        # We pass xs=None and specify the length explicitly.
-        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1_000)
+    #     # 4. Run the compiled scan loop. 
+    #     # We pass xs=None and specify the length explicitly.
+    #     final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1_000)
+    #     return final_v
+
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
         
+    #     # pi is (N, 2). Flatten it to match our (2N, 2) indices
+    #     # This creates the sparse matrix structure without calling fromdense
+    #     P_pi_sparse = jsparse.BCOO((pi.flatten(), self.indices), shape=(self.N, self.N))
+
+    #     def body_fn(v, _):
+    #         v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+    #         return v_new, None
+
+    #     init_v = jnp.zeros(self.num_total_states)
+    #     final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1_000)
+    #     return final_v
+            
 
     def compute_true_values(self, network, params, get_int_rew_per_state, all=False):
         out = network.apply(params, self.obs_stack)

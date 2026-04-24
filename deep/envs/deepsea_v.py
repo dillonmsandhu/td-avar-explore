@@ -36,6 +36,53 @@ class DeepSeaExactValue:
                 obs_stack[idx, r, c] = 1.0
                 idx += 1
         return jnp.array(obs_stack)[...,None]
+    
+    # def _build_env_dynamics(self):
+    #     """
+    #     Matches BSuite/Gymnax:
+    #     - Row N-1 is the last playable row.
+    #     - ANY action at N-1 leads to row N (terminal).
+    #     - The 'Right' action (Action 1) at N-1, Column N-1 gives the goal reward.
+    #     """
+    #     num_states = self.num_total_states
+    #     num_actions = self.num_actions
+        
+    #     P = np.zeros((num_states, num_actions, num_states))
+    #     R = np.zeros((num_states, num_actions))
+        
+    #     # We need a 'virtual' sink state to represent row N (terminal)
+    #     # However, to keep the matrix N^2, we usually make the bottom row states 
+    #     # absorb into themselves to represent the end of the episode.
+        
+    #     for r in range(self.N):
+    #         for c in range(self.N):
+    #             curr_idx = r * self.N + c
+                
+    #             # --- Terminal Logic (Row N-1) ---
+    #             if r == self.N - 1:
+    #                 # In Gymnax, any action at row N-1 ends the game.
+    #                 # We model this as a self-loop (absorbing)
+    #                 P[curr_idx, :, curr_idx] = 1.0
+                    
+    #                 # Check for the Goal Reward: Right action at Bottom-Right
+    #                 if c == self.N - 1:
+    #                     # Action 1 is 'Right' in our logic
+    #                     R[curr_idx, 1] = 1.0 - (self.cost / self.N)
+    #                 continue
+
+    #             # --- Standard Logic (Rows 0 to N-2) ---
+    #             next_r = r + 1
+                
+    #             # Action 0: Left
+    #             next_c_left = max(0, c - 1)
+    #             P[curr_idx, 0, next_r * self.N + next_c_left] = 1.0
+
+    #             # Action 1: Right
+    #             next_c_right = min(self.N - 1, c + 1)
+    #             P[curr_idx, 1, next_r * self.N + next_c_right] = 1.0
+    #             R[curr_idx, 1] = -(self.cost / self.N)
+                
+    #     return jnp.array(P), jnp.array(R)
 
     def _build_env_dynamics(self):
         """
@@ -107,146 +154,293 @@ class DeepSeaExactValue:
             
         return jnp.array(P)
 
-    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
-    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
-    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
-        
-    #     I = jnp.eye(self.num_total_states)
-    #     A_mat = I - self.gamma * P_pi
-        
-    #     return jnp.linalg.solve(A_mat, R_pi)
-    
-    # use value iteration due to sparse P matrix
-    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
+        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
         R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
         
-        # Compute dense and convert to sparse
-        P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
-        P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
-
-        def body_fn(v, _):
-            v_new = R_pi + self.gamma * (P_pi_sparse @ v)
-            return v_new, None
-
-        init_v = jnp.zeros(self.num_total_states)
-
-        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=500)
+        I = jnp.eye(self.num_total_states)
+        A_mat = I - self.gamma * P_pi
         
-        return final_v
+        return jnp.linalg.solve(A_mat, R_pi)
+    
+    # use value iteration due to sparse P matrix
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+        
+    #     # Compute dense and convert to sparse
+    #     P_pi_dense = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     P_pi_sparse = jsparse.BCOO.fromdense(P_pi_dense)
+
+    #     def body_fn(v, _):
+    #         v_new = R_pi + self.gamma * (P_pi_sparse @ v)
+    #         return v_new, None
+
+    #     init_v = jnp.zeros(self.num_total_states)
+
+    #     final_v, _ = jax.lax.scan(body_fn, init_v, None, length=500)
+        
+    #     return final_v
 
     def get_value_grid(self, V_flat: jax.Array) -> jax.Array:
         """Reshapes flat value vector to N x N grid."""
         return V_flat.reshape((self.N, self.N))
 
-    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
-        ) -> Tuple[jax.Array, jax.Array, Any]:
+    # def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
+    #     ) -> Tuple[jax.Array, jax.Array, Any]:
             
-            # 1. Forward Pass
-            out = network.apply(params, self.obs_stack)
+    #         # 1. Forward Pass
+    #         out = network.apply(params, self.obs_stack)
             
-            def safe_squeeze(v):
-                return v[..., 0] if v.ndim > 1 else v
+    #         def safe_squeeze(v):
+    #             return v[..., 0] if v.ndim > 1 else v
 
-            if len(out) == 2:
-                pi_dist, v_net = out
-                v_net_grid = self.get_value_grid(safe_squeeze(v_net))
-            elif len(out) == 3:
-                pi_dist, v_net_ext, v_net_int = out
-                v_net_grid = (
-                    self.get_value_grid(safe_squeeze(v_net_ext)), 
-                    self.get_value_grid(safe_squeeze(v_net_int))
-                )
+    #         if len(out) == 2:
+    #             pi_dist, v_net = out
+    #             v_net_grid = self.get_value_grid(safe_squeeze(v_net))
+    #         elif len(out) == 3:
+    #             pi_dist, v_net_ext, v_net_int = out
+    #             v_net_grid = (
+    #                 self.get_value_grid(safe_squeeze(v_net_ext)), 
+    #                 self.get_value_grid(safe_squeeze(v_net_int))
+    #             )
             
-            pi_matrix = pi_dist.probs 
+    #         pi_matrix = pi_dist.probs 
 
-            # 2. Get intrinsic rewards for all N^2 states
-            r_int_s = get_int_rew(self.obs_stack)
+    #         # 2. Get intrinsic rewards for all N^2 states
+    #         r_int_s = get_int_rew(self.obs_stack)
 
-            # 3. Mask terminal row if purely Episodic (Not Absorbing)
-            if self.episodic and not self.absorbing:
-                # Zero out the intrinsic reward for the entire bottom row
-                mask = jnp.ones_like(r_int_s)
-                terminal_start_idx = (self.N - 1) * self.N
-                mask = mask.at[terminal_start_idx:].set(0.0)
-                r_int_s = r_int_s * mask
+    #         # 3. Mask terminal row if purely Episodic (Not Absorbing)
+    #         if self.episodic and not self.absorbing:
+    #             # Zero out the intrinsic reward for the entire bottom row
+    #             mask = jnp.ones_like(r_int_s)
+    #             terminal_start_idx = (self.N - 1) * self.N
+    #             mask = mask.at[terminal_start_idx:].set(0.0)
+    #             r_int_s = r_int_s * mask
 
-            # 4. Target selection and Reward projection
-            target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
-            R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+    #         # 4. Target selection and Reward projection
+    #         r_int_s = get_int_rew(self.obs_stack)
 
-            if self.dense:
-                # 1. Subtract 1 from every single transition
-                R_ext_modified = self.R_extrinsic - 1.0
+    #         # 2. Project to State-Action rewards
+    #         # R_int_sa[s, a] = sum_{s'} P(s, a, s') * r_int(s')
+    #         # This properly assigns the reward of the terminal state to the 
+    #         # action taken in row N-2 that lands there.
+    #         target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+    #         R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+
+    #         # 3. Handle transitions AFTER the terminal state
+    #         terminal_start_idx = (self.N - 1) * self.N
+    #         goal_idx = self.num_total_states - 1
+
+    #         # We create a mask for the STATES WE ACT FROM, not the states we land in.
+    #         # Shape (S, 1) will naturally broadcast across the action dimension (A).
+    #         sa_mask = jnp.ones((self.num_total_states, 1))
+
+    #         # Zero out rewards for taking actions from ANY state in row N-1
+    #         sa_mask = sa_mask.at[terminal_start_idx:].set(0.0)
+
+    #         # If the goal is an absorbing infinite sinkhole, restore its ability 
+    #         # to yield reward when taking an action from it.
+    #         if self.absorbing:
+    #             sa_mask = sa_mask.at[goal_idx].set(1.0)
+
+    #         # Apply the mask to the state-action rewards
+    #         R_int_sa = R_int_sa * sa_mask
+
+    #         if self.dense:
+    #             # 1. Subtract 1 from every single transition
+    #             R_ext_modified = self.R_extrinsic - 1.0
                 
-                # 2. Zero out the infinite sinkhole (Terminal Row)
-                terminal_start_idx = (self.N - 1) * self.N
-                mask = jnp.ones_like(R_ext_modified)
-                mask = mask.at[terminal_start_idx:, :].set(0.0) 
+    #             # 2. Zero out the infinite sinkhole (Terminal Row)
+    #             terminal_start_idx = (self.N - 1) * self.N
+    #             mask = jnp.ones_like(R_ext_modified)
+    #             mask = mask.at[terminal_start_idx:, :].set(0.0) 
                 
-                Re = R_ext_modified * mask
-            else:
-                Re = self.R_extrinsic
+    #             Re = R_ext_modified * mask
+    #         else:
+    #             Re = self.R_extrinsic
 
-            # 5. Solve
-            v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
-            v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
+    #         # 5. Solve
+    #         v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
+    #         v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
 
-            return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid
+    #         return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid
     
-    def compute_optimal_intrinsic_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
-        ) -> Tuple[jax.Array, jax.Array, Any]:
+    # def compute_optimal_intrinsic_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None
+    #     ) -> Tuple[jax.Array, jax.Array, Any]:
             
-            # 1. Forward Pass
-            out = network.apply(params, self.obs_stack)
-            def safe_squeeze(v): return v[..., 0] if v.ndim > 1 else v
+    #         # 1. Forward Pass
+    #         out = network.apply(params, self.obs_stack)
+    #         def safe_squeeze(v): return v[..., 0] if v.ndim > 1 else v
 
-            if len(out) == 2:
-                pi_dist, v_net = out
-                v_net_grid = self.get_value_grid(safe_squeeze(v_net))
-            elif len(out) == 3:
-                pi_dist, v_net_ext, v_net_int = out
-                v_net_grid = (
-                    self.get_value_grid(safe_squeeze(v_net_ext)), 
-                    self.get_value_grid(safe_squeeze(v_net_int))
-                )
+    #         if len(out) == 2:
+    #             pi_dist, v_net = out
+    #             v_net_grid = self.get_value_grid(safe_squeeze(v_net))
+    #         elif len(out) == 3:
+    #             pi_dist, v_net_ext, v_net_int = out
+    #             v_net_grid = (
+    #                 self.get_value_grid(safe_squeeze(v_net_ext)), 
+    #                 self.get_value_grid(safe_squeeze(v_net_int))
+    #             )
 
-            # 2. Extract Rewards
-            r_int_s = get_int_rew(self.obs_stack)
-            if self.episodic and not self.absorbing:
-                terminal_start_idx = (self.N - 1) * self.N
-                mask = jnp.ones_like(r_int_s).at[terminal_start_idx:].set(0.0)
-                r_int_s = r_int_s * mask
+    #         # 2. Extract Rewards
+    #         r_int_s = get_int_rew(self.obs_stack)
+    #         if self.episodic and not self.absorbing:
+    #             terminal_start_idx = (self.N - 1) * self.N
+    #             mask = jnp.ones_like(r_int_s).at[terminal_start_idx:].set(0.0)
+    #             r_int_s = r_int_s * mask
 
-            target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
-            R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+    #         target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+    #         R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
 
-            # 3. Solver
-            def solve_v_star(R_sa):
-                R_grid = R_sa.reshape((self.N, self.N, self.num_actions))
-                v_bottom = jnp.where(self.absorbing, R_grid[self.N-1, :, 0] / (1 - self.gamma), jnp.zeros(self.N))
+    #         # 3. Solver
+    #         def solve_v_star(R_sa):
+    #             R_grid = R_sa.reshape((self.N, self.N, self.num_actions))
+    #             v_bottom = jnp.where(self.absorbing, R_grid[self.N-1, :, 0] / (1 - self.gamma), jnp.zeros(self.N))
 
-                def backward_row_step(v_next_row, r_row):
-                    v_left = jnp.roll(v_next_row, shift=1).at[0].set(v_next_row[0])
-                    v_right = jnp.roll(v_next_row, shift=-1).at[-1].set(v_next_row[-1])
-                    q_row = r_row + self.gamma * jnp.stack([v_left, v_right], axis=-1)
-                    v_curr_row = jnp.max(q_row, axis=-1)
-                    return v_curr_row, v_curr_row
+    #             def backward_row_step(v_next_row, r_row):
+    #                 v_left = jnp.roll(v_next_row, shift=1).at[0].set(v_next_row[0])
+    #                 v_right = jnp.roll(v_next_row, shift=-1).at[-1].set(v_next_row[-1])
+    #                 q_row = r_row + self.gamma * jnp.stack([v_left, v_right], axis=-1)
+    #                 v_curr_row = jnp.max(q_row, axis=-1)
+    #                 return v_curr_row, v_curr_row
 
-                rows_to_process = jnp.flip(R_grid[:-1], axis=0)
-                _, v_rest = jax.lax.scan(backward_row_step, v_bottom, rows_to_process)
-                return jnp.flip(jnp.concatenate([v_bottom[None, :], v_rest], axis=0), axis=0)
+    #             rows_to_process = jnp.flip(R_grid[:-1], axis=0)
+    #             _, v_rest = jax.lax.scan(backward_row_step, v_bottom, rows_to_process)
+    #             return jnp.flip(jnp.concatenate([v_bottom[None, :], v_rest], axis=0), axis=0)
 
-            # 4. Extrinsic Logic
-            if self.dense:
-                R_ext_modified = (self.R_extrinsic - 1.0)
-                terminal_start_idx = (self.N - 1) * self.N
-                # Create mask to zero out row N-1
-                mask = jnp.ones_like(R_ext_modified).at[terminal_start_idx:, :].set(0.0)
-                Re = R_ext_modified * mask
-            else:
-                Re = self.R_extrinsic
+    #         # 4. Extrinsic Logic
+    #         if self.dense:
+    #             R_ext_modified = (self.R_extrinsic - 1.0)
+    #             terminal_start_idx = (self.N - 1) * self.N
+    #             # Create mask to zero out row N-1
+    #             mask = jnp.ones_like(R_ext_modified).at[terminal_start_idx:, :].set(0.0)
+    #             Re = R_ext_modified * mask
+    #         else:
+    #             Re = self.R_extrinsic
 
-            v_i_star_grid = solve_v_star(R_int_sa)
-            v_e_star_grid = solve_v_star(Re)
+    #         v_i_star_grid = solve_v_star(R_int_sa)
+    #         v_e_star_grid = solve_v_star(Re)
 
-            return v_e_star_grid, v_i_star_grid, v_net_grid
+    #         return v_e_star_grid, v_i_star_grid, v_net_grid
+
+    def compute_true_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None) -> Tuple[jax.Array, jax.Array, Any]:
+        # 1. Forward Pass
+        out = network.apply(params, self.obs_stack)
+        
+        def safe_squeeze(v):
+            return v[..., 0] if v.ndim > 1 else v
+
+        if len(out) == 2:
+            pi_dist, v_net = out
+            v_net_grid = self.get_value_grid(safe_squeeze(v_net))
+        elif len(out) == 3:
+            pi_dist, v_net_ext, v_net_int = out
+            v_net_grid = (
+                self.get_value_grid(safe_squeeze(v_net_ext)), 
+                self.get_value_grid(safe_squeeze(v_net_int))
+            )
+        
+        pi_matrix = pi_dist.probs 
+
+        # 2. Get intrinsic rewards for all N^2 states
+        r_int_s = get_int_rew(self.obs_stack)
+
+        # 3. Target selection and Reward projection
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+        R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+
+        terminal_start_idx = (self.N - 1) * self.N
+        goal_idx = self.num_total_states - 1
+
+        # We create a mask for the STATES WE ACT FROM
+        sa_mask = jnp.ones((self.num_total_states, 1))
+
+        # Zero out the whole terminal row EXCEPT the goal state
+        # This explicitly leaves sa_mask[goal_idx] as 1.0
+        sa_mask = sa_mask.at[terminal_start_idx : goal_idx].set(0.0)
+
+        # If episodic but NOT absorbing, transitions after the goal should also yield 0
+        if not self.absorbing:
+            sa_mask = sa_mask.at[goal_idx].set(0.0)
+
+        # Apply the mask ONCE
+        R_int_sa = R_int_sa * sa_mask
+
+        # 5. Extrinsic logic
+        if self.dense:
+            R_ext_modified = self.R_extrinsic - 1.0
+            mask = jnp.ones_like(R_ext_modified)
+            mask = mask.at[terminal_start_idx:, :].set(0.0) 
+            Re = R_ext_modified * mask
+        else:
+            Re = self.R_extrinsic
+
+        # 6. Solve
+        v_e_true = self.solve_linear_system(pi_matrix, self.P, Re)
+        v_i_true = self.solve_linear_system(pi_matrix, target_P, R_int_sa)
+
+        return self.get_value_grid(v_e_true), self.get_value_grid(v_i_true), v_net_grid
+
+    def compute_optimal_intrinsic_values(self, network: Any, params: PyTree, get_int_rew: Callable, all=None) -> Tuple[jax.Array, jax.Array, Any]:
+        # 1. Forward Pass
+        out = network.apply(params, self.obs_stack)
+        def safe_squeeze(v): return v[..., 0] if v.ndim > 1 else v
+
+        if len(out) == 2:
+            pi_dist, v_net = out
+            v_net_grid = self.get_value_grid(safe_squeeze(v_net))
+        elif len(out) == 3:
+            pi_dist, v_net_ext, v_net_int = out
+            v_net_grid = (
+                self.get_value_grid(safe_squeeze(v_net_ext)), 
+                self.get_value_grid(safe_squeeze(v_net_int))
+            )
+
+        # 2. Extract Rewards and Project
+        r_int_s = get_int_rew(self.obs_stack)
+        target_P = self.P if (self.episodic or self.absorbing) else self.P_cont
+        R_int_sa = jnp.einsum('sam, m -> sa', target_P, r_int_s)
+
+        # 3. Handle transitions AFTER the terminal state (Matches True Values)
+        terminal_start_idx = (self.N - 1) * self.N
+        goal_idx = self.num_total_states - 1
+
+        sa_mask = jnp.ones((self.num_total_states, 1))
+        sa_mask = sa_mask.at[terminal_start_idx:].set(0.0)
+        
+        if self.absorbing:
+            sa_mask = sa_mask.at[goal_idx].set(1.0)
+
+        R_int_sa = R_int_sa * sa_mask
+
+        # 4. Solver
+        def solve_v_star(R_sa):
+            R_grid = R_sa.reshape((self.N, self.N, self.num_actions))
+            # v_bottom perfectly handles the sa_mask! 
+            # Non-goals will be 0 / (1-gamma) = 0. Goal will be r / (1-gamma).
+            v_bottom = jnp.where(self.absorbing, R_grid[self.N-1, :, 0] / (1 - self.gamma), jnp.zeros(self.N))
+
+            def backward_row_step(v_next_row, r_row):
+                v_left = jnp.roll(v_next_row, shift=1).at[0].set(v_next_row[0])
+                v_right = jnp.roll(v_next_row, shift=-1).at[-1].set(v_next_row[-1])
+                q_row = r_row + self.gamma * jnp.stack([v_left, v_right], axis=-1)
+                v_curr_row = jnp.max(q_row, axis=-1)
+                return v_curr_row, v_curr_row
+
+            rows_to_process = jnp.flip(R_grid[:-1], axis=0)
+            _, v_rest = jax.lax.scan(backward_row_step, v_bottom, rows_to_process)
+            return jnp.flip(jnp.concatenate([v_bottom[None, :], v_rest], axis=0), axis=0)
+
+        # 5. Extrinsic Logic
+        if self.dense:
+            R_ext_modified = (self.R_extrinsic - 1.0)
+            terminal_start_idx = (self.N - 1) * self.N
+            mask = jnp.ones_like(R_ext_modified).at[terminal_start_idx:, :].set(0.0)
+            Re = R_ext_modified * mask
+        else:
+            Re = self.R_extrinsic
+
+        v_i_star_grid = solve_v_star(R_int_sa)
+        v_e_star_grid = solve_v_star(Re)
+
+        return v_e_star_grid, v_i_star_grid, v_net_grid

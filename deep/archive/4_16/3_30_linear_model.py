@@ -26,7 +26,7 @@ class Transition(NamedTuple):
 def make_train(config):
     # Extract formulation flags directly from config
     is_episodic = config.get("EPISODIC", True)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -84,7 +84,7 @@ def make_train(config):
 
     #     # 2. Absorbing Ghost Transitions
     #     # We need phi_sa(C, random_policy) = [phi(C)/n_actions, phi(C)/n_actions, ...]
-    #     absorb_mask = jnp.where(config.get("ABSORBING_TERMINAL_STATE", True), transitions.done, 0)
+    #     absorb_mask = jnp.where(config.get("ABSORBING_GOAL_STATE", True), transitions.done, 0)
     #     Pi_unif = jnp.ones((*transitions.done.shape, n_actions)) / n_actions
     #     phi_C_sa = expected_next_sa_features(next_phi, Pi_unif) # Shape: (Batch, Envs, k*n_actions)
         
@@ -150,7 +150,7 @@ def make_train(config):
         w_r_num_batch = (Φ * rho[..., None]).sum(axis=batch_axes) / batch_size
 
         # 2. Absorbing Ghost Transitions
-        absorb_mask = jnp.where(config.get("ABSORBING_TERMINAL_STATE", True), transitions.done, 0)
+        absorb_mask = jnp.where(config.get("ABSORBING_GOAL_STATE", True), transitions.done, 0)
         Pi_unif = jnp.ones((*transitions.done.shape, n_actions)) / n_actions
         phi_C_sa = expected_next_sa_features(next_phi, Pi_unif) 
         

@@ -34,7 +34,7 @@ class LSTDBufferState(NamedTuple):
 
 def make_train(config):
     is_episodic = config.get("EPISODIC", True)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     terminate_lstd_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]

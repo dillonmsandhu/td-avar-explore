@@ -25,7 +25,7 @@ def make_train(config):
     config["VF_COEF"] = 0.0 
     
     is_episodic = config.get("EPISODIC", True)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]

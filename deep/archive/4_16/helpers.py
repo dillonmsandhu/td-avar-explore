@@ -941,7 +941,7 @@ def initialize_evaluator(config):
     from envs.fourrooms_custom import FourRoomsExactValue
     from envs.long_chain import LongChainExactValue
 
-    absorbing = config.get('ABSORBING_TERMINAL_STATE', True)
+    absorbing = config.get('ABSORBING_GOAL_STATE', True)
     episodic = config.get('EPISODIC', True)
     
     if not config.get("CALC_TRUE_VALUES", False):

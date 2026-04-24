@@ -93,7 +93,7 @@ shared = {
     "CLIP_REWARD": False,
     # for the LSPI variant
     "LSPI_NUM_ITERS": 5,
-    "ABSORBING_TERMINAL_STATE": True, 
+    "ABSORBING_GOAL_STATE": True, 
     "RB_SIZE": 250_000,
     "PERCENT_FIFO": 0.5
 }
