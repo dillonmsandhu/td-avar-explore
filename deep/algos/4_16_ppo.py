@@ -90,8 +90,8 @@ def make_train(config):
                 config["GAMMA"], 
                 config["GAE_LAMBDA"], 
                 is_continuing, 
-                γi=config["GAMMA_i"], 
-                λi=config["GAE_LAMBDA_i"]
+                γi=0.0, 
+                λi=0.0
             )
             
             extrinsic_adv = gaes[0]

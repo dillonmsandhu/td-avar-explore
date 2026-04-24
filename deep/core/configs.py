@@ -27,9 +27,9 @@ shared = {
     "GAE_LAMBDA": 0.9,
     "GAE_LAMBDA_i": 0.9,
     "LSTD_LAMBDA_i": 0.8,
-    "CLIP_EPS": 0.1,
-    "VF_CLIP": 0.1,
-    "ENT_COEF": 0.01,
+    "CLIP_EPS": 0.2,
+    "VF_CLIP": 0.2,
+    "ENT_COEF": 0.001,
     "VF_COEF": 0.5,
     "MAX_GRAD_NORM": 0.5,
     "SEED": 42,
@@ -45,18 +45,18 @@ shared = {
     "LSTD_L2_REG": 1e-6,
     "NETWORK_TYPE": "mlp",
     "RND_NETWORK_TYPE": "mlp", # used for the (Static) LSTD network and Rho network
-    "K_RHO": 128,
-    "LSTD_FEATURES":128,
+    "K_RHO": 64,
+    "LSTD_FEATURES": 128,
     "WARMUP": 1_000,
     "STAGGERED_STARTS": True,
     "BIAS": False,
     "LSTD_BIAS": True,
-    "RB_SIZE": 200_000,
-    "PERCENT_FIFO": .1,
+    "RB_SIZE": 100_000,
+    "PERCENT_FIFO": .25,
     "CALC_TRUE_VALUES": False,
     "N_SEEDS": 2,
     # not tested over:
-    "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
+    "NORMALIZE_OBS": False, 
     "NORMALIZE_REWARDS": False,
     # pretrained mode: offline feature cache lookup (e.g. DINOv2 ViT-S/14)
     "PRETRAINED_CACHE_PATH": None,       # path to .npz from precompute script
@@ -73,12 +73,12 @@ ds_specific = {
     "N_SEEDS": 4,
     "ENV_SIZE": 50,
     "ABSORBING_GOAL_STATE": False,
-    "BONUS_SCALE": 0.05, # very sparse reward but does have negative reward of 1/N
-    "SCHEDULE_BETA": False, # decays Beta from BONUS_SCALE to 0 during learning.
+    "BONUS_SCALE": 0.5, # very sparse reward but does have negative reward of 1/N
+    # "SCHEDULE_BETA": False, # decays Beta from BONUS_SCALE to 0 during learning.
     "NORMALIZE_RHO_FEATURES": False, 
-    "RB_SIZE": 200000,
-    "CLIP_EPS": 0.05, # prevent the policy from too rapidly veering away from the correct path after finding it due to "distractor" rewards.
-    "VF_CLIP": 0.05,
+    "RB_SIZE": 200000, # prevent forgetting after convergence
+    "CLIP_EPS": 0.1, # prevent the policy from too rapidly veering away from the correct path after finding it due to "distractor" rewards.
+    "VF_CLIP": 0.1,
     "LSTD_L2_REG": 1e-8,
 }
 
@@ -122,8 +122,7 @@ chain = {
     "ABSORBING_GOAL_STATE": True,
     "STAGGERED_STARTS": False,
     "LSTD_LAMBDA_i": 0.0,
-    "N_SEEDS": 2, 
-    "BONUS_SCALE": 0.1,
+    "N_SEEDS": 4, 
     }
 
 
@@ -162,7 +161,7 @@ CONFIG_REGISTRY = {
         "config_dict": visual,
         "envs": ["FourRoomsCustom-v0"],
     },
-    "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0", "MountainCar-v0"]},
+    "mc": {"config_dict": mc_config, "envs": ["SparseMountainCar-v0"]},
     "ds": {"config_dict": ds_config, "envs": ["DeepSea-bsuite"]},
     "min": {
         "config_dict": min_config,
@@ -202,7 +201,7 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         "envs": [
             "DiscountingChain-bsuite", "CartPole-v1", "Acrobot-v1", 
             "Reacher-misc", "PointRobot-misc", "Swimmer-misc", 
-            "SparseMountainCar-v0", "MountainCar-v0"
+            "SparseMountainCar-v0"
         ]
     }
 
@@ -225,30 +224,30 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
     for size in [20, 30, 40, 45, 50]:
         ds_cfg = shared_base | ds_base | {
             "ENV_SIZE": size, 
-            "TOTAL_TIMESTEPS": int(size * 5_000), 
+            "TOTAL_TIMESTEPS": int(size * 10_000), 
             **ft_overrides
         }
         FINAL_TESTING[f"ds_{size}"] = {"config_dict": ds_cfg, "envs": ["DeepSea-bsuite"]}
 
     # FourRooms: Dual sizes
-    for size in [21, 29, 35]:
+    for size in [21, 31, 41]:
         fr_cfg = shared_base| visual_base | {"ENV_SIZE": size,**ft_overrides}
         FINAL_TESTING[f"four_rooms_{size}"] = {"config_dict": fr_cfg, "envs": ["FourRoomsCustom-v0"]}
 
     # Chain: cnn_1d Distillation Proof
     for size in [200, 400]:
-        ch_cfg = shared_base | chain_base | {"ENV_SIZE": size,"RND_NETWORK_TYPE": "cnn_1d","RND_FEATURES": 128,"BIAS": True,"NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **ft_overrides
+        ch_cfg = shared_base | chain_base | {"ENV_SIZE": size,"RND_NETWORK_TYPE": "mlp", "RND_FEATURES": 128,"BIAS": True,"NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **ft_overrides
         }
-        FINAL_TESTING[f"chain_cnn_1d_{size}"] = {"config_dict": ch_cfg, "envs": ["Chain"]}
+        FINAL_TESTING[f"chain_mlp_{size}"] = {"config_dict": ch_cfg, "envs": ["Chain"]}
 
     # ---------------------------------------------------------------------
     # FINAL_EXACT: Exact solving for analysis/heatmaps
     # ---------------------------------------------------------------------
     fe_overrides = {"CALC_TRUE_VALUES": True, "N_SEEDS": 1}
     
-    FINAL_EXACT["chain_cnn_1d_175"] = {
+    FINAL_EXACT["chain_mlp_175"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 175, "RND_NETWORK_TYPE": "cnn_1d", "RND_FEATURES": 128, "LSTD_FEATURES": 128,
+            "ENV_SIZE": 175, "RND_NETWORK_TYPE": "mlp", "RND_FEATURES": 128, "LSTD_FEATURES": 128,
             "BIAS": True, "NORMALIZE_FEATURES": True, **fe_overrides
         },
         "envs": ["Chain"]
@@ -274,8 +273,13 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         "envs": ["FourRoomsCustom-v0"]
     }
 
-    FINAL_EXACT["four_rooms_29_exact"] = {
-        "config_dict": shared_base | visual_base | {"ENV_SIZE": 29, **fe_overrides}, 
+    FINAL_EXACT["four_rooms_31_exact"] = {
+        "config_dict": shared_base | visual_base | {"ENV_SIZE": 31, **fe_overrides}, 
+        "envs": ["FourRoomsCustom-v0"]
+    }
+
+    FINAL_EXACT["four_rooms_41_exact"] = {
+        "config_dict": shared_base | visual_base | {"ENV_SIZE": 41, **fe_overrides}, 
         "envs": ["FourRoomsCustom-v0"]
     }
 
@@ -306,7 +310,15 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         "envs": ["Chain"]
     }
 
-    FINAL_EXACT["chain_cnn_165_absorbing"] = {
+    FINAL_EXACT["chain_mlp_165_absorbing"] = {
+        "config_dict": shared_base | chain_base | {
+            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "mlp", "RND_FEATURES": 128, "EPISODIC": True, "ABSORBING_GOAL_STATE": True,
+            "BIAS": False, "LSTD_BIAS": True ,"LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **fe_overrides
+        },
+        "envs": ["Chain"]
+    }
+
+    FINAL_EXACT["chain_cnn_170_absorbing"] = {
         "config_dict": shared_base | chain_base | {
             "ENV_SIZE": 160, "RND_NETWORK_TYPE": "cnn_1d", "RND_FEATURES": 128, "EPISODIC": True, "ABSORBING_GOAL_STATE": True,
             "BIAS": False, "LSTD_BIAS": True ,"LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **fe_overrides
