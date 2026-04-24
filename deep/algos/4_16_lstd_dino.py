@@ -163,14 +163,13 @@ def make_train(config):
         # (features come from the dino cache).
         rnd_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"],
+            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_RHO_FEATURES"], config["BIAS"],
             int(config.get("RND_FEATURES", 128)),
         )
-        target_params = rnd_params
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
-            config, network, rnd_net, network_params, rnd_params, target_params
+            config, network, rnd_net, network_params, rnd_params
         )
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
