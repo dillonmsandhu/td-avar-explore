@@ -164,7 +164,7 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(
             rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_RHO_FEATURES"], config["BIAS"],
-            int(config.get("RND_FEATURES", 128)),
+            int(config.get("K_RHO", 128)),
         )
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
