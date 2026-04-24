@@ -58,6 +58,9 @@ shared = {
     # not tested over:
     "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
     "NORMALIZE_REWARDS": False,
+    # pretrained mode: offline feature cache lookup (e.g. DINOv2 ViT-S/14)
+    "PRETRAINED_CACHE_PATH": None,       # path to .npz from precompute script
+    "PRETRAINED_MODEL_TAG": "dinov2_vits14",  # informational only
 }
 
 # --- Environment Specific Overrides ---

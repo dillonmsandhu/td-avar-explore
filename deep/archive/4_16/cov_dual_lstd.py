@@ -1,9 +1,131 @@
 # Covariance-Based Intrinsic Reward, propagated by LSTD (Dual LSTD for Ve and Vi).
 # Consolidated version: Handles both standard training and ExactValue logging via config.
+#
+# Feature pipeline: the LSTD basis phi(s) is selected via LSTD_FEATURE_TYPE:
+#   - "rnd"        : random frozen CNN/MLP (default; legacy behavior)
+#   - "tabular"    : one-hot from the agent-channel argmax (FourRooms only)
+#   - "pretrained" : exact lookup into an offline DINOv2/etc. feature cache
+#                    (PRETRAINED_CACHE_PATH .npz). FourRooms-only, keyed on
+#                    (agent_idx, goal_idx).
+# For this algorithm the intrinsic-reward features share the same phi; the
+# separate RI_FEATURE_TYPE used in cov_lstd_vf is not exposed here.
 from core.imports import *
+import numpy as np
 import core.helpers as helpers
 import core.networks as networks
+from envs.fourrooms_custom import FourRoomsExactValue
+from envs.deepsea_v import DeepSeaExactValue
+from envs.long_chain import LongChainExactValue
 SAVE_DIR = 'cov_dual_lstd'
+
+
+def _build_feature_pipeline(config, obs_shape, rng):
+    """Return (get_features_fn, k) for cov_dual_lstd.
+
+    get_features_fn(obs) -> phi   (no params dependency; frozen features).
+    """
+    use_bias = config.get("BIAS", True)
+    feature_type = config.get("LSTD_FEATURE_TYPE", "rnd")
+
+    if feature_type == "rnd":
+        k = int(config.get("RND_FEATURES", 128))
+        rnd_rng, target_rng = jax.random.split(rng)
+        rnd_net, rnd_params = networks.initialize_rnd_network(
+            rnd_rng, obs_shape,
+            config["RND_NETWORK_TYPE"],
+            config["NORMALIZE_FEATURES"],
+            config["BIAS"],
+            k,
+        )
+        _, target_params = networks.initialize_rnd_network(
+            target_rng, obs_shape,
+            config["RND_NETWORK_TYPE"],
+            config["NORMALIZE_FEATURES"],
+            config["BIAS"],
+            k,
+        )
+        get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
+        return get_features_fn, k, rnd_net, rnd_params, target_params
+
+    if feature_type == "tabular":
+        env_name = config.get("ENV_NAME", "")
+        if env_name not in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+            raise ValueError("Tabular features only supported for FourRooms envs.")
+        room_size = int(config.get("FOURROOMS_SIZE", 21))
+        k = room_size * room_size
+
+        def get_features_fn(obs):
+            if obs.ndim >= 3:
+                agent_map = obs[..., 1]
+                return agent_map.reshape(*agent_map.shape[:-2], k)
+            pos = obs[..., :2].astype(jnp.int32)
+            y = jnp.clip(pos[..., 0], 0, room_size - 1)
+            x = jnp.clip(pos[..., 1], 0, room_size - 1)
+            idx = y * room_size + x
+            return jax.nn.one_hot(idx, k, dtype=jnp.float32)
+
+        # Still need a dummy rnd_net/params for train-state scaffolding downstream.
+        rnd_rng, _ = jax.random.split(rng)
+        rnd_net, rnd_params = networks.initialize_rnd_network(
+            rnd_rng, obs_shape,
+            config["RND_NETWORK_TYPE"],
+            config["NORMALIZE_FEATURES"],
+            config["BIAS"],
+            int(config.get("RND_FEATURES", 128)),
+        )
+        target_params = rnd_params
+        return get_features_fn, k, rnd_net, rnd_params, target_params
+
+    if feature_type == "pretrained":
+        cache_path = config.get("PRETRAINED_CACHE_PATH")
+        if cache_path is None:
+            raise ValueError("PRETRAINED_CACHE_PATH must be set for 'pretrained' features")
+        env_name = config.get("ENV_NAME", "")
+        if env_name not in {"FourRooms-misc", "FourRoomsCustom-v0"}:
+            raise ValueError("Pretrained features only supported for FourRooms envs.")
+
+        data = np.load(cache_path)
+        feats_np = np.asarray(data["features"], dtype=np.float32)
+        obs_np = np.asarray(data["obs_stack"], dtype=np.float32)
+        N, H, W, _ = obs_np.shape
+        cells = H * W
+        agent_keys = obs_np[..., 1].reshape(N, cells).argmax(axis=-1)
+        goal_keys = obs_np[..., 2].reshape(N, cells).argmax(axis=-1)
+        keys = agent_keys * cells + goal_keys
+        lookup_np = np.zeros(cells * cells, dtype=np.int32)
+        lookup_np[keys] = np.arange(N, dtype=np.int32)
+
+        feature_table = jnp.asarray(feats_np)
+        lookup = jnp.asarray(lookup_np)
+
+        k_raw = int(feats_np.shape[-1])
+        normalize = config.get("NORMALIZE_FEATURES", False)
+        k = k_raw + (1 if use_bias else 0)
+
+        def get_features_fn(obs):
+            agent = jnp.argmax(obs[..., 1].reshape(*obs.shape[:-3], cells), axis=-1)
+            goal = jnp.argmax(obs[..., 2].reshape(*obs.shape[:-3], cells), axis=-1)
+            row = lookup[agent * cells + goal]
+            phi = feature_table[row]
+            if normalize:
+                phi = phi / (jnp.linalg.norm(phi, axis=-1, keepdims=True) + 1e-8)
+            if use_bias:
+                bias = jnp.ones((*phi.shape[:-1], 1))
+                phi = jnp.concatenate([phi, bias], axis=-1)
+            return phi
+
+        rnd_rng, _ = jax.random.split(rng)
+        rnd_net, rnd_params = networks.initialize_rnd_network(
+            rnd_rng, obs_shape,
+            config["RND_NETWORK_TYPE"],
+            config["NORMALIZE_FEATURES"],
+            config["BIAS"],
+            int(config.get("RND_FEATURES", 128)),
+        )
+        target_params = rnd_params
+        return get_features_fn, k, rnd_net, rnd_params, target_params
+
+    raise ValueError(f"Unknown LSTD_FEATURE_TYPE: {feature_type!r}")
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -21,7 +143,6 @@ def make_train(config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
-    k = config.get('RND_FEATURES', 128)
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
 
     env, env_params = helpers.make_env(config)
@@ -156,17 +277,16 @@ def make_train(config):
         return total_loss, (loss_actor, entropy)
 
     def train(rng):
-        rnd_rng, rng = jax.random.split(rng)
-        target_rng, rng = jax.random.split(rng)
-        
-        # RND Networks
-        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
-        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
-            
+        feat_rng, rng = jax.random.split(rng)
+
+        # Feature pipeline (routes via LSTD_FEATURE_TYPE): rnd, tabular, or pretrained.
+        get_features_fn, k, rnd_net, rnd_params, target_params = _build_feature_pipeline(
+            config, obs_shape, feat_rng
+        )
+
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
-        
-        get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
+
         batch_get_features = jax.vmap(get_features_fn)
 
         rng, _rng = jax.random.split(rng)
