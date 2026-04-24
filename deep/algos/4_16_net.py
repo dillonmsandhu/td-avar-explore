@@ -26,10 +26,12 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
+    k = config.get('RHO_FEATURES', 128)
+    
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -38,50 +40,48 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
-    k = config.get('RND_FEATURES', 128)
+
     calc_true_values = config.get('CALC_TRUE_VALUES', False)
     evaluator = helpers.initialize_evaluator(config)
     
     if config.get('SCHEDULE_BETA', False):
         # goes up until peak and then linearly decays to 0.
-        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
+        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.0) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
     
     def train(rng):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        rnd_net, rnd_params = networks.initialize_rnd_network(rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
-        _, target_params = networks.initialize_rnd_network(target_rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], k)
-            
+        rho_net, rho_params = networks.initialize_rnd_network(
+            rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k 
+        )
         # initialize value and policy network
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=3)
-        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params, target_params)
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rho_net, network_params, rho_params)
 
         initial_sigma_state = {'S': jnp.eye(k, dtype=jnp.float64),}
         
-        get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
+        get_features_fn = lambda obs: rho_net.apply(rho_params, obs)
         # batch_get_features = jax.vmap(get_features_fn)
 
         def batch_get_features(obs): # Scan version.
                 if obs.ndim == len(obs_shape) + 2:  # Trajectory Batch [T, B, ...]
                     def scan_fn(carry, obs_step):
-                        return None, rnd_net.apply(target_params, obs_step)
+                        return None, rho_net.apply(rho_params, obs_step)
                     _, out = jax.lax.scan(scan_fn, None, obs)
                     return out
-                return rnd_net.apply(target_params, obs) # Standard Batch [B, ..
+                return rho_net.apply(rho_params, obs) # Standard Batch [B, ..
         
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
         (env_state, obsv, rng) = helpers.warmup_env(rng, env, env_params, config)
-
         # -------------------------
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
-            
             train_state, sigma_state, env_state, last_obs, rng, idx = runner_state
             
             # COLLECT TRAJECTORIES
@@ -102,7 +102,7 @@ def make_train(config):
                 )
                 
                 is_goal = info['is_goal']
-                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
+                target_next_obs = jnp.where(is_continuing, obsv, info["real_next_obs"].reshape(last_obs.shape))  #because Gymnax has no transition S_T -> S_0, the continuing formulation requires this.
                 _, next_val, next_i_val = network.apply(train_state.params, target_next_obs)
 
                 # Record
@@ -138,7 +138,7 @@ def make_train(config):
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
             should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
             # Seamlessly select between the network prediction and the analytical value
-            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, traj_batch.next_i_val)
             traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val, intrinsic_reward=rho)
 
             # -------------------------------------------------------------

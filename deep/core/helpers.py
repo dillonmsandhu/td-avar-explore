@@ -74,7 +74,7 @@ def make_env(config):
         env_params = env.default_params
     
     elif config['ENV_NAME'] == 'DeepSea-bsuite':
-        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("ENV_SIZE", 10))
+        env, env_params = gymnax.make(config["ENV_NAME"], size = config.get("ENV_SIZE", 40))
     elif config['ENV_NAME'] == 'DeepSea-Dense':
         env, env_params = gymnax.make('DeepSea-bsuite', size = config.get("ENV_SIZE", 10))
         env = SubtractOneRewardWrapper(env)
@@ -168,6 +168,8 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    A_CLIP = config.get('ADV_CLIP', 3.0)
+    gae = jnp.clip(gae, -A_CLIP, A_CLIP) # outlier clipping for the policy. 95% unclipped with 2.
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -227,6 +229,8 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    A_CLIP = config.get('ADV_CLIP', 3.0)
+    gae = jnp.clip(gae, -A_CLIP, A_CLIP) # outlier clipping for the policy. 95% unclipped with 2.
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -552,7 +556,7 @@ def initialize_evaluator(config):
     from envs.fourrooms_custom import FourRoomsExactValue
     from envs.long_chain import LongChainExactValue
     from envs.mountaincar import MountainCarExactValue
-    absorbing = config.get('ABSORBING_TERMINAL_STATE', True)
+    absorbing = config.get('ABSORBING_GOAL_STATE', True)
     episodic = config.get('EPISODIC', True)
     
     if not config.get("CALC_TRUE_VALUES", False):

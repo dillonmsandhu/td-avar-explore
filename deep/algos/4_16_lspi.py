@@ -23,12 +23,12 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
-    k_lstd = config.get("RND_FEATURES", 128)
+    k_lstd = config.get("RHO_FEATURES", 128)
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     terminate_bootstrap = jnp.logical_and(is_episodic, not(is_absorbing))
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -110,19 +110,14 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
-        )
-        _, target_params = networks.initialize_rnd_network(
-            target_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
+            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_RHO_FEATURES"], config["BIAS"], k_lstd
         )
         
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
-        train_state, rnd_state = networks.initialize_flax_train_states(
-            config, network, rnd_net, network_params, rnd_params, target_params
-        )
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params)
         
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])

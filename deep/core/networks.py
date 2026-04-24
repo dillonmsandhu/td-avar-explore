@@ -91,12 +91,14 @@ class MLPTorso(nn.Module):
             self.hidden_dim,
             kernel_init=orthogonal(jnp.sqrt(2)),
         )(x)
-        x = nn.relu(x)
+        x = nn.leaky_relu(x)
+        
 
         x = nn.Dense(
             self.out_dim,
             kernel_init=orthogonal(jnp.sqrt(2)),
         )(x)
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         return x
 
 class CNNTorso(nn.Module):
@@ -116,20 +118,54 @@ class CNNTorso(nn.Module):
         channels = self.base_channels
 
         for i in range(num_downsamples):
-            x = nn.Conv(
-                features=channels,
-                kernel_size=(3, 3),
-                strides=(2, 2),
-                padding="SAME",
-                name=f"conv_{i}",
-            )(x)
-            x = nn.relu(x)
+            x = nn.Conv(features=channels, kernel_size=(3, 3), strides=(2, 2), 
+                        padding="SAME", name=f"conv_{i}")(x)
+            x = nn.leaky_relu(x, negative_slope=0.01)
             channels = min(channels * 2, self.max_channels)
 
         x = x.reshape(*x.shape[:-3], -1)
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         return x
-    
+
+# This uses average pooling between layers to help allign visually similar states to similar features, and create a smoother representation.
+class CNNTorsoPooling(nn.Module):
+    out_dim: int
+    base_channels: int = 16
+    max_channels: int = 128
+
+    @nn.compact
+    def __call__(self, x):
+        """
+        x: (..., H, W, C)
+        """
+        
+        H, W = x.shape[-3], x.shape[-2]
+        smaller_dim = min(H, W)
+        num_downsamples = max(0, math.ceil(math.log2(smaller_dim / 4)))
+        channels = self.base_channels
+        for i in range(num_downsamples):
+            # Initialize the layer
+            conv_layer = nn.Conv(
+                features=channels, 
+                kernel_size=(3, 3), 
+                strides=(1, 1), # Use stride 1 if you want pooling to do the downsampling
+                padding="SAME", 
+                name=f"conv_{i}"
+            )
+            # Apply it to x
+            x = conv_layer(x)
+            x = nn.leaky_relu(x, negative_slope=0.01)
+            # Add Average Pooling to help value extrapolation
+            x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
+            channels = min(channels * 2, self.max_channels)
+            
+        x = x.reshape(*x.shape[:-3], -1)
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
+        return x
+
+
 class CNNTorso1D(nn.Module):
     out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
 
@@ -144,23 +180,60 @@ class CNNTorso1D(nn.Module):
         
         # Layer 1: 200 -> 100 (Stride 2)
         x = nn.Conv(features=4, kernel_size=(3,), strides=(2,), padding="SAME")(x)
-        x = nn.relu(x)
+        x = nn.leaky_relu(x)
+        x = nn.avg_pool(x, window_shape=(3,), strides=(1,), padding="SAME")
 
         # Layer 2: 100 -> 50 (Stride 2)
         x = nn.Conv(features=8, kernel_size=(3,), strides=(2,), padding="SAME")(x)
-        x = nn.relu(x)
+        x = nn.leaky_relu(x)
+        x = nn.avg_pool(x, window_shape=(3,), strides=(1,), padding="SAME")
 
         # Layer 3: 50 -> 25 (Stride 2)
         x = nn.Conv(features=8, kernel_size=(3,), strides=(2,), padding="SAME")(x)
-        x = nn.relu(x)
-
+        x = nn.leaky_relu(x)
+    
+        x = nn.avg_pool(x, window_shape=(3,), strides=(1,), padding="SAME")
+        
         # Flatten: 25 * 8 = 200 features
         x = x.reshape(*x.shape[:-2], -1)
-        
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         # Final Projection to desired embedding size (e.g. 64)
         x = nn.Dense(self.out_dim)(x)
         return x
-    
+
+# class CNNTorso1D(nn.Module):
+#     out_dim: int 
+
+#     @nn.compact
+#     def __call__(self, x):
+#         if x.ndim <= 2:
+#             x = x[..., None]
+        
+#         # Layer 1: 200 -> 100
+#         x = nn.Conv(features=8, kernel_size=(3,), strides=(1,), padding="SAME")(x)
+#         x = nn.leaky_relu(x)
+#         x = nn.avg_pool(x, window_shape=(2,), strides=(2,), padding="SAME")
+
+#         # Layer 2: 100 -> 50
+#         x = nn.Conv(features=16, kernel_size=(3,), strides=(1,), padding="SAME")(x)
+#         x = nn.leaky_relu(x)
+#         x = nn.avg_pool(x, window_shape=(2,), strides=(2,), padding="SAME")
+
+#         # Layer 3: 50 -> 25
+#         x = nn.Conv(features=32, kernel_size=(3,), strides=(1,), padding="SAME")(x)
+#         x = nn.leaky_relu(x)
+#         x = nn.avg_pool(x, window_shape=(2,), strides=(2,), padding="SAME")
+        
+#         # Flattening 25 * 32 = 800 features (or 640 if your length was shorter)
+#         x = x.reshape(x.shape[0], -1) 
+        
+#         x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        
+#         # This is where the (640, out_dim) kernel lives
+#         x = nn.Dense(self.out_dim)(x)
+#         return x
+
+
 class Identity(nn.Module):
     out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
     n_actions: int=1
@@ -183,6 +256,12 @@ def make_torso(network_type: str, **kwargs):
         return CNNTorso1D(**kwargs)
     if network_type == "cnn":
         return CNNTorso(
+            **kwargs,
+            base_channels=16, 
+            max_channels=64
+        )
+    if network_type=='cnn_pooling':
+        return CNNTorsoPooling(
             **kwargs,
             base_channels=16, 
             max_channels=64

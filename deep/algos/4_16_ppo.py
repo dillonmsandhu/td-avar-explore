@@ -23,10 +23,11 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
+    k_rho = 2 # not used so make it small.
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
@@ -37,9 +38,9 @@ def make_train(config):
     obs_shape = env.observation_space(env_params).shape
 
     def train(rng):
-        rnd_net, rnd_params = networks.initialize_rnd_network(rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_FEATURES'], config['BIAS'], 32) # serves no purpose but lets me use the same method to initialize the train state...
+        rnd_net, rnd_params = networks.initialize_rnd_network(rng, obs_shape, config['RND_NETWORK_TYPE'], config['NORMALIZE_RHO_FEATURES'], config['BIAS'], k_rho) # serves no purpose but lets me use the same method to initialize the train state...
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
-        train_state, rnd_state = networks.initialize_flax_train_states(
+        train_state, _ = networks.initialize_flax_train_states(
             config, network, rnd_net, network_params, rnd_params
         )
         

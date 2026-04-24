@@ -68,7 +68,8 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
     num_chunks = config['NUM_CHUNKS']
     chunk_size = config['CHUNK_SIZE']
     padded_capacity = config['PADDED_CAPACITY']
-
+    chunked_next_rho_feats = buffer_state.next_rho_features.reshape(num_chunks, chunk_size, -1)
+    
     chunked_phi = buffer_state.features.reshape(num_chunks, chunk_size, -1)
     chunked_next_phi = buffer_state.next_features.reshape(num_chunks, chunk_size, -1)
     chunked_traces = buffer_state.traces.reshape(num_chunks, chunk_size, -1)
@@ -79,47 +80,49 @@ def solve_lstd_lambda_from_buffer(buffer_state: LSTDBufferState, Sigma_inv, lstd
     chunked_mask = valid_mask.reshape(num_chunks, chunk_size, 1)
     
     gamma_i = config["GAMMA_i"]
-
     def process_chunk(carry, chunk_data):
         A_acc, b_acc = carry
-        phi, next_phi, traces, term, absorb, mask = chunk_data
+        rho_feat, phi, next_phi, traces, term, absorb, mask = chunk_data
         
-        # Squeeze down to 1D (n,) for clean einsum math
-        mask = mask.squeeze()
-        absorb_1d = absorb.squeeze() 
+        next_rho = get_scale_free_bonus(Sigma_inv, rho_feat)
         
-        next_rho = get_scale_free_bonus(Sigma_inv, next_phi)
-        
-        # Ensure 'cut' broadcasts correctly against features (n, k)
+        # --- 1. Enforce Unified Boundary Conditions ---
+        # cut = 1 ONLY if terminal AND not absorbing or continuing
         cut = term * (1.0 - absorb)
         cut_factor = 1.0 - cut
-        delta_Phi = phi - gamma_i * next_phi * cut_factor
-
-        # 1. Standard Accumulation (Masked)
-        A_batch = jnp.einsum("n, ni, nj -> ij", mask, traces, delta_Phi)
-        b_batch = jnp.einsum("n, ni, n -> i", mask, traces, next_rho)
         
-        # 2. Absorbing Self-Loop Accumulation (Masked)
-        # Multiply features by the (n, 1) absorb mask to zero out non-goal states
+        # If cut_factor == 0 (Episodic Done), bootstrap is severed.
+        # If cut_factor == 1 (Continuing or Absorbing Goal), bootstrap is kept.
+        # due to no transition from S_T -> S_0, there is no need to cut with absorbing formulation.
+        delta_Phi = phi - gamma_i * next_phi * cut_factor
+        
+        # --- 2. Standard Transition Accumulation ---
+        A_batch = jnp.einsum("ni, nj -> ij", traces, delta_Phi)
+        b_batch = jnp.einsum("ni, n -> i", traces, next_rho)
+        
+        # --- 3. Absorbing Ghost State Accumulation ---
         abs_features = next_phi * absorb
         abs_traces = abs_features 
         
-        A_abs = (1 - gamma_i) * jnp.einsum("n, ni, nj -> ij", mask, abs_traces, abs_features)
-        
-        # For b_abs, we need to ensure next_rho is only counted for absorbing states
-        rho_abs = next_rho * absorb_1d
-        b_abs = jnp.einsum("n, ni, n -> i", mask, abs_traces, rho_abs)
+        A_abs = (1 - gamma_i) * jnp.einsum("ni, nj -> ij", abs_traces, abs_features)
+        b_abs = jnp.einsum("ni, n -> i", abs_traces, next_rho)
         
         return (A_acc + A_batch + A_abs, b_acc + b_batch + b_abs), None
+        # end process_chunk
+
     k_lstd = chunked_phi.shape[-1]
     init_A = jnp.zeros((k_lstd, k_lstd))
     init_b = jnp.zeros(k_lstd)
+
+    chunked_scan_state =(chunked_next_rho_feats, 
+                        chunked_phi, 
+                        chunked_next_phi, 
+                        chunked_traces, 
+                        chunked_terminals, 
+                        chunked_absorb, 
+                        chunked_mask)
     
-    (final_A, final_b), _ = jax.lax.scan(
-        process_chunk, 
-        (init_A, init_b), 
-        (chunked_phi, chunked_next_phi, chunked_traces, chunked_terminals, chunked_absorb, chunked_mask)
-    )
+    (final_A, final_b), _ = jax.lax.scan(process_chunk, (init_A, init_b), chunked_scan_state)
     
     # 5. Regularize and Solve ONLY ONCE at the end
     reg = jnp.eye(k_lstd) * config.get("LSTD_L2_REG", 1e-3) * N

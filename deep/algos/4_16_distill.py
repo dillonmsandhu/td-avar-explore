@@ -23,12 +23,12 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
-    k_lstd = config.get("RND_FEATURES", 128)
+    k_lstd = config.get("RHO_FEATURES", 128)
 
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -50,7 +50,7 @@ def make_train(config):
     
     if config.get('SCHEDULE_BETA', False):
         # goes up until peak and then linearly decays to 0.
-        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
+        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.0) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
 
@@ -62,10 +62,10 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
+            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_RHO_FEATURES"], config["BIAS"], k_lstd
         )
         _, target_params = networks.initialize_rnd_network(
-            target_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
+            target_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_LSTD_FEATURES"], config["LSTD_BIAS"], k_lstd
         )
         get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
         batch_get_features = jax.vmap(get_features_fn)

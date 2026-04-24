@@ -7,7 +7,6 @@ from typing import NamedTuple
 # =============================================================================
 NORMALIZE_FEATURES = True  # for LSTD
 EPISODIC = True           # RND LSTD
-BIAS = True               # for LSTD
 NORMALIZE_REWARDS = False  # normalize extrinsic reward
 
 # =============================================================================
@@ -23,38 +22,42 @@ shared = {
     "TOTAL_TIMESTEPS": 1e6,
     "NUM_EPOCHS": 4,
     "MINIBATCH_SIZE": 256,
-    "GAMMA": 0.99,
+    "GAMMA": 0.99, # similar to that used by RND
     "GAMMA_i": 0.99,
     "GAE_LAMBDA": 0.9,
     "GAE_LAMBDA_i": 0.9,
-    "LSTD_LAMBDA_i": 0.25,
-    "CLIP_EPS": 0.2,
-    "VF_CLIP": 0.5,
-    "ENT_COEF": 0.001,
+    "LSTD_LAMBDA_i": 0.8,
+    "CLIP_EPS": 0.1,
+    "VF_CLIP": 0.1,
+    "ENT_COEF": 0.01,
     "VF_COEF": 0.5,
     "MAX_GRAD_NORM": 0.5,
     "SEED": 42,
     # Exploration Specific
     "RND_TRAIN_FRAC": 0.5,
-    "NORMALIZE_FEATURES": True,
-    "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
-    "NORMALIZE_REWARDS": False,
+    "NORMALIZE_RHO_FEATURES": True, # can be set to false seems to have little repercussion either way.
+    "NORMALIZE_LSTD_FEATURES": True,
     "EPISODIC": True,
-    "ABSORBING_TERMINAL_STATE": True, 
+    "ABSORBING_GOAL_STATE": True,  # death states with a positive reward are considerd goals
+    "USE_ABSORBING_OVERWRITE": True, # if absorbing goal state is true, overwrite the value 
     "BONUS_SCALE": 2.0,
-    "SCHEDULE_BETA": True,
-    "LSTD_L2_REG": 1e-3,
-    "RND_FEATURES": 128,
-    "USE_ABSORBING_OVERWRITE": True,
+    "SCHEDULE_BETA": True, # decays Beta from BONUS_SCALE to 0 during learning.
+    "LSTD_L2_REG": 1e-6,
     "NETWORK_TYPE": "mlp",
-    "RND_NETWORK_TYPE": "mlp",
+    "RND_NETWORK_TYPE": "mlp", # used for the (Static) LSTD network and Rho network
+    "K_RHO": 128,
+    "LSTD_FEATURES":128,
     "WARMUP": 1_000,
     "STAGGERED_STARTS": True,
-    "BIAS": BIAS,
-    "RB_SIZE": 100_000,
-    "PERCENT_FIFO": .25,
+    "BIAS": False,
+    "LSTD_BIAS": True,
+    "RB_SIZE": 200_000,
+    "PERCENT_FIFO": .1,
     "CALC_TRUE_VALUES": False,
-    "N_SEEDS": 4,
+    "N_SEEDS": 2,
+    # not tested over:
+    "NORMALIZE_OBS": False,  # Default to True for Continuous, overridden for Grids
+    "NORMALIZE_REWARDS": False,
 }
 
 # --- Environment Specific Overrides ---
@@ -63,9 +66,17 @@ ds_specific = {
     "ENV_NAME": "DeepSea-bsuite",
     "NORMALIZE_OBS": False,
     "NETWORK_TYPE": "cnn",
-    "RND_NETWORK_TYPE": "cnn",
+    "RND_NETWORK_TYPE": "cnn_pooling",
     "N_SEEDS": 4,
-    "LSTD_PRIOR_SAMPLES": 1.0,
+    "ENV_SIZE": 50,
+    "ABSORBING_GOAL_STATE": False,
+    "BONUS_SCALE": 0.05, # very sparse reward but does have negative reward of 1/N
+    "SCHEDULE_BETA": False, # decays Beta from BONUS_SCALE to 0 during learning.
+    "NORMALIZE_RHO_FEATURES": False, 
+    "RB_SIZE": 200000,
+    "CLIP_EPS": 0.05, # prevent the policy from too rapidly veering away from the correct path after finding it due to "distractor" rewards.
+    "VF_CLIP": 0.05,
+    "LSTD_L2_REG": 1e-8,
 }
 
 min_specific = {
@@ -74,17 +85,16 @@ min_specific = {
     "LR": 2.5e-3,
     "LR_END": 1e-5,
     "GAE_LAMBDA": 0.8,
-    "CLIP_EPS": 0.1,
-    "VF_CLIP": 0.2,
     "NORMALIZE_OBS": False,
     "NETWORK_TYPE": "cnn",
-    "RND_NETWORK_TYPE": "cnn",
+    "RND_NETWORK_TYPE": "cnn_pooling",
     "N_SEEDS": 4,
+    "ENT_COEF": 0.001,
 }
 
 visual = {
     "NETWORK_TYPE": "cnn",
-    "RND_NETWORK_TYPE": "cnn",
+    "RND_NETWORK_TYPE": "cnn_pooling",
     "NORMALIZE_OBS": False,
     "WARMUP": 0,
 }
@@ -92,18 +102,26 @@ visual = {
 chain = {
     "ENV_NAME": "Chain",
     "RND_NETWORK_TYPE": "identity",
-    "NETWORK_TYPE": "mlp",
+    "NETWORK_TYPE": "cnn_1d",
     "NORMALIZE_OBS": False,
     "NORMALIZE_FEATURES": False,  # tabular
     "NORMALIZE_REWARDS": False,
     "RND_FEATURES": 150,
     "ENV_SIZE": 150,
     "LSTD_FEATURES": 150,
+    "K_RHO": 150,
+    "K_LSTD": 150,
+    "LSTD_BIAS": False,
     "CALC_TRUE_VALUES": True,
+    "NORMALIZE_LSTD_FEATURES": False,
     "BIAS": False,
     "EPISODIC": EPISODIC,
+    "ABSORBING_GOAL_STATE": True,
     "STAGGERED_STARTS": False,
-    "N_SEEDS": 4, }
+    "LSTD_LAMBDA_i": 0.0,
+    "N_SEEDS": 2, 
+    "BONUS_SCALE": 0.1,
+    }
 
 
 mc_config = shared   # | is the union op. last dict's key takes precedence
@@ -204,30 +222,30 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
     for size in [20, 30, 40, 45, 50]:
         ds_cfg = shared_base | ds_base | {
             "ENV_SIZE": size, 
-            "TOTAL_TIMESTEPS": int(size * 10_000), 
+            "TOTAL_TIMESTEPS": int(size * 5_000), 
             **ft_overrides
         }
         FINAL_TESTING[f"ds_{size}"] = {"config_dict": ds_cfg, "envs": ["DeepSea-bsuite"]}
 
     # FourRooms: Dual sizes
-    for size in [21, 29]:
+    for size in [21, 29, 35]:
         fr_cfg = shared_base| visual_base | {"ENV_SIZE": size,**ft_overrides}
         FINAL_TESTING[f"four_rooms_{size}"] = {"config_dict": fr_cfg, "envs": ["FourRoomsCustom-v0"]}
 
-    # Chain: MLP Distillation Proof
+    # Chain: cnn_1d Distillation Proof
     for size in [200, 400]:
-        ch_cfg = shared_base | chain_base | {"ENV_SIZE": size,"RND_NETWORK_TYPE": "mlp","RND_FEATURES": 128,"BIAS": True,"NORMALIZE_FEATURES": True,**ft_overrides
+        ch_cfg = shared_base | chain_base | {"ENV_SIZE": size,"RND_NETWORK_TYPE": "cnn_1d","RND_FEATURES": 128,"BIAS": True,"NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **ft_overrides
         }
-        FINAL_TESTING[f"chain_mlp_{size}"] = {"config_dict": ch_cfg, "envs": ["Chain"]}
+        FINAL_TESTING[f"chain_cnn_1d_{size}"] = {"config_dict": ch_cfg, "envs": ["Chain"]}
 
     # ---------------------------------------------------------------------
     # FINAL_EXACT: Exact solving for analysis/heatmaps
     # ---------------------------------------------------------------------
     fe_overrides = {"CALC_TRUE_VALUES": True, "N_SEEDS": 1}
     
-    FINAL_EXACT["chain_mlp_175"] = {
+    FINAL_EXACT["chain_cnn_1d_175"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 175, "RND_NETWORK_TYPE": "mlp", "RND_FEATURES": 128, 
+            "ENV_SIZE": 175, "RND_NETWORK_TYPE": "cnn_1d", "RND_FEATURES": 128, "LSTD_FEATURES": 128,
             "BIAS": True, "NORMALIZE_FEATURES": True, **fe_overrides
         },
         "envs": ["Chain"]
@@ -258,37 +276,45 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
         "envs": ["FourRoomsCustom-v0"]
     }
 
-    # 150-Chain Ablation: Tabular vs MLP
+    # 150-Chain Ablation: Tabular vs cnn_1d
     FINAL_EXACT["chain_tabular_150_continuing"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 150, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 150, "EPISODIC": False, "ABSORBING_TERMINAL_STATE": False,
-            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
+            "ENV_SIZE": 150, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 150, "EPISODIC": False, "ABSORBING_GOAL_STATE": False,
+            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, "LSTD_FEATURES": 150, **fe_overrides
         },
         "envs": ["Chain"]
     }
 
-    # 150-Chain Ablation: Tabular vs MLP
+    # 150-Chain Ablation: Tabular vs cnn_1d
     FINAL_EXACT["chain_tabular_150_ep"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 140, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 140, "EPISODIC": True, "ABSORBING_TERMINAL_STATE": False,
-            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
+            "ENV_SIZE": 140, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 140, "EPISODIC": True, "ABSORBING_GOAL_STATE": False,
+            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, "LSTD_FEATURES": 140, **fe_overrides
         },
         "envs": ["Chain"]
     }
 
-    # 150-Chain Ablation: Tabular vs MLP
+    # 150-Chain Ablation: Tabular vs cnn_1d
     FINAL_EXACT["chain_tabular_160_absorbing"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 160, "EPISODIC": True, "ABSORBING_TERMINAL_STATE": True,
-            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
+            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 160, "EPISODIC": True, "ABSORBING_GOAL_STATE": True,
+            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, "LSTD_FEATURES": 160, **fe_overrides
+        },
+        "envs": ["Chain"]
+    }
+
+    FINAL_EXACT["chain_cnn_165_absorbing"] = {
+        "config_dict": shared_base | chain_base | {
+            "ENV_SIZE": 160, "RND_NETWORK_TYPE": "cnn_1d", "RND_FEATURES": 128, "EPISODIC": True, "ABSORBING_GOAL_STATE": True,
+            "BIAS": False, "LSTD_BIAS": True ,"LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": True, "LSTD_FEATURES": 128, **fe_overrides
         },
         "envs": ["Chain"]
     }
 
     FINAL_EXACT["chain_tabular_50_cont"] = {
         "config_dict": shared_base | chain_base | {
-            "ENV_SIZE": 50, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 50, "EPISODIC": False, "ABSORBING_TERMINAL_STATE": False,
-            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, **fe_overrides
+            "ENV_SIZE": 50, "RND_NETWORK_TYPE": "identity", "RND_FEATURES": 50, "EPISODIC": False, "ABSORBING_GOAL_STATE": False,
+            "BIAS": False, "LSTD_L2_REG": 1e-10, "NORMALIZE_FEATURES": False, "LSTD_FEATURES": 50, **fe_overrides
         },
         "envs": ["Chain"]
     }

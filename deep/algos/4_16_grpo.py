@@ -23,10 +23,11 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 def make_train(config):
+    k_rho = config.get("RHO_FEATURES", 128)
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
@@ -34,46 +35,31 @@ def make_train(config):
     config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     
-    k_lstd = config.get("RND_FEATURES", 128)
-    
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
     # evaluator = helpers.initialize_evaluator(config)
     evaluator = None 
 
     if config.get('SCHEDULE_BETA', False):
-        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.01) 
+        # goes up until peak and then linearly decays to 0.
+        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.0) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
 
     def train(rng):
-        
-        initial_sigma_state = {"S": jnp.eye(k_lstd, dtype=jnp.float64)} # global accumulation
+        # Gram Matrix of Intrinsic Reward
+        initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
 
+        # Feature Extractor for Intrinsic Reward
         rnd_rng, rng = jax.random.split(rng)
-        target_rng, rng = jax.random.split(rng)
         rnd_net, rnd_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
+            rnd_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_RHO_FEATURES"], config["BIAS"], k_rho
         )
-        _, target_params = networks.initialize_rnd_network(
-            target_rng, obs_shape, config["RND_NETWORK_TYPE"], config["NORMALIZE_FEATURES"], config["BIAS"], k_lstd
-        )
-        
-        get_features_fn = lambda obs: rnd_net.apply(target_params, obs)
+        get_features_fn = lambda obs: rnd_net.apply(rnd_params, obs)
         batch_get_features = jax.vmap(get_features_fn)
-        def get_phi(obs_batch):
-            def _step(unused, x):
-                x_input = jnp.expand_dims(x, 0) if x.ndim == 3 else x
-                features = rnd_net.apply(target_params, x_input)
-                return None, jnp.squeeze(features, 0) if x.ndim == 3 else features
-            
-            _, phi = jax.lax.scan(_step, None, obs_batch)
-            return phi
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, env, env_params, config, n_heads=2)
-        train_state, rnd_state = networks.initialize_flax_train_states(
-            config, network, rnd_net, network_params, rnd_params, target_params
-        )
+        train_state, rnd_state = networks.initialize_flax_train_states(config, network, rnd_net, network_params, rnd_params)
         
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
@@ -97,7 +83,7 @@ def make_train(config):
                 obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
                     rng_step, env_state, action, env_params
                 )
-                target_next_obs = info["real_next_obs"].reshape(last_obs.shape)
+                target_next_obs = jnp.where(is_continuing, obsv, info["real_next_obs"].reshape(last_obs.shape))  #because Gymnax has no transition S_T -> S_0, the continuing 
                 is_goal = info['is_goal']
                 dummy = jnp.zeros_like(reward)
 
@@ -118,7 +104,7 @@ def make_train(config):
             # --- GLOBAL COVARIANCE UPDATE (Pure Accumulation) --
             sigma_state = helpers.update_cov(traj_batch, sigma_state, phi, next_phi)            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
-            Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_lstd))
+            Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_rho))
 
             rho = helpers.get_scale_free_bonus(Sigma_inv, next_phi)
             
@@ -126,7 +112,7 @@ def make_train(config):
             exact_terminal_i_val = rho / (1.0 - config["GAMMA_i"])
             should_apply_mask = traj_batch.goal & is_absorbing & overwrite_absorbing_gae
             # Seamlessly select between the network prediction and the analytical value
-            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, next_v_i)
+            fixed_next_i_val = jnp.where(should_apply_mask, exact_terminal_i_val, 0.0)
             traj_batch = traj_batch._replace(next_i_val=fixed_next_i_val, intrinsic_reward = rho)
 
             # --- ADVANTAGE CALCULATION ---
@@ -134,7 +120,7 @@ def make_train(config):
                 traj_batch, config["GAMMA"], config["GAE_LAMBDA"],
                 is_continuing,
                 γi=config["GAMMA_i"], 
-                λi=1.0  # Forces pure Monte Carlo returns
+                λi=1.0  # Forces pure Monte Carlo returns for intrinsic side.
             )
             
             extrinsic_adv = gaes[0]
@@ -216,7 +202,7 @@ def make_train(config):
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 0)
+        runner_state = (train_state, initial_sigma_state, rnd_state, env_state, obsv, _rng, 1)
         runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config["NUM_UPDATES"])
         return {"runner_state": runner_state, "metrics": metrics}
 
