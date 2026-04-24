@@ -55,7 +55,7 @@ class ImpalaCNN(nn.Module):
 # used for Rho featus and random LSTD feats
 class CNN(nn.Module): 
     out_dim: int = 128
-
+    # Modified Nature DQN with a max pool from 20 x 20 to 10 x 10, and no third conv. layer
     @nn.compact
     def __call__(self, x: jnp.ndarray):
         # 1. Standardize Input
@@ -67,13 +67,12 @@ class CNN(nn.Module):
         # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
+        x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
-        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
-        x = nn.activation.leaky_relu(x)
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
+        # x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        # x = nn.activation.leaky_relu(x)
+        # x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = x.reshape((x.shape[0], -1))
         x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         # 4. Final Projection
@@ -172,7 +171,7 @@ class ActorCritic3Head(nn.Module):
     def setup(self):
         self.actor_torso = ImpalaCNN(self.out_dim)
         self.critic_ext = ImpalaCNN(self.out_dim)
-        self.critic_int = ImpalaCNN(self.out_dim)
+        self.critic_int = CNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
