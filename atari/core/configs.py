@@ -27,18 +27,19 @@ shared_config = {
     # Exploration Specific
     "GAMMA_i": 0.99, # CleanRL RND
     "GAE_LAMBDA_i": 0.95, # CleanRL RND
-    "LSTD_LAMBDA_i": 0.75, # New
-    "NORMALIZE_FEATURES": True, # New
+    "LSTD_LAMBDA_i": 0.8, # New
+    "NORMALIZE_RHO_FEATURES": True, # New
+    "NORMALIZE_LSTD_FEATURES": True, # New
     "EPISODIC": True,  # CleanRL does continuous
-    "ABSORBING_TERMINAL_STATE": True,
+    "ABSORBING_GOAL_STATE": True,
     "BONUS_SCALE": 2.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": True, # New
-    "LSTD_L2_REG": 1e-3,
+    "LSTD_L2_REG": 1e-5,
     "RND_FEATURES": 128,
     "LSTD_FEATURES": 384, # DinoV2 small has this many so let's see how that does.
-    "BIAS": True,
+    "BIAS": False,
     "RB_SIZE": 100_000,
-    "PERCENT_FIFO": .25,
+    "PERCENT_FIFO": .1,
     "SEED": 42,
 
 }

@@ -89,7 +89,7 @@ for ((i=0; i<NUM_SEEDS; i++)); do
     
     # Use the full SCRIPT path for Python
     python -m algos.${SCRIPT} \
-        --config ${CONFIG} \
+        --config "$CONFIG" \
         --run-suffix ${SUFFIX}_s${SEED} \
         --seed ${SEED} \
         --threads ${THREADS_PER_SEED} \

@@ -3,8 +3,10 @@
 # Usage: bash launch_array.sh <script_name> <suffix> <config_file> <num_seeds>
 SCRIPT=$1
 SUFFIX=$2
-SEEDS=${4:-5}
-CONCURRENCY_LIMIT=${5:-20} 
+SEEDS=${3:-5}
+CONCURRENCY_LIMIT=${4:-20} 
+CONFIG=${5:-"{}"}  # Default to empty JSON string if not provided
+
 
 # Define the Date once at launch
 DATE_STR=$(date +%Y-%m-%d)
@@ -26,9 +28,10 @@ sbatch --array=0-1%${CONCURRENCY_LIMIT} \
     slurm/run_slurm_array.sh \
     "$SCRIPT" \
     "$SUFFIX" \
+    "$CONFIG" \
     "$SEEDS" \
     "$DATE_STR"
     
-echo "Submitted Array Job for Config: $CONFIG"
+echo "Submitted Array Job. Overrides: $CONFIG"
 echo "Date folder: slurm/logs/${DATE_STR}/"
 

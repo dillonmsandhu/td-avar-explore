@@ -16,7 +16,7 @@ def make_train(config):
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
-    is_absorbing = config.get("ABSORBING_TERMINAL_STATE", True)
+    is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
 
     def define_trace_logic(terminals, is_dummy, is_goal, was_goal):
@@ -87,11 +87,11 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
         rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=True, k=k_rho 
+            rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
         )
         # 
         lstd_net, lstd_params = networks.initialize_rnd_network( # Or a different architecture
-            rnd_rng, obs_shape, config["NORMALIZE_FEATURES"], bias=True, k=k_lstd
+            rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
         ) # will be the same params if the same network
 
         def get_rho_feats(obs):

@@ -67,10 +67,13 @@ class CNN(nn.Module):
         # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = x.reshape((x.shape[0], -1))
         x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         # 4. Final Projection
