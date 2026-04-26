@@ -124,6 +124,35 @@ def make_triangle_schedule(total_updates: int, max_beta: float, peak_at: float =
         
     return schedule
 
+def make_hold_decay_hold_schedule(
+    total_updates: int, 
+    max_beta: float = 2.0, 
+    min_beta: float = 0.05, 
+    hold_start_pct: float = 0.25, 
+    decay_end_pct: float = 0.75
+):
+    """
+    Piecewise schedule:
+    1. Hold at `max_beta` from 0 to `hold_start_pct`.
+    2. Linear decay from `max_beta` to `min_beta` between `hold_start_pct` and `decay_end_pct`.
+    3. Hold at `min_beta` from `decay_end_pct` to 1.0.
+    """
+    def schedule(step):
+        progress = step / total_updates
+        
+        # Calculate how far along the decay phase we are (from 0.0 to 1.0)
+        # If progress < hold_start_pct, this is negative (gets clipped to 0.0)
+        # If progress > decay_end_pct, this is > 1.0 (gets clipped to 1.0)
+        decay_progress = (progress - hold_start_pct) / (decay_end_pct - hold_start_pct)
+        decay_progress = jnp.clip(decay_progress, 0.0, 1.0)
+        
+        # Linearly interpolate based on the clipped decay progress
+        current_beta = max_beta - decay_progress * (max_beta - min_beta)
+        
+        return current_beta
+        
+    return schedule
+
 # FOR LSPI:
 def expand_to_sa_features(phi_s, n_actions, taken_actions, dim_kA):
     one_hots = jax.nn.one_hot(taken_actions, n_actions)  

@@ -53,7 +53,7 @@ def make_train(config):
     
     if config.get('SCHEDULE_BETA', False):
         # goes up until peak and then linearly decays to 0.
-        beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.0) 
+        beta_sch = helpers.make_hold_decay_hold_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE']) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
 
