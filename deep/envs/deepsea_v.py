@@ -154,14 +154,90 @@ class DeepSeaExactValue:
             
         return jnp.array(P)
 
-    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
-        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
-        R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+
+    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+        """
+        Exact Policy Evaluation via Backward Induction.
+        Note: P_env is intentionally unused here because DeepSea's deterministic 
+        downward topology allows us to use O(N) spatial rolling instead of O(N^2) matrices.
+        """
+        # 1. Reshape flat vectors to grid topology
+        R_grid = R_env.reshape((self.N, self.N, self.num_actions))
+        pi_grid = pi.reshape((self.N, self.N, self.num_actions))
         
-        I = jnp.eye(self.num_total_states)
-        A_mat = I - self.gamma * P_pi
+        # 2. Terminal Row (r = N-1) Expectation
+        # r^pi(s) = sum_a pi(a|s) R(s,a)
+        r_pi_bottom = jnp.sum(pi_grid[self.N-1] * R_grid[self.N-1], axis=-1)
         
-        return jnp.linalg.solve(A_mat, R_pi)
+        v_bottom = jnp.where(
+            self.absorbing, 
+            r_pi_bottom / (1.0 - self.gamma), 
+            jnp.zeros(self.N)
+        )
+
+        # 3. Backward Step Definition
+        def backward_row_step(v_next_row, scan_inputs):
+            r_row, pi_row = scan_inputs
+            
+            # Deterministic DeepSea transitions (Left=0, Right=1)
+            v_left = jnp.roll(v_next_row, shift=1).at[0].set(v_next_row[0])
+            v_right = jnp.roll(v_next_row, shift=-1).at[-1].set(v_next_row[-1])
+            
+            # Q(s,a) = R(s,a) + gamma * V(s')
+            q_row = r_row + self.gamma * jnp.stack([v_left, v_right], axis=-1)
+            
+            # V^pi(s) = sum_{a} pi(a|s) * Q(s,a)
+            v_curr_row = jnp.sum(pi_row * q_row, axis=-1)
+            
+            return v_curr_row, v_curr_row
+
+        # 4. Zip inputs and scan from row N-2 down to 0
+        rows_to_process = (
+            jnp.flip(R_grid[:-1], axis=0),
+            jnp.flip(pi_grid[:-1], axis=0)
+        )
+        
+        _, v_rest = jax.lax.scan(backward_row_step, v_bottom, rows_to_process)
+        
+        # 5. Reconstruct the grid and flatten to match the original (S,) output footprint
+        v_grid = jnp.flip(jnp.concatenate([v_bottom[None, :], v_rest], axis=0), axis=0)
+        
+        return v_grid.flatten()
+
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+    #     """
+    #     Solves V = R^pi + gamma * P^pi V using Iterative Evaluation.
+    #     Bypasses cuSolver LU decomposition limits for large state spaces.
+    #     """
+    #     # 1. Precompute State-to-State Dynamics and Rewards (O(|S|^2 |A|) time, once)
+    #     # Shape: (S, S)
+    #     P_pi = jnp.einsum("sa,sam->sm", pi, P_env)
+        
+    #     # Shape: (S,)
+    #     R_pi = jnp.einsum("sa,sa->s", pi, R_env)
+
+    #     # 2. Define the iterative Bellman operator
+    #     def body_fn(v, _):
+    #         # O(|S|^2) matrix-vector product per iteration via cuBLAS
+    #         v_new = R_pi + self.gamma * (P_pi @ v)
+    #         return v_new, None
+
+    #     init_v = jnp.zeros(self.num_total_states, dtype=jnp.float32)
+        
+    #     # 3. Execute fixed-length scan for JIT compatibility
+    #     # 1500 iterations guarantees convergence for gamma=0.99 within fp32 precision.
+    #     final_v, _ = jax.lax.scan(body_fn, init_v, None, length=500)
+        
+    #     return final_v
+
+    # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array):
+    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+        
+    #     I = jnp.eye(self.num_total_states)
+    #     A_mat = I - self.gamma * P_pi
+        
+    #     return jnp.linalg.solve(A_mat, R_pi)
     
     # use value iteration due to sparse P matrix
     # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:

@@ -193,11 +193,37 @@ class LongChainExactValue:
         P[self.terminal_idx, :, self.terminal_idx] = 1.0 # Dummy loop for shape stability
         return jnp.array(P)
 
-    def solve_linear_system(self, pi, P_env, R_env):
-        P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
-        R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
-        A = jnp.eye(self.num_total_states) - self.gamma * P_pi
-        return jnp.linalg.solve(A, R_pi)
+    # def solve_linear_system(self, pi, P_env, R_env):
+    #     P_pi = jnp.einsum('sa, sam -> sm', pi, P_env)
+    #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
+    #     A = jnp.eye(self.num_total_states) - self.gamma * P_pi
+    #     return jnp.linalg.solve(A, R_pi)
+
+    def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
+        """
+        Solves V = R^pi + gamma * P^pi V using Iterative Evaluation.
+        Precomputes P^pi to save O(|A|) operations per Bellman update.
+        """
+        # 1. Precompute State-to-State Dynamics and Rewards (O(|S|^2 |A|) time, once)
+        # Shape: (S, S)
+        P_pi = jnp.einsum("sa,sam->sm", pi, P_env)
+        
+        # Shape: (S,)
+        R_pi = jnp.einsum("sa,sa->s", pi, R_env)
+
+        # 2. Define the iterative Bellman operator
+        def body_fn(v, _):
+            # O(|S|^2) matrix-vector product per iteration
+            v_new = R_pi + self.gamma * (P_pi @ v)
+            return v_new, None
+
+        init_v = jnp.zeros(self.num_total_states, dtype=jnp.float32)
+        
+        # 3. Execute fixed-length scan for JIT compatibility
+        # 1500 iterations easily exceeds standard precision limits for gamma=0.99
+        final_v, _ = jax.lax.scan(body_fn, init_v, None, length=1000)
+        
+        return final_v
 
     # def solve_linear_system(self, pi: jax.Array, P_env: jax.Array, R_env: jax.Array) -> jax.Array:
     #     R_pi = jnp.einsum('sa, sa -> s', pi, R_env)
