@@ -6,7 +6,7 @@ import core.networks as networks
 from core.helpers import Transition
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "cov_lstd" 
+SAVE_DIR = "network" 
 
 def make_train(config):
 
@@ -109,7 +109,6 @@ def make_train(config):
         def _update_step(runner_state, unused):
 
             train_state = runner_state["train_state"]
-            lstd_state = runner_state["lstd_state"]
             sigma_state = runner_state["sigma_state"]
             rnd_state = runner_state["rnd_state"]
             env_state = runner_state["env_state"]
@@ -219,7 +218,6 @@ def make_train(config):
                 "last_obs": last_obs,
                 "last_rho_feat": last_rho_feat,  
                 "rng": rng,
-                "lstd_state": lstd_state,
                 "rnd_state": rnd_state,
                 "sigma_state": sigma_state,
                 "idx": idx + 1,
