@@ -742,3 +742,9 @@ def expand_to_sa_features(phi_s, n_actions, taken_actions, dim_kA):
 def expected_next_sa_features(next_phi, Pi, dim_kA):
     expected_next_sa = next_phi[..., None, :] * Pi[..., :, None]
     return expected_next_sa.reshape(*next_phi.shape[:-1], dim_kA)
+
+def find_closest_divisor(total, requested):
+    for n in range(requested, 0, -1):
+        if total % n == 0:
+            return n
+    return 1
