@@ -221,6 +221,7 @@ def make_train(config):
             if evaluator is None: # No way to compute true values, just record the batch average prediction.
                 metric.update({
                 "vi_pred": scaled_i_val.mean(),
+                "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale,
                 "v_e_pred": traj_batch.value.mean()
             })
             else:

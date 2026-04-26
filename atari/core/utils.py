@@ -386,6 +386,8 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         "num_goals": "num_goals",
         "vi_pred": "vi_pred",
         "v_e_pred": "v_e_pred",
+        "num_goals": "num_goals", 
+        "vi_pred_scaled": "vi_pred_scaled",
     }
 
     for m_key, save_name in standard_plots.items():
