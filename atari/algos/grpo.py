@@ -52,10 +52,11 @@ def make_train(config):
     # Metrics Function
     def _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
+            value_loss, loss_actor, entropy = loss_info
             metric.update({
-                "ppo_loss": loss_info[0],
-                "rnd_loss": loss_info[1],
-                "feat_norm": jnp.linalg.norm(traj_batch.next_rho_feats, axis=-1).mean(),
+                "ppo_actor_loss": loss_actor.mean(),
+                "extrinsic_value_loss": value_loss.mean(),
+                "entropy": entropy.mean(),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
@@ -187,18 +188,18 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
                     grad_fn = jax.value_and_grad(helpers._loss_fn, has_aux=True)
-                    (total_loss, _), grads = grad_fn(
+                    (total_loss, aux_losses), grads = grad_fn(
                         train_state.params, network, traj_batch, advantages, targets, config
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    return train_state, aux_losses
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
-                return (train_state, traj_batch, advantages, targets, rng), total_loss
+                train_state, losses = jax.lax.scan(_update_minbatch, train_state, minibatches)
+                return (train_state, traj_batch, advantages, targets, rng), losses
 
             initial_update_state = (train_state, traj_batch, advantages, extrinsic_target, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
