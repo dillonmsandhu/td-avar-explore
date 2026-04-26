@@ -46,6 +46,21 @@ class BaseBufferManager(Generic[BufferStateT]):
             # Adding a static int to a dynamic tensor (start_idx) is perfectly safe
             return updated_state._replace(size=start_idx + self.batch_size)
 
+    # def update_buffer(self, buffer_state: BufferStateT, new_batch: BufferStateT) -> BufferStateT:
+    #     """Generically appends a new batch of data using jax.tree.map."""
+    #     start_idx = buffer_state.size
+        
+    #     def _update_single_array(buffer_arr, new_arr):
+    #         if buffer_arr.ndim == 0: 
+    #             return buffer_arr
+            
+    #         feature_dim = buffer_arr.shape[-1] 
+    #         new_arr = new_arr.reshape(self.batch_size, feature_dim).astype(jnp.float32)
+            
+    #         return jax.lax.dynamic_update_slice(buffer_arr, new_arr, (start_idx, 0))
+
+    #     updated_state = jax.tree.map(_update_single_array, buffer_state, new_batch)
+    #     return updated_state._replace(size=start_idx + self.batch_size)
 
 # --------------------------------------------------------------------------------------------
 # LSTD(Lambda) Buffer
