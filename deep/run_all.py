@@ -51,6 +51,8 @@ def run_experiment():
             config_name,
             "--run_suffix",
             batch_id,
+            '--registry',
+            args.registry,
             "--env-ids",
         ] + envs
 
