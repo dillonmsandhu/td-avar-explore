@@ -3,7 +3,7 @@ shared_config = {
     "TOTAL_TIMESTEPS": int(5e7),
     "NUM_ENVS": 128, # CleanRL RND: 128
     "NUM_STEPS": 128, # CleanRL RND: 128, Clean
-    "GAMMA": 0.999, # CleanRL RND
+    "GAMMA": 0.995, # CleanRL RND is 0.999
     "GAE_LAMBDA": 0.95, # CleanRL RND
     "CLIP_EPS": 0.1, # CleanRL RND
     "VF_CLIP": 0.5, # Seperate, based on Museli's high clipping and other claims that vf clipping doesn't help
@@ -18,7 +18,7 @@ shared_config = {
     "MINIBATCH_SIZE": 1024, # CleanRL: 256 (= 8 * 128 / 4)
     "VF_COEF": 0.25, # museli
     "ENV_KWARGS": {
-        "episodic_life": True,
+        "episodic_life": False,
         "reward_clip": True,
         "repeat_action_probability": 0.25,
         "frame_skip": 4,
@@ -34,11 +34,11 @@ shared_config = {
     "ABSORBING_GOAL_STATE": True,
     "BONUS_SCALE": 2.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": True, # New
-    "LSTD_L2_REG": 1e-5,
-    "RND_FEATURES": 128,
-    "LSTD_FEATURES": 384, # DinoV2 small has this many so let's see how that does.
+    "LSTD_L2_REG": 1e-6,
+    "RND_FEATURES": 256,
+    "LSTD_FEATURES": 256, # 384. DinoV2 small has this many so let's see how that does.
     "BIAS": False,
-    "RB_SIZE": 100_000,
+    "RB_SIZE": 200_000,
     "PERCENT_FIFO": .1,
     "SEED": 42,
 

@@ -373,6 +373,7 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
     standard_plots = {
         "returned_episode_returns": 'returned_episode_returns', 
         'bonus_mean': 'i_advantage_mean',
+        "normalized_returned_episode_returns": "normalized_returned_episode_returns",
         'bonus_std': 'i_advantage_std',
         'intrinsic_rew_mean': 'intrinsic_rew_mean',
         "mean_rew": "mean_rew",
@@ -382,7 +383,9 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         "rho_on_done": "rho_on_done",
         "v_i_at_done_mean": "v_i_at_done_mean",
         "cond_number_A": "cond_number",
-        "num_goals": "num_goals"
+        "num_goals": "num_goals",
+        "vi_pred": "vi_pred",
+        "v_e_pred": "v_e_pred",
     }
 
     for m_key, save_name in standard_plots.items():
