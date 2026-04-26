@@ -103,8 +103,8 @@ class MLPTorso(nn.Module):
 
 class CNNTorso(nn.Module):
     out_dim: int
-    base_channels: int = 16
-    max_channels: int = 128
+    base_channels: int = 8
+    max_channels: int = 64
 
     @nn.compact
     def __call__(self, x):
@@ -120,19 +120,18 @@ class CNNTorso(nn.Module):
         for i in range(num_downsamples):
             x = nn.Conv(features=channels, kernel_size=(3, 3), strides=(2, 2), 
                         padding="SAME", name=f"conv_{i}")(x)
-            x = nn.leaky_relu(x, negative_slope=0.01)
+            x = nn.leaky_relu(x)
             channels = min(channels * 2, self.max_channels)
 
         x = x.reshape(*x.shape[:-3], -1)
-        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         return x
 
 # This uses average pooling between layers to help allign visually similar states to similar features, and create a smoother representation.
 class CNNTorsoPooling(nn.Module):
     out_dim: int
-    base_channels: int = 16
-    max_channels: int = 128
+    base_channels: int = 8
+    max_channels: int = 64
 
     @nn.compact
     def __call__(self, x):
@@ -144,7 +143,7 @@ class CNNTorsoPooling(nn.Module):
         smaller_dim = min(H, W)
         num_downsamples = max(0, math.ceil(math.log2(smaller_dim / 4)))
         channels = self.base_channels
-        for i in range(num_downsamples):
+        for i in range(num_downsamples-1):
             # Initialize the layer
             conv_layer = nn.Conv(
                 features=channels, 
@@ -156,15 +155,26 @@ class CNNTorsoPooling(nn.Module):
             # Apply it to x
             x = conv_layer(x)
             x = nn.leaky_relu(x, negative_slope=0.01)
+            x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME") 
             # Add Average Pooling to help value extrapolation
-            x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
             channels = min(channels * 2, self.max_channels)
-            
+
+        # Last layer (no pooling)
+        # Initialize the layer
+        conv_layer = nn.Conv(
+            features=channels, 
+            kernel_size=(3, 3), 
+            strides=(2, 2), # Use stride 1 if you want pooling to do the downsampling
+            padding="SAME", 
+            name=f"conv_final"
+        )
+        # Apply it to x
+        x = conv_layer(x)
+        x = nn.leaky_relu(x, negative_slope=0.01)
         x = x.reshape(*x.shape[:-3], -1)
         x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         x = nn.Dense(self.out_dim, name="proj", kernel_init=orthogonal(1.0))(x)
         return x
-
 
 class CNNTorso1D(nn.Module):
     out_dim: int  # e.g., 64 (size of the embedding passed to Policy/Value head)
