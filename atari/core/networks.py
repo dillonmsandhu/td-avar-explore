@@ -52,34 +52,81 @@ class ImpalaCNN(nn.Module):
         
         return x
 
-# used for Rho featus and random LSTD feats
+# Nature DQN with a layer norm. Used for Rho.
 class CNN(nn.Module): 
     out_dim: int = 128
     # Modified Nature DQN with a max pool from 20 x 20 to 10 x 10, and no third conv. layer
     @nn.compact
     def __call__(self, x: jnp.ndarray):
         # 1. Standardize Input
-        if x.ndim == 3:
-            x = x[None, ...]
+        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
+            x = x[None, ...]  # Shape becomes (1, H, W, C)
+        
         x = jnp.transpose(x, (0, 2, 3, 1))
         x = x / 255.0
         
         # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
+        # x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        # x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
-        # x = nn.activation.leaky_relu(x)
+        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.leaky_relu(x)
         # x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = x.reshape((x.shape[0], -1))
-        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
         # 4. Final Projection
         x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
-        
         return x
 
+# Nature-like DQN with pooling, used for LSTD featuers.
+class LSTD_CNN(nn.Module): 
+    out_dim: int = 128
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+
+        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
+            x = x[None, ...]  # Shape becomes (1, H, W, C)
+        
+        x = jnp.transpose(x, (0, 2, 3, 1))
+        x = x / 255.0
+
+        # Input: [Batch, 84, 84, Channels]
+        
+        # 1. First Layer (Nature DQN style)
+        # Formula: floor((W - K) / S) + 1
+        # floor((84 - 8) / 4) + 1 = floor(19) + 1 = 20
+        # Result: [Batch, 20, 20, 32]
+        x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID")(x)
+        x = nn.activation.leaky_relu(x)
+        
+        # 2. Second Layer
+        # floor((20 - 4) / 2) + 1 = floor(8) + 1 = 9
+        # Result: [Batch, 9, 9, 64]
+        x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID")(x)
+        x = nn.activation.leaky_relu(x)
+
+        # 3. Hybrid Pooling (Smoothing)
+        # stride=(1, 1) preserves resolution but smears features across 2x2 neighbors
+        # Result: [Batch, 9, 9, 64]
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
+        
+        # 4. Final Convolutional Compression
+        # floor((9 - 3) / 1) + 1 = 7
+        # Result: [Batch, 7, 7, 64]
+        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID")(x)
+        x = nn.activation.leaky_relu(x)
+        
+        # 5. Flatten & Projection
+        # 7 * 7 * 64 = 3,136
+        x = x.reshape((x.shape[0], -1))
+        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        
+        # 3,136 -> 128
+        x = nn.Dense(self.out_dim, use_bias=True)(x)
+        
+        return x
 
 # =====================================================
 # --------------------- RND ---------------------------
@@ -95,6 +142,32 @@ class RND_Net(nn.Module):
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
         self.torso = CNN(self.feat_dim)
+    def __call__(self, x):
+        phi = self.torso(x)  
+        
+        if self.normalize:
+            # Normalize along the feature dimension
+            norm = jnp.linalg.norm(phi, axis=-1, keepdims=True)
+            phi = phi / jnp.maximum(norm, 1e-8)
+        
+        if self.bias:
+            # Concatenate 1.0 to the feature dimension
+            bias_shape = phi.shape[:-1] + (1,)
+            bias = jnp.ones(bias_shape)
+            phi = jnp.concatenate([phi, bias], axis=-1)
+        
+        return phi
+
+class LSTD_Net(nn.Module):
+    k: int = 384 # same as small dino
+    normalize: bool = False
+    bias: bool = True
+    
+    def setup(self):
+        # Base feature dimension before optional bias
+        self.feat_dim = self.k - 1 if self.bias else self.k
+        # If state-action, we need enough outputs for all actions
+        self.torso = LSTD_CNN(self.feat_dim)
     def __call__(self, x):
         phi = self.torso(x)  
         
@@ -238,7 +311,25 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
         bias=bias, 
     )
     rng, init_rng = jax.random.split(rng)
-    params = model.init(init_rng, jnp.zeros(obs_shape))
+    init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
+    params = model.init(init_rng, init_x)
+    return model, params
+
+
+def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128):
+    """
+    Initializes the RND network. 
+    If state_action_features is True, returns shape (..., n_actions, k).
+    Otherwise returns shape (..., k).
+    """
+    model = LSTD_Net(
+        k=k, 
+        normalize=normalize_features, 
+        bias=bias, 
+    )
+    rng, init_rng = jax.random.split(rng)
+    init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
+    params = model.init(init_rng, init_x)
     return model, params
 
 
@@ -252,7 +343,8 @@ def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int):
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
     rng, init_rng = jax.random.split(rng)
-    params = model.init(init_rng, jnp.zeros(obs_shape))
+    init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
+    params = model.init(init_rng, init_x)
     return model, params
 
 def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, target_params=None):
