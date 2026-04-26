@@ -82,6 +82,7 @@ def make_train(config):
             if evaluator is None:
                 metric.update({
                     "vi_pred": traj_batch.i_value.mean(),
+                    "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale,
                     "v_e_pred": traj_batch.value.mean(),
                 })
             else:

@@ -330,7 +330,8 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         "v_i_at_done_mean": "v_i_at_done_mean",
         "cond_number_A": "cond_number",
         "condition_number": "condition_number",
-        "num_goals": "num_goals"
+        "num_goals": "num_goals",
+        "vi_pred_scaled": "vi_pred_scaled",
     }
 
     for m_key, save_name in standard_plots.items():
