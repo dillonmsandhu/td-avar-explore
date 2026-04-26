@@ -16,6 +16,8 @@ class Transition(NamedTuple):
     i_value: jnp.ndarray
     next_i_val: jnp.ndarray
     reward: jnp.ndarray
+    rho_feat: jnp.ndarray
+    next_rho_feat: jnp.ndarray
     intrinsic_reward: jnp.ndarray
     log_prob: jnp.ndarray
     obs: jnp.ndarray
@@ -28,11 +30,12 @@ def make_train(config):
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
     is_absorbing = config.get("ABSORBING_GOAL_STATE", True)
-    overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
+    overwrite_absorbing_gae = False
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
-    config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
+    nmb = batch_size // config["MINIBATCH_SIZE"] # per epoch
+    config["NUM_MINIBATCHES"] = helpers.find_closest_divisor(batch_size, nmb)
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     
     env, env_params = helpers.make_env(config)
@@ -86,9 +89,14 @@ def make_train(config):
                 target_next_obs = jnp.where(is_continuing, obsv, info["real_next_obs"].reshape(last_obs.shape))  #because Gymnax has no transition S_T -> S_0, the continuing 
                 is_goal = info['is_goal']
                 dummy = jnp.zeros_like(reward)
+                _, next_val = network.apply(train_state.params, target_next_obs)
+                
+                # features for rho:
+                rho_feat = get_features_fn(last_obs)
+                next_rho_feat = get_features_fn(target_next_obs)
 
                 transition = Transition(
-                    done, is_goal, action, value, dummy, dummy, dummy, reward, dummy, log_prob, last_obs, target_next_obs, info
+                    done, is_goal, action, value, next_val, dummy, dummy, reward, rho_feat, next_rho_feat, dummy, log_prob, last_obs, target_next_obs, info
                 )
                 return (train_state, env_state, obsv, rng), transition
 
@@ -96,8 +104,8 @@ def make_train(config):
             (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Feature Extraction for Current Batch
-            phi = batch_get_features(traj_batch.obs)
-            next_phi = batch_get_features(traj_batch.next_obs)
+            phi = traj_batch.rho_feat
+            next_phi = traj_batch.next_rho_feat
             terminals = jnp.where(not is_continuing, traj_batch.done, 0)
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0)
 

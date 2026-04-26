@@ -20,10 +20,14 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
+    phi: jnp.ndarray            # LSTD features
+    next_phi: jnp.ndarray 
+    rho_feat: jnp.ndarray       # Exploration/Intrinsic features
+    next_rho_feat: jnp.ndarray  
     info: jnp.ndarray
 
 def make_train(config):
-    k_lstd = config.get("LSTD_FEATURES", 128)
+    k_lstd = config.get("LSTD_FEATURES", 32)
     k_rho = config.get("RHO_FEATURES", 128)
 
     # Episodic / Continuing / Absorbing
@@ -35,12 +39,14 @@ def make_train(config):
     
     # Replay Buffer
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
-    config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"]
+    nmb = batch_size // config["MINIBATCH_SIZE"] # per epoch
+    config["NUM_MINIBATCHES"] = helpers.find_closest_divisor(batch_size, nmb)
+    
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
     config['CHUNK_SIZE'] =  100_000 + batch_size# chunking for LSTD solver
-    buffer_manager = FeatureTraceBufferManager(config, k_lstd, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], k_rho) # stateless buffer manager.
+    buffer_manager = FeatureTraceBufferManager(config, k_lstd, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE'], k_rho = k_rho) # stateless buffer manager.
     config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
     config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
     
@@ -55,7 +61,7 @@ def make_train(config):
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
 
-    print(f'LSTD Net has {k_lstd} features, Normalization is {config["NORMALIZE_LSTD_FEATURES"]} network type is {config["RND_NETWORK_TYPE"]}, and bias is {config["LSTD_BIAS"]}')
+    print(f'LSTD Net has {k_lstd} features, Normalization is {config["NORMALIZE_LSTD_FEATURES"]} network type is {config["LSTD_NETWORK_TYPE"]}, and bias is {config["LSTD_BIAS"]}')
     print(f'Rho Net has {k_rho} features, Normalization is {config["NORMALIZE_RHO_FEATURES"]} network type is {config["RND_NETWORK_TYPE"]}, and bias is {config["BIAS"]}')
 
     # Metrics Function
@@ -104,7 +110,7 @@ def make_train(config):
             rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
         )
         lstd_net, lstd_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config['RND_NETWORK_TYPE'], config["NORMALIZE_LSTD_FEATURES"], bias=config['LSTD_BIAS'], k=k_lstd 
+            rnd_rng, obs_shape, config['LSTD_NETWORK_TYPE'], config["NORMALIZE_LSTD_FEATURES"], bias=config['LSTD_BIAS'], k=k_lstd 
         )
 
         def get_rho_feats(obs): return rho_net.apply(rho_params, obs)
@@ -147,24 +153,33 @@ def make_train(config):
                 i_val = jnp.zeros_like(reward)
                 next_i_val = jnp.zeros_like(reward)
 
+                rho_feat = get_rho_feats(last_obs)
+                next_rho_feat = get_rho_feats(target_next_obs)
+
+                lstd_feat = get_lstd_feats(last_obs)
+                next_lstd_feat = get_lstd_feats(target_next_obs)
+
                 transition = Transition(
-                    done, is_goal, action, value, next_val, i_val, next_i_val, reward, intrinsic_reward, log_prob, last_obs, target_next_obs, info
+                    done, is_goal, action, value, next_val, i_val, next_i_val, 
+                    reward, intrinsic_reward, log_prob, last_obs, target_next_obs, 
+                    lstd_feat, next_lstd_feat, rho_feat, next_rho_feat, info
                 )
+                
                 return (train_state, env_state, obsv, rng), transition
 
             env_step_state = (train_state, env_state, last_obs, rng)
             (_, env_state, last_obs, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Post-Process batch
-            phi = batch_get_lstd_features(traj_batch.obs)
-            next_phi = batch_get_lstd_features(traj_batch.next_obs)
+            phi = traj_batch.phi
+            next_phi = traj_batch.next_phi
             terminals = jnp.where(not is_continuing, traj_batch.done, 0) # indicates a transition INTO S_T.
             absorb_masks = jnp.where(is_absorbing, traj_batch.goal, 0) # indicates a transition into S_T where S_T is a goal.
             traces = helpers.calculate_traces(traj_batch, phi, config["GAMMA_i"], config["LSTD_LAMBDA_i"], is_continuing)
             
             # --- 0. UPDATE COVARIANCE SUM MATRIX ---
-            rho_feats = batch_get_rho_features(traj_batch.obs)
-            next_rho_feats = batch_get_rho_features(traj_batch.next_obs)
+            rho_feats = traj_batch.rho_feat
+            next_rho_feats = traj_batch.next_rho_feat
             sigma_state = helpers.update_cov(traj_batch, sigma_state, rho_feats, next_rho_feats)          
 
             # --- 1. UPDATE EXTENDED BUFFER ---f
@@ -212,6 +227,9 @@ def make_train(config):
                 λi=config["GAE_LAMBDA_i"]
             )
             gae_e, gae_i = gaes
+            gae_i = jnp.where(config.get('GLOBAL_ADVANTAGE_CENTERING', False),
+                             gae_i - gae_i.mean(),
+                             gae_i)
             
             # --- 6. INTRINSIC vs. EXTRINSIC SCALING ---
             rho_scale = beta_sch(idx) # triangle schedule

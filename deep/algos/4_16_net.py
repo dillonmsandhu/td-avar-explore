@@ -35,8 +35,10 @@ def make_train(config):
     overwrite_absorbing_gae = config.get("USE_ABSORBING_OVERWRITE", False)
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
     
-    batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
-    config["NUM_MINIBATCHES"] = batch_size // config["MINIBATCH_SIZE"] # per epoch
+    batch_size = config["NUM_STEPS"] * config["NUM_ENVS"] 
+    nmb = batch_size // config["MINIBATCH_SIZE"] # per epoch
+    config["NUM_MINIBATCHES"] = helpers.find_closest_divisor(batch_size, nmb)
+    
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // batch_size
     env, env_params = helpers.make_env(config)
     obs_shape = env.observation_space(env_params).shape
@@ -152,6 +154,9 @@ def make_train(config):
                 λi=config["GAE_LAMBDA_i"]
             )
             gae_e, gae_i = gaes
+            gae_i = jnp.where(config.get('GLOBAL_ADVANTAGE_CENTERING', False),
+                             gae_i - gae_i.mean(),
+                             gae_i)
             rho_scale = beta_sch(idx) # triangle schedule
             # Total Advantage = Adv_Extrinsic + (Beta * Adv_Intrinsic)
             advantages = gae_e + (rho_scale * gae_i) # scale the gae.
