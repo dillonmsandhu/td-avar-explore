@@ -90,7 +90,7 @@ def make_train(config):
             rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
         )
         # 
-        lstd_net, lstd_params = networks.initialize_rnd_network( # Or a different architecture
+        lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
             rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
         ) # will be the same params if the same network
 
@@ -219,7 +219,10 @@ def make_train(config):
                 γi=config["GAMMA_i"], λi=config["GAE_LAMBDA_i"]
             )
             gae_e, gae_i = gaes
-            
+            # center just the intrinsic advantage. i.e. treat the whole thing as a baseline and give it mean 0.
+            gae_i = jnp.where(config.get('GLOBAL_ADVANTAGE_CENTERING', False),
+                             gae_i - gae_i.mean(),
+                             gae_i)
             # --- 6. INTRINSIC vs. EXTRINSIC SCALING ---
             rho_scale = beta_sch(idx) # triangle schedule
             advantages = gae_e + (rho_scale * gae_i)
