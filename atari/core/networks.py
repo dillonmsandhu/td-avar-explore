@@ -244,7 +244,7 @@ class ActorCritic3Head(nn.Module):
     def setup(self):
         self.actor_torso = ImpalaCNN(self.out_dim)
         self.critic_ext = ImpalaCNN(self.out_dim)
-        self.critic_int = CNN(self.out_dim)
+        self.critic_int = ImpalaCNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
