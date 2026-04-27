@@ -6,7 +6,8 @@ import core.networks as networks
 from core.buffer import FeatureTraceBufferManager, LSTDBufferState
 from core.lstd import solve_lstd_lambda_from_buffer
 from core.helpers import Transition
-from core.dino_features import DinoFeatureExtractor
+import jax.image
+from transformers import FlaxDinov2Model
 
 # jax.config.update("jax_enable_x64", True)
 
@@ -18,7 +19,7 @@ def make_train(config):
     config.setdefault("DINO_BATCH_SIZE", 4096)
     config.setdefault("DINO_FRAME_STRATEGY", "last")
 
-    k_lstd = int(config.get("LSTD_FEATURES", 384))
+    k_lstd = config.get('LSTD_FEATURES', 128)
     k_rho = config.get("RND_FEATURES", 128)
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
@@ -90,7 +91,11 @@ def make_train(config):
             return metric
 
     def train(rng):
-        dino = DinoFeatureExtractor(config)
+        dino_model = FlaxDinov2Model.from_pretrained("facebook/dinov2-vits14")
+        lstd_params = dino_model.params
+        rng, proj_rng = jax.random.split(rng)
+        dino_out_dim = 384 * 2 # 2 frames * 384 dims each
+        projection_matrix = jax.random.normal(proj_rng, (dino_out_dim, k_lstd)) / jnp.sqrt(k_lstd)
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
@@ -108,9 +113,32 @@ def make_train(config):
 
         def get_rho_feats(obs):
             return rho_net.apply(rho_params, obs)
-        
+
         def get_lstd_feats(obs):
-            return dino(lstd_params, obs)
+                # 1. Extract 2nd and 4th frames -> (B, 2, 84, 84)
+                x = obs[:, jnp.array([1, 3]), :, :]
+                B, T, H, W = x.shape
+                
+                # 2. Prep for DINO (Fold time, normalize, repeat to RGB, resize)
+                x = x.reshape(B * T, 1, H, W).astype(jnp.float32) / 255.0
+                x = jnp.repeat(x, 3, axis=1)
+                x = jax.image.resize(x, shape=(B * T, 3, 224, 224), method='bilinear')
+                
+                mean = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32).reshape(1, 3, 1, 1)
+                std = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32).reshape(1, 3, 1, 1)
+                x = (x - mean) / std
+                
+                # 3. Get DINO features
+                outputs = dino_model(pixel_values=x, params=lstd_params)
+                cls_tokens = outputs.last_hidden_state[:, 0, :]
+                
+                # 4. Concatenate the 2 frames -> (B, 768)
+                concat_feats = cls_tokens.reshape(B, T * 384)
+                
+                # 5. FAST RANDOM PROJECTION -> (B, 128)
+                projected_feats = concat_feats @ projection_matrix
+                
+                return projected_feats
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
