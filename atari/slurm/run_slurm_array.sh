@@ -2,9 +2,9 @@
 #SBATCH --job-name=atari-array
 #SBATCH --partition=compsci-gpu
 #SBATCH --gres=gpu:a5000:1
-#SBATCH --cpus-per-task=15
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --time=96:00:00
+#SBATCH --time=128:00:00
 
 # 1. Arguments
 SCRIPT=$1
@@ -31,6 +31,7 @@ ENV_NAME=${ENVS_ARRAY[$SLURM_ARRAY_TASK_ID]}
 # 5. Metadata for Identification
 cat <<EOF > "${LOG_BASE}/metadata.txt"
 Job ID: ${SLURM_ARRAY_JOB_ID}
+Script: ${SCRIPT}
 Array Task: ${SLURM_ARRAY_TASK_ID}
 Env: ${ENV_NAME}
 Config: ${CONFIG}

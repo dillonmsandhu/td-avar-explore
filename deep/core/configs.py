@@ -40,8 +40,8 @@ shared = {
     "EPISODIC": True,
     "ABSORBING_GOAL_STATE": True,  # death states with a positive reward are considerd goals
     "USE_ABSORBING_OVERWRITE": True, # if absorbing goal state is true, overwrite the value 
-    "BONUS_SCALE": 0.5,
-    "SCHEDULE_BETA": True, # decays Beta from BONUS_SCALE to 0 during learning.
+    "BONUS_SCALE": 2.0,
+    "SCHEDULE_BETA": False, # decays Beta from BONUS_SCALE to 0 during learning.
     "LSTD_L2_REG": 1e-4, # is multiplied by N (~1e5) so will be ~1e-2 in the end.
     "NETWORK_TYPE": "mlp",
     "RND_NETWORK_TYPE": "mlp", # used for the (Static) LSTD network and Rho network
@@ -298,6 +298,11 @@ def make_final_registries(shared_base, ds_base, min_base, visual_base, chain_bas
 
     FINAL_EXACT["four_rooms_41_exact"] = {
         "config_dict": shared_base | visual_base | {"ENV_SIZE": 41, **fe_overrides}, 
+        "envs": ["FourRoomsCustom-v0"]
+    }
+
+    FINAL_EXACT["four_rooms_51_exact"] = {
+        "config_dict": shared_base | visual_base | {"ENV_SIZE": 51, **fe_overrides}, 
         "envs": ["FourRoomsCustom-v0"]
     }
 

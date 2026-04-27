@@ -4,7 +4,7 @@
 SCRIPT=$1 # algos/{script}.py, ie just "cov_lstd"
 SUFFIX=$2
 CONFIG=${3:-"{}"}         # Now $3 matches config_file
-SEEDS=${4:-5}             # Now $4 matches num_seeds
+SEEDS=${4:-4}             # Now $4 matches num_seeds
 CONCURRENCY_LIMIT=${5:-20} # Now $5 matches concurrency_limit
 
 # Define the Date once at launch
