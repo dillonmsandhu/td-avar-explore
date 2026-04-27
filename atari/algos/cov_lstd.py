@@ -243,7 +243,7 @@ def make_train(config):
                     return train_state, aux_losses
 
                 train_state, traj_batch, advantages, targets, rng = update_state
-                rng, _rng = jax.random.spslit(rng)
+                rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
                 train_state, total_loss = jax.lax.scan(_update_minbatch, train_state, minibatches)
