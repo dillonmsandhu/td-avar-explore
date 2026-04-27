@@ -61,7 +61,8 @@ shared = {
     # pretrained mode: offline feature cache lookup (e.g. DINOv2 ViT-S/14)
     "PRETRAINED_CACHE_PATH": None,       # path to .npz from precompute script
     "PRETRAINED_MODEL_TAG": "dinov2_vits14",  # informational only
-    "GLOBAL_ADVANTAGE_CENTERING": False
+    "GLOBAL_ADVANTAGE_CENTERING": False,
+    "ALPHA_LSTD": 1.0, # 1 = hard update (default). 
 }
 
 # --- Environment Specific Overrides ---

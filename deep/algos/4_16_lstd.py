@@ -60,6 +60,9 @@ def make_train(config):
         beta_sch = helpers.make_triangle_schedule(total_updates = config['NUM_UPDATES'], max_beta=config['BONUS_SCALE'], peak_at=0.0) 
     else:
         beta_sch = lambda x: config['BONUS_SCALE']
+    
+    # 0 corresponds to a hard update, 1 corresponds to no update.
+    alpha_w = config.get("ALPHA_LSTD", 1.0) # forgetting rate (i.e. how much weight to put on new LSTD solution vs old one. 
 
     print(f'LSTD Net has {k_lstd} features, Normalization is {config["NORMALIZE_LSTD_FEATURES"]} network type is {config["LSTD_NETWORK_TYPE"]}, and bias is {config["LSTD_BIAS"]}')
     print(f'Rho Net has {k_rho} features, Normalization is {config["NORMALIZE_RHO_FEATURES"]} network type is {config["RND_NETWORK_TYPE"]}, and bias is {config["BIAS"]}')
@@ -191,7 +194,11 @@ def make_train(config):
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_rho))
 
             # --- 3. SOLVE LSTD ON BUFFER ---
+            bias_correction = (1 - (1 - alpha_w) ** idx) # adam style bias correction.
+            w_old = lstd_state['w']
             lstd_state = solve_lstd_lambda_from_buffer(buffer_state, Sigma_inv, lstd_state, config)
+            w_ema = (1-alpha_w) * w_old + alpha_w * lstd_state['w']
+            lstd_state['w'] = w_ema / bias_correction # weighted update towards new solution
 
             # --- 4. EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
