@@ -10,7 +10,7 @@ from transformers import FlaxDinov2Model
 # jax.config.update("jax_enable_x64", True)
 # DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax"
 DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax_reg"
-SAVE_DIR = "lstd_dino_ppo" 
+SAVE_DIR = "lstd_dino_ppo_grid" 
 
 class TransitionE(NamedTuple):
     done: jnp.ndarray
@@ -27,7 +27,7 @@ class TransitionE(NamedTuple):
 
 def make_train(config):
     dino_model = FlaxDinov2Model.from_pretrained(DINO_PATH)
-    k_lstd = config.get('LSTD_FEATURES', 128)
+    k_lstd = 384
     k_rho = config.get("RND_FEATURES", 128)
 
     def define_trace_logic(terminals, is_dummy):
@@ -76,37 +76,53 @@ def make_train(config):
         
         lstd_params = dino_model.params
         rng, proj_rng = jax.random.split(rng)
-        dino_out_dim = 384 * 2 # 2 frames * 384 dims each
-        projection_matrix = jax.random.normal(proj_rng, (dino_out_dim, k_lstd)) / jnp.sqrt(k_lstd)
+        dino_out_dim = 384 # 2 frames * 384 dims each
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
 
+
         def get_lstd_feats(obs):
-                # 1. Extract 2nd and 4th frames -> (B, 2, 84, 84)
-                x = obs[:, [1, 3], :, :]
-                B, T, H, W = x.shape
-                
-                # 2. Prep for DINO (Fold time, normalize, repeat to RGB, resize)
-                x = x.reshape(B * T, 1, H, W).astype(jnp.float32) / 255.0
-                x = jnp.repeat(x, 3, axis=1)
-                x = jax.image.resize(x, shape=(B * T, 3, 224, 224), method='bilinear')
-                
-                mean = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32).reshape(1, 3, 1, 1)
-                std = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32).reshape(1, 3, 1, 1)
-                x = (x - mean) / std
-                
-                # 3. Get DINO features
-                outputs = dino_model(pixel_values=x, params=lstd_params)
-                cls_tokens = outputs.last_hidden_state[:, 0, :]
-                
-                # 4. Concatenate the 2 frames -> (B, 768)
-                concat_feats = cls_tokens.reshape(B, T * 384)
-                
-                # 5. FAST RANDOM PROJECTION -> (B, 128)
-                projected_feats = concat_feats @ projection_matrix
-                
-                return projected_feats
+            # 1. Parse the shape: obs is usually (B, 4, 84, 84) from EnvPool
+            B, C, H, W = obs.shape
+            
+            # 2. Extract the 4 individual grayscale frames
+            f1 = obs[:, 0, :, :] # Oldest frame (B, 84, 84)
+            f2 = obs[:, 1, :, :]
+            f3 = obs[:, 2, :, :]
+            f4 = obs[:, 3, :, :] # Newest frame (B, 84, 84)
+            
+            # 3. Stitch into a 2x2 grid -> (B, 168, 168)
+            # Put frame 1 and 2 side-by-side for the top row
+            top_row = jnp.concatenate([f1, f2], axis=-1)       # Shape: (B, 84, 168)
+            # Put frame 3 and 4 side-by-side for the bottom row
+            bottom_row = jnp.concatenate([f3, f4], axis=-1)    # Shape: (B, 84, 168)
+            # Stack the rows vertically
+            grid = jnp.concatenate([top_row, bottom_row], axis=1) # Shape: (B, 168, 168)
+            
+            # 4. Add channel dimension and repeat 3 times to fake RGB
+            grid = grid[:, None, :, :]          # Shape: (B, 1, 168, 168)
+            grid = jnp.repeat(grid, 3, axis=1)  # Shape: (B, 3, 168, 168)
+            
+            # 5. Cast to float and scale to [0, 1]
+            grid = grid.astype(jnp.float32) / 255.0
+            
+            # 6. Resize to DINO's expected 224x224
+            grid = jax.image.resize(grid, shape=(B, 3, 224, 224), method='bilinear')
+            
+            # 7. Apply standard ImageNet normalization
+            mean = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32).reshape(1, 3, 1, 1)
+            std = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32).reshape(1, 3, 1, 1)
+            grid = (grid - mean) / std
+            
+            # 8. Forward pass through DINO
+            outputs = dino_model(pixel_values=grid, params=lstd_params)
+            
+            # 9. Extract CLS token and project
+            # Note: We only have 1 image per batch item now, so we just take the CLS token
+            cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
+            
+            return cls_tokens
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
 
@@ -258,48 +274,3 @@ def make_train(config):
 if __name__ == "__main__":
     from core.utils import run_experiment_main
     run_experiment_main(make_train, SAVE_DIR)
-
-# def get_lstd_feats(obs):
-#     # 1. Parse the shape: obs is usually (B, 4, 84, 84) from EnvPool
-#     B, C, H, W = obs.shape
-    
-#     # 2. Extract the 4 individual grayscale frames
-#     f1 = obs[:, 0, :, :] # Oldest frame (B, 84, 84)
-#     f2 = obs[:, 1, :, :]
-#     f3 = obs[:, 2, :, :]
-#     f4 = obs[:, 3, :, :] # Newest frame (B, 84, 84)
-    
-#     # 3. Stitch into a 2x2 grid -> (B, 168, 168)
-#     # Put frame 1 and 2 side-by-side for the top row
-#     top_row = jnp.concatenate([f1, f2], axis=-1)       # Shape: (B, 84, 168)
-#     # Put frame 3 and 4 side-by-side for the bottom row
-#     bottom_row = jnp.concatenate([f3, f4], axis=-1)    # Shape: (B, 84, 168)
-#     # Stack the rows vertically
-#     grid = jnp.concatenate([top_row, bottom_row], axis=1) # Shape: (B, 168, 168)
-    
-#     # 4. Add channel dimension and repeat 3 times to fake RGB
-#     grid = grid[:, None, :, :]          # Shape: (B, 1, 168, 168)
-#     grid = jnp.repeat(grid, 3, axis=1)  # Shape: (B, 3, 168, 168)
-    
-#     # 5. Cast to float and scale to [0, 1]
-#     grid = grid.astype(jnp.float32) / 255.0
-    
-#     # 6. Resize to DINO's expected 224x224
-#     grid = jax.image.resize(grid, shape=(B, 3, 224, 224), method='bilinear')
-    
-#     # 7. Apply standard ImageNet normalization
-#     mean = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32).reshape(1, 3, 1, 1)
-#     std = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32).reshape(1, 3, 1, 1)
-#     grid = (grid - mean) / std
-    
-#     # 8. Forward pass through DINO
-#     outputs = dino_model(pixel_values=grid, params=lstd_params)
-    
-#     # 9. Extract CLS token and project
-#     # Note: We only have 1 image per batch item now, so we just take the CLS token
-#     cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
-    
-#     # Fast Random Projection -> (B, 128)
-#     projected_feats = cls_tokens @ projection_matrix
-    
-#     return projected_feats
