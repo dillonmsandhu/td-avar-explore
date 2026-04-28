@@ -173,7 +173,6 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
     minibatches = jax.tree_util.tree_map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
 
-
 def _loss_fn(params, network, traj_batch, gae, targets, config):
     # RERUN NETWORK
     pi, value = network.apply(params, traj_batch.obs)
@@ -295,3 +294,58 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+
+# EXTRINSIC:
+def calculate_gaeE(traj_batch, γ, λ,):
+    # Extrinsic is always strictly episodic. Cut on death OR the dummy step.
+    # (Since you precompute cut_i_trace, we can just quickly grab the extrinsic cuts here)
+    done = traj_batch.done
+    is_dummy = traj_batch.info.get('is_dummy', jnp.zeros_like(done))
+    cut_e_trace = done | is_dummy
+    cut_e_mult = 1.0 - cut_e_trace.astype(jnp.float32)
+
+    # Package everything into a single tuple for the scan
+    scan_inputs = (traj_batch, cut_e_mult)
+
+    def _get_advantages(gae, inputs):
+        transition, continue_e = inputs
+        
+        # --- Extrinsic ---
+        delta = transition.reward + γ * transition.next_value * continue_e - transition.value
+        gae = delta + (γ * λ * continue_e * gae)
+        
+        return gae, gae
+
+    initial_acc = jnp.zeros_like(traj_batch.value[0])
+    
+    _, advantages = jax.lax.scan(
+        _get_advantages, initial_acc, scan_inputs, reverse=True, unroll=16
+    )
+    
+    return advantages, advantages + traj_batch.value
+
+
+def _loss_fn_actor(params, network, traj_batch, gae, targets, config):
+    # RERUN NETWORK
+    pi = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -2.0, 2.0) # outlier clipping for the policy. 95% unclipped with 2.
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = loss_actor- config["ENT_COEF"] * entropy
+    
+    return total_loss, (loss_actor, entropy)

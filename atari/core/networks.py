@@ -334,7 +334,8 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
 
 
 def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int):
-    
+    if n_heads == 2:
+        model = Actor1Head(action_dim=action_dim)
     if n_heads == 2:
         model = ActorCritic2Head(action_dim=action_dim)
     elif n_heads == 3:
@@ -438,3 +439,41 @@ class FeatureNet(nn.Module):
         next_rnd_pred = self.next_rnd_head(z_int)
 
         return v_int, phi_lstd, current_rnd_pred, next_rnd_pred
+
+# Extrinsic value from LSTD
+
+class Actor1Head(nn.Module):
+    """
+    Returns: (pi, v)
+    """
+    action_dim: int
+    out_dim: int = 384
+
+    def setup(self):
+        self.actor_torso = ImpalaCNN(self.out_dim)
+        self.pi_head = PolicyHead(action_dim=self.action_dim)
+
+    def policy(self, x):
+            return self.pi_head(self.actor_torso(x))
+
+    def __call__(self, x):
+        return self.policy(x)
+
+def basic_flax_train_state(config, network, params):
+    # --- PPO Agent Scheduler & Optimizer ---
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    lr_scheduler = optax.linear_schedule(
+        init_value=config["LR"],
+        end_value=config["LR_END"],
+        transition_steps=total_grad_steps
+    )
+    tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adamw(lr_scheduler, eps=1e-5),
+    )
+    train_state = TrainState.create(
+        apply_fn=network.apply,
+        params=params,
+        tx=tx,
+    )
+    return train_state
