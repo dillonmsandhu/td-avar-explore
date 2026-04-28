@@ -6,6 +6,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=128:00:00
 
+
 # 1. Arguments
 SCRIPT=$1
 SUFFIX=$2
@@ -19,6 +20,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR="platform"
 export XLA_FLAGS="--xla_gpu_strict_conv_algorithm_picker=false"
 export TF_XLA_FLAGS="--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
 export TF_CUDNN_DETERMINISTIC="1"
+export HF_HOME="/usr/xtmp/ds541/hf_models/.cache"
 
 # 3. Log Directory Setup
 LOG_BASE="slurm/logs/${DATE_STR}/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"

@@ -10,14 +10,13 @@ import jax.image
 from transformers import FlaxDinov2Model
 
 # jax.config.update("jax_enable_x64", True)
-
+# DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax"
+DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax_reg"
 SAVE_DIR = "cov_lstd_dino" 
 
 def make_train(config):
-    config.setdefault("DINO_MODEL", "dinov2_vits14")
-    config.setdefault("DINO_DTYPE", "fp16")
-    config.setdefault("DINO_BATCH_SIZE", 4096)
-    config.setdefault("DINO_FRAME_STRATEGY", "last")
+    dino_model = FlaxDinov2Model.from_pretrained(DINO_PATH)
+    lstd_params = dino_model.params
 
     k_lstd = config.get('LSTD_FEATURES', 128)
     k_rho = config.get("RND_FEATURES", 128)
