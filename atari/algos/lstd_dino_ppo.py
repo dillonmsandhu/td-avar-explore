@@ -54,7 +54,7 @@ def make_train(config):
     n_actions = env.single_action_space.n
 
     # Metrics Function
-    def _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale):
+    def _compile_metrics(traj_batch, loss_info, gaes, targets):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
             loss_actor, entropy = loss_info
             metric.update({
@@ -65,8 +65,6 @@ def make_train(config):
                 "adv_std": gaes.std(),
                 "lambda_ret_mean": targets.mean(),
                 "lambda_ret_std": targets.std(),
-                "intrinsic_rew_mean": traj_batch.intrinsic_reward.mean(),
-                "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "mean_rew": traj_batch.reward.mean(),
                 "num_goals": jnp.sum(traj_batch.info.get('is_goal', jnp.zeros_like(traj_batch.done))),
                 "v_pred": traj_batch.value.mean(),
@@ -86,7 +84,7 @@ def make_train(config):
 
         def get_lstd_feats(obs):
                 # 1. Extract 2nd and 4th frames -> (B, 2, 84, 84)
-                x = obs[:, jnp.array([1, 3]), :, :]
+                x = obs[:, [1, 3], :, :]
                 B, T, H, W = x.shape
                 
                 # 2. Prep for DINO (Fold time, normalize, repeat to RGB, resize)
@@ -112,7 +110,7 @@ def make_train(config):
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
 
-        train_state, rnd_state = networks.basic_flax_train_state(
+        train_state = networks.basic_flax_train_state(
             config, network, network_params
         )
         
@@ -124,7 +122,6 @@ def make_train(config):
             train_state = runner_state["train_state"]
             lstd_state = runner_state["lstd_state"]
             buffer_state = runner_state["buffer_state"] 
-            rnd_state = runner_state["rnd_state"]
             env_state = runner_state["env_state"]
             last_obs = runner_state["last_obs"]
             last_phi = runner_state["last_phi"]
@@ -235,7 +232,6 @@ def make_train(config):
                 "last_phi": last_phi,            
                 "rng": rng,
                 "lstd_state": lstd_state,
-                "rnd_state": rnd_state,
                 "buffer_state": buffer_state,
                 "idx": idx + 1,
             }
@@ -249,7 +245,6 @@ def make_train(config):
             "last_obs": obsv,
             "rng": _rng,
             "lstd_state": initial_lstd_state,
-            "rnd_state": rnd_state,
             "buffer_state": initial_buffer_state,
             "idx": 1,
             "last_phi": initial_phi,            

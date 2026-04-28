@@ -89,6 +89,7 @@ def solve_lstd_lambda_from_buffer_extrinsic(buffer: LSTDBufferStateE, config):
         A_acc, b_acc = carry
         phi, next_phi, traces, reward, continue_mask, mask = chunk_data
         mask = mask.squeeze()
+        reward = reward.squeeze(-1)
 
         # Standard LSTD Accumulation (continue_mask is already 1.0 or 0.0)
         delta_Phi = phi - gamma * next_phi * continue_mask

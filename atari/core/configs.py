@@ -1,9 +1,9 @@
 # ClearRL RND: https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_rnd_envpool.py
 shared_config = {
-    "TOTAL_TIMESTEPS": int(5e7),
+    "TOTAL_TIMESTEPS": int(1e6),
     "NUM_ENVS": 128, # CleanRL RND: 128
     "NUM_STEPS": 128, # CleanRL RND: 128, Clean
-    "GAMMA": 0.995, # CleanRL RND is 0.999
+    "GAMMA": 0.99, # CleanRL RND is 0.999
     "GAE_LAMBDA": 0.95, # CleanRL RND
     "CLIP_EPS": 0.1, # CleanRL RND
     "VF_CLIP": 0.5, # Seperate, based on Museli's high clipping and other claims that vf clipping doesn't help

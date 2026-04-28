@@ -334,9 +334,9 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
 
 
 def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int):
-    if n_heads == 2:
+    if n_heads == 1:
         model = Actor1Head(action_dim=action_dim)
-    if n_heads == 2:
+    elif n_heads == 2:
         model = ActorCritic2Head(action_dim=action_dim)
     elif n_heads == 3:
         model = ActorCritic3Head(action_dim=action_dim)
