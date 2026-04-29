@@ -41,6 +41,8 @@
 #     "RB_SIZE": 200_000,
 #     "PERCENT_FIFO": .1,
 #     "SEED": 42,
+#     "NORMALIZE_RHO_OBS" = True,
+#     "NORMALIZE_LSTD_OBS" = True
 
 # }
 

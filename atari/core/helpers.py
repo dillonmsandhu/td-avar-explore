@@ -345,3 +345,39 @@ def _loss_fn_actor(params, network, traj_batch, gae, targets, config):
     total_loss = loss_actor- config["ENT_COEF"] * entropy
     
     return total_loss, (loss_actor, entropy)
+
+# Running batch RMS:
+def init_rms(shape):
+    return {
+        "mean": jnp.zeros(shape, dtype=jnp.float32),
+        "var": jnp.ones(shape, dtype=jnp.float32),
+        "count": jnp.array(1e-4, dtype=jnp.float32)
+    }
+
+def update_rms(rms_state, batch):
+    """Batched update of running mean and variance."""
+    batch_mean = jnp.mean(batch, axis=0)
+    batch_var = jnp.var(batch, axis=0)
+    batch_count = batch.shape[0]
+
+    delta = batch_mean - rms_state["mean"]
+    tot_count = rms_state["count"] + batch_count
+
+    new_mean = rms_state["mean"] + delta * batch_count / tot_count
+    
+    m_a = rms_state["var"] * rms_state["count"]
+    m_b = batch_var * batch_count
+    M2 = m_a + m_b + jnp.square(delta) * rms_state["count"] * batch_count / tot_count
+    new_var = M2 / tot_count
+
+    return {
+        "mean": new_mean,
+        "var": new_var,
+        "count": tot_count
+    }
+
+def normalize_obs(rms_state, obs, clip=5.0):
+    """Centers, scales, and clips the observation."""
+    std = jnp.sqrt(rms_state["var"] + 1e-8)
+    norm_obs = (obs - rms_state["mean"]) / std
+    return jnp.clip(norm_obs, -clip, clip)
