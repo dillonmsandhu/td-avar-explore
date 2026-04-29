@@ -71,7 +71,7 @@ def make_train(config):
                 "feat_norm": jnp.linalg.norm(traj_batch.next_phi, axis=-1).mean(),
                 "feat_var": jnp.var(traj_batch.phi, axis=0).mean(),
                 "rho_feat_var": jnp.var(traj_batch.rho_feats, axis=0).mean(),
-                "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2))
+                "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2)),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
@@ -141,8 +141,13 @@ def make_train(config):
             _warmup_step, warmup_carry, None, length=WARMUP_STEPS
         )
 
+        # normalize initial observation
+        normalized_obs = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape)
+        initial_phi =  get_lstd_feats( normalized_obs if normalize_lstd_obs else obsv )
+        initial_rho_feat =  get_rho_feats( normalized_obs if normalize_lstd_obs else obsv )
+
         def _update_step(runner_state, unused):
-            obs_rms = runner_state['obs_rms_state']
+            obs_rms = runner_state['obs_rms']
             train_state = runner_state["train_state"]
             lstd_state = runner_state["lstd_state"]
             sigma_state = runner_state["sigma_state"]
@@ -303,7 +308,7 @@ def make_train(config):
                 "rnd_state": rnd_state,
                 "sigma_state": sigma_state,
                 "buffer_state": buffer_state,
-                "obs_rms_state": obs_rms,
+                "obs_rms": obs_rms,
                 "idx": idx + 1,
             }
             return runner_state, metric
@@ -322,7 +327,7 @@ def make_train(config):
             "idx": 1,
             "last_phi": initial_phi,            
             "last_rho_feat": initial_rho_feat,  
-            "obs_rms_state": obs_rms,
+            "obs_rms": obs_rms,
         }
 
         runner_state, metrics = jax.lax.scan(_update_step, initial_runner_state, None, config["NUM_UPDATES"])
