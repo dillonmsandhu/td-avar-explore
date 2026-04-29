@@ -46,7 +46,7 @@
 
 shared_config = { # for simple pong testing.
     "TOTAL_TIMESTEPS": int(1e7),
-    "NUM_ENVS": 128, # CleanRL RND: 128
+    "NUM_ENVS": 16, # CleanRL RND: 128
     "NUM_STEPS": 128, # CleanRL RND: 128, Clean
     "GAMMA": 0.99, # CleanRL RND is 0.999
     "GAE_LAMBDA": 0.95, # CleanRL RND
@@ -59,12 +59,12 @@ shared_config = { # for simple pong testing.
     'MAX_GRAD_NORM': 1.0,
     "LR_SCHEDULE": "linear",
     "NUM_EPOCHS": 4, # CleanRL: 4
-    "MINIBATCH_SIZE": 1024, # CleanRL: 256 (= 8 * 128 / 4)
+    "MINIBATCH_SIZE": 256, # CleanRL: 256 (= 8 * 128 / 4)
     "VF_COEF": 0.5, # museli
     "ENV_KWARGS": {
-        "episodic_life": True,
+        "episodic_life": False,
         "reward_clip": True,
-        "repeat_action_probability": 0.25,
+        "repeat_action_probability": 0.0,
         "frame_skip": 4,
         "noop_max": 30,
     },
