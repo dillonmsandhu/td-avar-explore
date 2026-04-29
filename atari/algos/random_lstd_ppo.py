@@ -70,8 +70,6 @@ def make_train(config):
             return metric
 
     def train(rng):
-        
-        lstd_params = dino_model.params
         rng, proj_rng = jax.random.split(rng)
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }

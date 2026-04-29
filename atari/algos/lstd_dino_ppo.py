@@ -77,7 +77,8 @@ def make_train(config):
         lstd_params = dino_model.params
         rng, proj_rng = jax.random.split(rng)
         dino_out_dim = 384 * 2 # 2 frames * 384 dims each
-        projection_matrix = jax.random.normal(proj_rng, (dino_out_dim, k_lstd-1)) / jnp.sqrt(k_lstd)
+        k_lstd = dino_out_dim + 1 # bias
+        # projection_matrix = jax.random.normal(proj_rng, (dino_out_dim, k_lstd-1)) / jnp.sqrt(k_lstd)
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
@@ -105,7 +106,7 @@ def make_train(config):
             concat_feats = cls_tokens.reshape(B, T * 384)
             
             # 5. FAST RANDOM PROJECTION -> (B, projected_dim)
-            projected_feats = concat_feats @ projection_matrix
+            # projected_feats = concat_feats @ projection_matrix
             
             # 6. ADD BIAS -> Concatenate a 1.0 to the end of each vector -> (B, projected_dim + 1)
             bias = jnp.ones((B, 1), dtype=projected_feats.dtype)
