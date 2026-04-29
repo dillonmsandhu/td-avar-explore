@@ -27,7 +27,7 @@ class TransitionE(NamedTuple):
 
 def make_train(config):
     dino_model = FlaxDinov2Model.from_pretrained(DINO_PATH)
-    k_lstd = 385
+    k_lstd = 384
     k_rho = config.get("RND_FEATURES", 128)
 
     def define_trace_logic(terminals, is_dummy):
@@ -121,12 +121,11 @@ def make_train(config):
             # 9. Extract CLS token and project
             # Note: We only have 1 image per batch item now, so we just take the CLS token
             cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
-            bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
-            return jnp.concatenate([cls_tokens, bias], axis=-1)
+            return cls_tokens
 
         # network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
 
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso='CNN')
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso=config.get('CNN_TORSO', 'CNN'))
 
         train_state = networks.basic_flax_train_state(
             config, network, network_params

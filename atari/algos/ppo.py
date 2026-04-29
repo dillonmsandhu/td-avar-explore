@@ -50,7 +50,7 @@ def make_train(config):
 
     def train(rng):
         
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2, cnn_torso='CNN') # Actor net only.
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2, cnn_torso=config.get('CNN_TORSO', 'CNN'))
 
         train_state = networks.basic_flax_train_state(
             config, network, network_params

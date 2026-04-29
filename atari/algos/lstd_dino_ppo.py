@@ -77,7 +77,7 @@ def make_train(config):
         lstd_params = dino_model.params
         rng, proj_rng = jax.random.split(rng)
         dino_out_dim = 384 * 2 # 2 frames * 384 dims each
-        k_lstd = dino_out_dim + 1 # bias
+        k_lstd = dino_out_dim # bias
         # projection_matrix = jax.random.normal(proj_rng, (dino_out_dim, k_lstd-1)) / jnp.sqrt(k_lstd)
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
@@ -109,13 +109,13 @@ def make_train(config):
             # projected_feats = concat_feats @ projection_matrix
             
             # 6. ADD BIAS -> Concatenate a 1.0 to the end of each vector -> (B, projected_dim + 1)
-            bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
-            concat_feats = jnp.concatenate([concat_feats, bias], axis=-1)
+            # bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
+            # concat_feats = jnp.concatenate([concat_feats, bias], axis=-1)
             
             return concat_feats
 
         # network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso='CNN')
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso=config.get('CNN_TORSO', 'CNN'))
 
         train_state = networks.basic_flax_train_state(
             config, network, network_params
