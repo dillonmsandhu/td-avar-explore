@@ -13,6 +13,9 @@ SAVE_DIR = "cov_lstd"
 def make_train(config):
     k_lstd = config.get("LSTD_FEATURES", 128)
     k_rho = config.get("RND_FEATURES", 128)
+    normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", False)
+    normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", False)
+    
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
@@ -83,6 +86,7 @@ def make_train(config):
             return metric
 
     def train(rng):
+        obs_rms = helpers.init_rms(shape=(1, 84, 84))
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
         initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
@@ -108,12 +112,34 @@ def make_train(config):
             config, network, rho_net, network_params, rho_params
         )
         
+        # --- initialize the running obs statistics ---
         obsv, env_state = env.reset()
-        initial_phi = get_lstd_feats(obsv)
-        initial_rho_feat = get_rho_feats(obsv)
+        
+        # Initialize pure RMS state
+        initial_obs_rms = helpers.init_rms(shape=(1, 84, 84)) 
+        initial_obs_rms = helpers.update_rms(initial_obs_rms, obsv.reshape(-1, 1, 84, 84))
+
+        # --- WARMUP PHASE ---
+        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
+
+        def _warmup_step(warmup_carry, unused):
+            env_state, last_obs, obs_rms, rng = warmup_carry
+            rng, _rng = jax.random.split(rng)
+            action = jax.random.randint(_rng, shape=(last_obs.shape[0],), minval=0, maxval=n_actions)
+            rng, _rng = jax.random.split(rng)
+            obsv, env_state, reward, done, info = env.step(env_state, action)
+            # 3. Update RMS Stats
+            obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84))
+            return (env_state, obsv, obs_rms, rng), None
+
+        # Execute Warmup Scan
+        warmup_carry = (env_state, obsv, initial_obs_rms, rng)
+        (env_state, obsv, obs_rms, rng), _ = jax.lax.scan(
+            _warmup_step, warmup_carry, None, length=WARMUP_STEPS
+        )
 
         def _update_step(runner_state, unused):
-
+            obs_rms = runner_state['obs_rms_state']
             train_state = runner_state["train_state"]
             lstd_state = runner_state["lstd_state"]
             sigma_state = runner_state["sigma_state"]
@@ -123,13 +149,14 @@ def make_train(config):
             last_obs = runner_state["last_obs"]
             last_phi = runner_state["last_phi"]
             last_rho_feat = runner_state["last_rho_feat"]
+            obs_rms = runner_state['obs_rms']
             rng = runner_state["rng"]
             idx = runner_state["idx"]
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
                 # Unpack the carried features
-                train_state, env_state, last_obs, last_phi, last_rho_feat, rng = env_scan_state
+                train_state, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -143,8 +170,14 @@ def make_train(config):
                 next_val = network.apply(train_state.params, obsv, method=network.value)
 
                 # --- NEW: IN-LOOP FEATURE EXTRACTION ---
-                next_phi = get_lstd_feats(obsv)
-                next_rho_feat = get_rho_feats(obsv)
+                obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84)) # update with new obs
+                next_obs_norm = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape) # normalize new obs
+                
+                next_obs_rho = next_obs_norm if normalize_rho_obs else obsv
+                next_obs_lstd = next_obs_norm if normalize_lstd_obs else obsv
+                
+                next_phi = get_lstd_feats(next_obs_lstd)
+                next_rho_feat = get_rho_feats(next_obs_rho)
 
                 dummy = jnp.zeros_like(reward)
 
@@ -155,15 +188,15 @@ def make_train(config):
                 )
 
                 # Pass the 'next' features forward as the 'last' features for the next step
-                runner_state = (train_state, env_state, obsv, next_phi, next_rho_feat, rng)
+                runner_state = (train_state, env_state, obsv, next_phi, next_rho_feat, obs_rms, rng)
                 return runner_state, transition
             # end env_step
             env_step_state = (
                 train_state, env_state, last_obs, 
-                runner_state["last_phi"], runner_state["last_rho_feat"], rng
+                runner_state["last_phi"], runner_state["last_rho_feat"], obs_rms, rng
             )
             
-            (_, env_state, last_obs, last_phi, last_rho_feat,rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            (_, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Process batch
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
@@ -267,6 +300,7 @@ def make_train(config):
                 "rnd_state": rnd_state,
                 "sigma_state": sigma_state,
                 "buffer_state": buffer_state,
+                "obs_rms_state": obs_rms,
                 "idx": idx + 1,
             }
             return runner_state, metric
@@ -285,6 +319,7 @@ def make_train(config):
             "idx": 1,
             "last_phi": initial_phi,            
             "last_rho_feat": initial_rho_feat,  
+            "obs_rms_state": obs_rms,
         }
 
         runner_state, metrics = jax.lax.scan(_update_step, initial_runner_state, None, config["NUM_UPDATES"])
