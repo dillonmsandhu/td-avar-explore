@@ -124,7 +124,9 @@ def make_train(config):
             bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
             return jnp.concatenate([cls_tokens, bias], axis=-1)
 
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
+        # network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
+
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso='CNN')
 
         train_state = networks.basic_flax_train_state(
             config, network, network_params

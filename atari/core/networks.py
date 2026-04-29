@@ -44,7 +44,7 @@ class ImpalaCNN(nn.Module):
         # Stack 3: [32 channels] -> Result: 11x11x32
         x = ImpalaStack(channels=32)(x)
         
-        # x = nn.relu(x) # Final activation before flattening
+        x = nn.relu(x) # Final activation before flattening
         x = x.reshape((x.shape[0], -1)) # Flatten
         
         # Finally linear layer
@@ -68,12 +68,10 @@ class CNN(nn.Module):
         # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        # x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
         x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        # x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = x.reshape((x.shape[0], -1))
         # 4. Final Projection
         x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
@@ -203,10 +201,15 @@ class ActorCritic2Head(nn.Module):
     action_dim: int
     normalize_value_features: bool = False
     out_dim: int = 384
+    cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(self.out_dim)
-        self.critic_torso = ImpalaCNN(self.out_dim)
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+            self.critic_torso = ImpalaCNN(self.out_dim)
+        else: 
+            self.actor_torso = CNN(self.out_dim)
+            self.critic_torso = CNN(self.out_dim)            
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -240,11 +243,17 @@ class ActorCritic3Head(nn.Module):
     action_dim: int
     normalize_value_features: bool = False
     out_dim: int= 384
+    cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(self.out_dim)
-        self.critic_ext = ImpalaCNN(self.out_dim)
-        self.critic_int = ImpalaCNN(self.out_dim)
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+            self.critic_ext = ImpalaCNN(self.out_dim)
+            self.critic_int = ImpalaCNN(self.out_dim)
+        else:
+            self.actor_torso = CNN(self.out_dim)
+            self.critic_ext = CNN(self.out_dim)
+            self.critic_int = CNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -333,13 +342,13 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
     return model, params
 
 
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int):
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN'):
     if n_heads == 1:
-        model = Actor1Head(action_dim=action_dim)
+        model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 2:
-        model = ActorCritic2Head(action_dim=action_dim)
+        model = ActorCritic2Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 3:
-        model = ActorCritic3Head(action_dim=action_dim)
+        model = ActorCritic3Head(action_dim=action_dim, cnn_torso = cnn_torso)
     else:
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
@@ -448,9 +457,14 @@ class Actor1Head(nn.Module):
     """
     action_dim: int
     out_dim: int = 384
+    cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(self.out_dim)
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+        else:
+            self.actor_torso = CNN(self.out_dim)
+        
         self.pi_head = PolicyHead(action_dim=self.action_dim)
 
     def policy(self, x):

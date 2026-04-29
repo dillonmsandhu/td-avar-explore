@@ -109,11 +109,12 @@ def make_train(config):
             
             # 6. ADD BIAS -> Concatenate a 1.0 to the end of each vector -> (B, projected_dim + 1)
             bias = jnp.ones((B, 1), dtype=projected_feats.dtype)
-            projected_feats_with_bias = jnp.concatenate([projected_feats, bias], axis=-1)
+            concat_feats = jnp.concatenate([concat_feats, bias], axis=-1)
             
-            return projected_feats_with_bias
+            return concat_feats
 
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
+        # network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1, cnn_torso='CNN')
 
         train_state = networks.basic_flax_train_state(
             config, network, network_params
