@@ -69,6 +69,9 @@ def make_train(config):
                 "extrinsic_value_loss": value_loss.mean(),
                 "entropy": entropy.mean(),
                 "feat_norm": jnp.linalg.norm(traj_batch.next_phi, axis=-1).mean(),
+                "feat_var": jnp.var(traj_batch.phi, axis=0).mean(),
+                "rho_feat_var": jnp.var(traj_batch.rho_feats, axis=0).mean(),
+                "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2))
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),

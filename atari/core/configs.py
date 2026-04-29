@@ -81,11 +81,12 @@ shared_config = { # for simple pong testing.
     "BONUS_SCALE": 2.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": True, # New
     "LSTD_L2_REG": 1e-6,
-    "RND_FEATURES": 256,
+    "RND_FEATURES": 384,
     "LSTD_FEATURES": 256, # 384. DinoV2 small has this many so let's see how that does.
     "BIAS": False,
     "RB_SIZE": 350_000,
     "PERCENT_FIFO": .1,
     "SEED": 42,
-
+    "NORMALIZE_LSTD_OBS": False,
+    "NORMALIZE_RHO_OBS": True,
 }

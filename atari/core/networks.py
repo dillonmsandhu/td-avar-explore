@@ -62,7 +62,8 @@ class CNN(nn.Module):
         if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
             x = x[None, ...]  # Shape becomes (1, H, W, C)
         
-        x = jnp.transpose(x, (0, 2, 3, 1))
+        # channel last for FLAX, while it is first for envpool.
+        x = jnp.transpose(x, (0, 2, 3, 1)) 
         x = x / 255.0
         
         # 2. Random Convolutional Torso
