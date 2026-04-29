@@ -109,7 +109,7 @@ def make_train(config):
             # projected_feats = concat_feats @ projection_matrix
             
             # 6. ADD BIAS -> Concatenate a 1.0 to the end of each vector -> (B, projected_dim + 1)
-            bias = jnp.ones((B, 1), dtype=projected_feats.dtype)
+            bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
             concat_feats = jnp.concatenate([concat_feats, bias], axis=-1)
             
             return concat_feats

@@ -70,13 +70,12 @@ def make_train(config):
             return metric
 
     def train(rng):
-        rng, proj_rng = jax.random.split(rng)
-        
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
         
+        rng, lstd_rng = jax.random.split(rng)
         lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
-            rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
+            lstd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
         ) # will be the same params if the same network
         
         def get_lstd_feats(obs):
