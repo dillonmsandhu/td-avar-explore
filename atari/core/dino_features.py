@@ -59,4 +59,5 @@ def get_dino_features_on_atari_obs_grid(obs):
     # 9. Extract CLS token and project
     # Note: We only have 1 image per batch item now, so we just take the CLS token
     cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
-    return cls_tokens
+    bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
+    return jnp.concatenate([cls_tokens, bias], axis=-1)

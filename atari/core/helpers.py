@@ -47,10 +47,10 @@ def get_scale_free_bonus(S_inv, features):
     bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
     return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
 
-def update_cov(sigma_state, phi):
+def update_cov(sigma_state, phi, leak=1.0):
     S = sigma_state['S']
     S_batch_sum = jnp.einsum("tni, tnj -> ij", phi, phi)
-    S_new = S + S_batch_sum
+    S_new = leak * S + S_batch_sum
     S_new = 0.5 * (S_new + S_new.T)
     return {'S': S_new, }
 
@@ -190,6 +190,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -271,6 +272,7 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -329,6 +331,7 @@ def _loss_fn_actor(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(

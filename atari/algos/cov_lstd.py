@@ -6,6 +6,7 @@ import core.networks as networks
 from core.buffer import FeatureTraceBufferManager, LSTDBufferState
 from core.lstd import solve_lstd_lambda_from_buffer
 from core.helpers import Transition
+from core.dino_features import get_dino_features_on_atari_obs_grid
 # jax.config.update("jax_enable_x64", True)
 
 SAVE_DIR = "cov_lstd" 
@@ -15,6 +16,8 @@ def make_train(config):
     k_rho = config.get("RND_FEATURES", 128)
     normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", False)
     normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", False)
+
+    config['COV_LEAK'] = config.get('COV_LEAK', 1 - 1e-5)
     
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
@@ -45,9 +48,9 @@ def make_train(config):
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
     config['CHUNK_SIZE'] =  100_000 + batch_size # chunking for LSTD solver
-    buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
-    config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
-    config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
+    # buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
+    # config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
+    # config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
     
     # Env
     env = helpers.make_env(config)
@@ -90,25 +93,35 @@ def make_train(config):
 
     def train(rng):
         obs_rms = helpers.init_rms(shape=(1, 84, 84))
-        initial_lstd_state = {"w": jnp.zeros(k_lstd), }
-        initial_buffer_state = buffer_manager.init_state()
+        
+        # --- initialize intrinsic reward rho components ---
         initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
-
         rnd_rng, rng = jax.random.split(rng)
         # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
         rho_net, rho_params = networks.initialize_rnd_network(
             rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
         )
-        # 
-        lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
-            rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
-        ) # will be the same params if the same network
-
         def get_rho_feats(obs):
             return rho_net.apply(rho_params, obs)
         
-        def get_lstd_feats(obs):
-            return lstd_net.apply(lstd_params, obs)
+        # --- initialize LSTD components---
+        if config.get('LSTD_DINO', False):
+            get_lstd_feats = get_dino_features_on_atari_obs_grid
+            k_lstd = 385
+
+        else:
+            lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
+                rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd, pool=config['POOL_LSTD_NET']
+            ) # will be the same params if the same network
+            def get_lstd_feats(obs):
+                return lstd_net.apply(lstd_params, obs)
+        
+        buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
+        config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
+        config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
+        initial_buffer_state = buffer_manager.init_state()
+        initial_lstd_state = {"w": jnp.zeros(k_lstd), }
+
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
         train_state, rnd_state = networks.initialize_flax_train_states(
@@ -208,7 +221,10 @@ def make_train(config):
 
             # Process batch
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
-            sigma_state = helpers.update_cov(sigma_state, traj_batch.rho_feats)            
+            sigma_state = helpers.update_cov(sigma_state, 
+                        traj_batch.rho_feats, 
+                        leak = config['COV_LEAK']
+            )            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_rho))
             

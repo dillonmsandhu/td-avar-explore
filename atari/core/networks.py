@@ -81,6 +81,7 @@ class CNN(nn.Module):
 # Nature-like DQN with pooling, used for LSTD featuers.
 class LSTD_CNN(nn.Module): 
     out_dim: int = 128
+    pool: bool = False
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
@@ -109,7 +110,8 @@ class LSTD_CNN(nn.Module):
         # 3. Hybrid Pooling (Smoothing)
         # stride=(1, 1) preserves resolution but smears features across 2x2 neighbors
         # Result: [Batch, 9, 9, 64]
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
+        if self.pool:
+            x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
         
         # 4. Final Convolutional Compression
         # floor((9 - 3) / 1) + 1 = 7
@@ -161,12 +163,14 @@ class LSTD_Net(nn.Module):
     k: int = 384 # same as small dino
     normalize: bool = False
     bias: bool = True
+    pool: bool = False
     
     def setup(self):
         # Base feature dimension before optional bias
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
-        self.torso = LSTD_CNN(self.feat_dim)
+        self.torso = LSTD_CNN(self.feat_dim, pool = self.pool)
+    
     def __call__(self, x):
         phi = self.torso(x)  
         
@@ -326,7 +330,7 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
     return model, params
 
 
-def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128):
+def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128, pool=False):
     """
     Initializes the RND network. 
     If state_action_features is True, returns shape (..., n_actions, k).
@@ -336,6 +340,7 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
         k=k, 
         normalize=normalize_features, 
         bias=bias, 
+        pool=pool,
     )
     rng, init_rng = jax.random.split(rng)
     init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)

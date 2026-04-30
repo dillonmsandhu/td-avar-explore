@@ -27,7 +27,8 @@ class TransitionE(NamedTuple):
 
 def make_train(config):
     dino_model = FlaxDinov2Model.from_pretrained(DINO_PATH)
-    k_lstd = 384
+    dino_out_dim = 384 # 2 frames * 384 dims each
+    k_lstd = dino_out_dim + 1
     k_rho = config.get("RND_FEATURES", 128)
 
     def define_trace_logic(terminals, is_dummy):
@@ -76,7 +77,6 @@ def make_train(config):
         
         lstd_params = dino_model.params
         rng, proj_rng = jax.random.split(rng)
-        dino_out_dim = 384 # 2 frames * 384 dims each
         
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
         initial_buffer_state = buffer_manager.init_state()
@@ -121,7 +121,8 @@ def make_train(config):
             # 9. Extract CLS token and project
             # Note: We only have 1 image per batch item now, so we just take the CLS token
             cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
-            return cls_tokens
+            bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
+            return jnp.concatenate([cls_tokens, bias], axis=-1)
 
         # network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=1) # Actor net only.
 
@@ -209,6 +210,12 @@ def make_train(config):
             # --- LSTD PREDICTIONS ---
             v = traj_batch.phi @ lstd_state["w"] 
             next_v = traj_batch.next_phi @ lstd_state["w"] 
+            # clip
+            V_max_raw = 1.0 / (1.0 - config['GAMMA'])
+            v, next_v = jax.tree_util.tree_map(
+                lambda x: jnp.clip(x, -V_max_raw, V_max_raw),
+                (v, next_v)
+            )
             
             # --- traj_batch update for GAE ---
             traj_batch = traj_batch._replace(value=v, next_value=next_v)

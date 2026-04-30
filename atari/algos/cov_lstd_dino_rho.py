@@ -5,6 +5,8 @@ import core.helpers as helpers
 import core.networks as networks
 from core.buffer import FeatureTraceBufferManager, LSTDBufferState
 from core.lstd import solve_lstd_lambda_from_buffer
+import jax.image
+from transformers import FlaxDinov2Model
 # jax.config.update("jax_enable_x64", True)
 DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax_reg"
 SAVE_DIR = "cov_lstd_dino_rho" 
