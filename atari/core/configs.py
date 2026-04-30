@@ -94,7 +94,7 @@ shared_config = { # for simple pong testing.
     "LSTD_FEATURES": 256, # 384. DinoV2 small has this many so let's see how that does.
     "LSTD_L2_REG": 1e-4,
     "POOL_LSTD_NET": False,
-    "LSTD_DINO": False # DinoV2 features plus a bias, unnormalized
+    "LSTD_DINO": False, # DinoV2 features plus a bias, unnormalized
     "NORMALIZE_LSTD_OBS": True,
     "NORMALIZE_LSTD_FEATURES": True, # New
     "RB_SIZE": 350_000,
