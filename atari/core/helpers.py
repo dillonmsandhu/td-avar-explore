@@ -47,10 +47,10 @@ def get_scale_free_bonus(S_inv, features):
     bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
     return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
 
-def update_cov(sigma_state, phi):
+def update_cov(sigma_state, phi, leak=1.0):
     S = sigma_state['S']
     S_batch_sum = jnp.einsum("tni, tnj -> ij", phi, phi)
-    S_new = S + S_batch_sum
+    S_new = leak * S + S_batch_sum
     S_new = 0.5 * (S_new + S_new.T)
     return {'S': S_new, }
 
@@ -173,25 +173,17 @@ def shuffle_and_batch(rng, transitions, n_minibatches):
     minibatches = jax.tree_util.tree_map(lambda x: preprocess_transition(x, rng), transitions)  # num_actors*num_envs (batch_size), ...
     return minibatches
 
-
 def _loss_fn(params, network, traj_batch, gae, targets, config):
     # RERUN NETWORK
     pi, value = network.apply(params, traj_batch.obs)
     log_prob = pi.log_prob(traj_batch.action)
     
     # VALUE LOSS
-    value_pred_clipped = traj_batch.value + (
-        value - traj_batch.value
-    ).clip(-config["VF_CLIP"], config["VF_CLIP"])
-    value_losses = jnp.square(value - targets)
-    value_losses_clipped = jnp.square(value_pred_clipped - targets)
-    value_loss = (
-        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-    )
+    ve_loss = ppo_val_loss(value, traj_batch.value, targets, config)
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-    gae = jnp.clip(gae, -2.0, 2.0) # outlier clipping for the policy. 95% unclipped with 2.
+    gae = jnp.clip(gae, -3.0, 3.0)
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -211,6 +203,43 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (value_loss, loss_actor, entropy)
+
+def ppo_val_loss(v_pred, v_batch, targets, config):
+    value_pred_clipped = v_batch + (v_pred - v_batch).clip(-config["VF_CLIP"], config["VF_CLIP"])
+    value_losses = jnp.square(v_pred - targets)
+    value_losses_clipped = jnp.square(value_pred_clipped - targets)
+    return 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+
+def ppo_loss_two_vals(params, network, traj_batch, gae, targets, config):
+    "Designed for a three headed value network that returns pi, ve, vi"
+    # RERUN NETWORK
+    pi, ve, vi = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    ve_loss = ppo_val_loss(ve, traj_batch.value, targets[0], config)
+    vi_loss = ppo_val_loss(vi, traj_batch.i_value, targets[1] config)
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = (
+        loss_actor
+        + config["VF_COEF"] * value_loss
+        - config["ENT_COEF"] * entropy
+    )
+    return total_loss, (ve_loss, vi_loss, loss_actor, entropy)
 
 
 def calculate_traces(features, cut_trace, γ, λ):
@@ -273,8 +302,7 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-    A_CLIP = config.get('ADV_CLIP', 3.0)
-    gae = jnp.clip(gae, -A_CLIP, A_CLIP) # outlier clipping for the policy. 95% unclipped with 2.
+    gae = jnp.clip(gae, -3.0, 3.0)
     loss_actor1 = ratio * gae
     loss_actor2 = (
         jnp.clip(
@@ -295,3 +323,94 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (i_value_loss, value_loss, loss_actor, entropy)
+
+# EXTRINSIC:
+def calculate_gaeE(traj_batch, γ, λ,):
+    # Extrinsic is always strictly episodic. Cut on death OR the dummy step.
+    # (Since you precompute cut_i_trace, we can just quickly grab the extrinsic cuts here)
+    done = traj_batch.done
+    is_dummy = traj_batch.info.get('is_dummy', jnp.zeros_like(done))
+    cut_e_trace = done | is_dummy
+    cut_e_mult = 1.0 - cut_e_trace.astype(jnp.float32)
+
+    # Package everything into a single tuple for the scan
+    scan_inputs = (traj_batch, cut_e_mult)
+
+    def _get_advantages(gae, inputs):
+        transition, continue_e = inputs
+        
+        # --- Extrinsic ---
+        delta = transition.reward + γ * transition.next_value * continue_e - transition.value
+        gae = delta + (γ * λ * continue_e * gae)
+        
+        return gae, gae
+
+    initial_acc = jnp.zeros_like(traj_batch.value[0])
+    
+    _, advantages = jax.lax.scan(
+        _get_advantages, initial_acc, scan_inputs, reverse=True, unroll=16
+    )
+    
+    return advantages, advantages + traj_batch.value
+
+
+def _loss_fn_actor(params, network, traj_batch, gae, targets, config):
+    # RERUN NETWORK
+    pi = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = loss_actor- config["ENT_COEF"] * entropy
+    
+    return total_loss, (loss_actor, entropy)
+
+# Running batch RMS:
+def init_rms(shape):
+    return {
+        "mean": jnp.zeros(shape, dtype=jnp.float32),
+        "var": jnp.ones(shape, dtype=jnp.float32),
+        "count": jnp.array(1e-4, dtype=jnp.float32)
+    }
+
+def update_rms(rms_state, batch):
+    """Batched update of running mean and variance."""
+    batch_mean = jnp.mean(batch, axis=0)
+    batch_var = jnp.var(batch, axis=0)
+    batch_count = batch.shape[0]
+
+    delta = batch_mean - rms_state["mean"]
+    tot_count = rms_state["count"] + batch_count
+
+    new_mean = rms_state["mean"] + delta * batch_count / tot_count
+    
+    m_a = rms_state["var"] * rms_state["count"]
+    m_b = batch_var * batch_count
+    M2 = m_a + m_b + jnp.square(delta) * rms_state["count"] * batch_count / tot_count
+    new_var = M2 / tot_count
+
+    return {
+        "mean": new_mean,
+        "var": new_var,
+        "count": tot_count
+    }
+
+def normalize_obs(rms_state, obs, clip=5.0):
+    """Centers, scales, and clips the observation."""
+    std = jnp.sqrt(rms_state["var"] + 1e-8)
+    norm_obs = (obs - rms_state["mean"]) / std
+    return jnp.clip(norm_obs, -clip, clip)

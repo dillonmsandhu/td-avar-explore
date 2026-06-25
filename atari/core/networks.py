@@ -44,7 +44,7 @@ class ImpalaCNN(nn.Module):
         # Stack 3: [32 channels] -> Result: 11x11x32
         x = ImpalaStack(channels=32)(x)
         
-        # x = nn.relu(x) # Final activation before flattening
+        x = nn.relu(x) # Final activation before flattening
         x = x.reshape((x.shape[0], -1)) # Flatten
         
         # Finally linear layer
@@ -62,18 +62,17 @@ class CNN(nn.Module):
         if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
             x = x[None, ...]  # Shape becomes (1, H, W, C)
         
-        x = jnp.transpose(x, (0, 2, 3, 1))
+        # channel last for FLAX, while it is first for envpool.
+        x = jnp.transpose(x, (0, 2, 3, 1)) 
         x = x / 255.0
         
         # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        # x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
         x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
-        # x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2), padding="SAME")
         x = x.reshape((x.shape[0], -1))
         # 4. Final Projection
         x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
@@ -82,6 +81,7 @@ class CNN(nn.Module):
 # Nature-like DQN with pooling, used for LSTD featuers.
 class LSTD_CNN(nn.Module): 
     out_dim: int = 128
+    pool: bool = False
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
@@ -110,7 +110,8 @@ class LSTD_CNN(nn.Module):
         # 3. Hybrid Pooling (Smoothing)
         # stride=(1, 1) preserves resolution but smears features across 2x2 neighbors
         # Result: [Batch, 9, 9, 64]
-        x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
+        if self.pool:
+            x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
         
         # 4. Final Convolutional Compression
         # floor((9 - 3) / 1) + 1 = 7
@@ -162,12 +163,14 @@ class LSTD_Net(nn.Module):
     k: int = 384 # same as small dino
     normalize: bool = False
     bias: bool = True
+    pool: bool = False
     
     def setup(self):
         # Base feature dimension before optional bias
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
-        self.torso = LSTD_CNN(self.feat_dim)
+        self.torso = LSTD_CNN(self.feat_dim, pool = self.pool)
+    
     def __call__(self, x):
         phi = self.torso(x)  
         
@@ -203,10 +206,15 @@ class ActorCritic2Head(nn.Module):
     action_dim: int
     normalize_value_features: bool = False
     out_dim: int = 384
+    cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(self.out_dim)
-        self.critic_torso = ImpalaCNN(self.out_dim)
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+            self.critic_torso = ImpalaCNN(self.out_dim)
+        else: 
+            self.actor_torso = CNN(self.out_dim)
+            self.critic_torso = CNN(self.out_dim)            
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -240,11 +248,17 @@ class ActorCritic3Head(nn.Module):
     action_dim: int
     normalize_value_features: bool = False
     out_dim: int= 384
+    cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
-        self.actor_torso = ImpalaCNN(self.out_dim)
-        self.critic_ext = ImpalaCNN(self.out_dim)
-        self.critic_int = ImpalaCNN(self.out_dim)
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+            self.critic_ext = ImpalaCNN(self.out_dim)
+            self.critic_int = ImpalaCNN(self.out_dim)
+        else:
+            self.actor_torso = CNN(self.out_dim)
+            self.critic_ext = CNN(self.out_dim)
+            self.critic_int = CNN(self.out_dim)
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
         self.v_ext_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
@@ -316,7 +330,7 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
     return model, params
 
 
-def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128):
+def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128, pool=False):
     """
     Initializes the RND network. 
     If state_action_features is True, returns shape (..., n_actions, k).
@@ -326,6 +340,7 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
         k=k, 
         normalize=normalize_features, 
         bias=bias, 
+        pool=pool,
     )
     rng, init_rng = jax.random.split(rng)
     init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
@@ -333,12 +348,13 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
     return model, params
 
 
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int):
-    
-    if n_heads == 2:
-        model = ActorCritic2Head(action_dim=action_dim)
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN'):
+    if n_heads == 1:
+        model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
+    elif n_heads == 2:
+        model = ActorCritic2Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 3:
-        model = ActorCritic3Head(action_dim=action_dim)
+        model = ActorCritic3Head(action_dim=action_dim, cnn_torso = cnn_torso)
     else:
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
@@ -438,3 +454,46 @@ class FeatureNet(nn.Module):
         next_rnd_pred = self.next_rnd_head(z_int)
 
         return v_int, phi_lstd, current_rnd_pred, next_rnd_pred
+
+# Extrinsic value from LSTD
+
+class Actor1Head(nn.Module):
+    """
+    Returns: (pi, v)
+    """
+    action_dim: int
+    out_dim: int = 384
+    cnn_torso: str = 'IMPALA_CNN'
+
+    def setup(self):
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.actor_torso = ImpalaCNN(self.out_dim)
+        else:
+            self.actor_torso = CNN(self.out_dim)
+        
+        self.pi_head = PolicyHead(action_dim=self.action_dim)
+
+    def policy(self, x):
+            return self.pi_head(self.actor_torso(x))
+
+    def __call__(self, x):
+        return self.policy(x)
+
+def basic_flax_train_state(config, network, params):
+    # --- PPO Agent Scheduler & Optimizer ---
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    lr_scheduler = optax.linear_schedule(
+        init_value=config["LR"],
+        end_value=config["LR_END"],
+        transition_steps=total_grad_steps
+    )
+    tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adamw(lr_scheduler, eps=1e-5),
+    )
+    train_state = TrainState.create(
+        apply_fn=network.apply,
+        params=params,
+        tx=tx,
+    )
+    return train_state

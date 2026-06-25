@@ -388,6 +388,12 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         "v_e_pred": "v_e_pred",
         "num_goals": "num_goals", 
         "vi_pred_scaled": "vi_pred_scaled",
+        "v_pred": "v_pred",
+        "v_std": "v_std",
+        "adv_mean": "adv_mean",
+        "adv_std": "adv_std",
+        "rho_feat_var": "rho_feat_var",
+        "lstd_feat_var": "feat_var"
     }
 
     for m_key, save_name in standard_plots.items():

@@ -5,20 +5,34 @@ import core.helpers as helpers
 import core.networks as networks
 from core.buffer import FeatureTraceBufferManager, LSTDBufferState
 from core.lstd import solve_lstd_lambda_from_buffer
-from core.helpers import Transition
-from core.dino_features import get_dino_features_on_atari_obs_grid
+import jax.image
+from transformers import FlaxDinov2Model
 # jax.config.update("jax_enable_x64", True)
+DINO_PATH = "/usr/xtmp/ds541/hf_models/dino_v2_flax_reg"
+SAVE_DIR = "cov_lstd_dino_rho" 
 
-SAVE_DIR = "cov_lstd" 
+class Transition(NamedTuple):
+    done: jnp.ndarray
+    action: jnp.ndarray
+    value: jnp.ndarray
+    next_value: jnp.ndarray
+    i_value: jnp.ndarray
+    next_i_val: jnp.ndarray
+    reward: jnp.ndarray
+    intrinsic_reward: jnp.ndarray
+    log_prob: jnp.ndarray
+    obs: jnp.ndarray
+    info: dict
+    # --- NEW FIELDS ---
+    phi: jnp.ndarray            # LSTD features
+    next_phi: jnp.ndarray 
+    rho_feats: jnp.ndarray       # Exploration/Intrinsic features
+    next_rho_feats: jnp.ndarray  
 
 def make_train(config):
+    dino_model = FlaxDinov2Model.from_pretrained(DINO_PATH)
     k_lstd = config.get("LSTD_FEATURES", 128)
-    k_rho = config.get("RND_FEATURES", 128)
-    normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", False)
-    normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", False)
-
-    config['COV_LEAK'] = config.get('COV_LEAK', 1 - 1e-5)
-    
+    k_rho = 385
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
     is_continuing = (not is_episodic)
@@ -48,9 +62,9 @@ def make_train(config):
     BUFFER_CAPACITY = config.get('RB_SIZE', 100_000)
     EXTENDED_CAPACITY = BUFFER_CAPACITY + batch_size
     config['CHUNK_SIZE'] =  100_000 + batch_size # chunking for LSTD solver
-    # buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
-    # config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
-    # config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
+    buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
+    config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
+    config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
     
     # Env
     env = helpers.make_env(config)
@@ -72,9 +86,6 @@ def make_train(config):
                 "extrinsic_value_loss": value_loss.mean(),
                 "entropy": entropy.mean(),
                 "feat_norm": jnp.linalg.norm(traj_batch.next_phi, axis=-1).mean(),
-                "feat_var": jnp.var(traj_batch.phi, axis=0).mean(),
-                "rho_feat_var": jnp.var(traj_batch.rho_feats, axis=0).mean(),
-                "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2)),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
@@ -92,92 +103,89 @@ def make_train(config):
             return metric
 
     def train(rng):
-        obs_rms = helpers.init_rms(shape=(1, 84, 84))
-        
-        # --- initialize intrinsic reward rho components ---
-        initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
-        rnd_rng, rng = jax.random.split(rng)
-        # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
-        rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
-        )
-        def get_rho_feats(obs):
-            return rho_net.apply(rho_params, obs)
-        
-        # --- initialize LSTD components---
-        if config.get('LSTD_DINO', False):
-            get_lstd_feats = get_dino_features_on_atari_obs_grid
-            k_lstd = 385
-
-        else:
-            lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
-                rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd, pool=config['POOL_LSTD_NET']
-            ) # will be the same params if the same network
-            def get_lstd_feats(obs):
-                return lstd_net.apply(lstd_params, obs)
-        
-        buffer_manager = FeatureTraceBufferManager(config, k_lstd, k_rho, BUFFER_CAPACITY, EXTENDED_CAPACITY, config['CHUNK_SIZE']) # stateless buffer manager.
-        config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
-        config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
-        initial_buffer_state = buffer_manager.init_state()
+        rho_params = dino_model.params
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
+        initial_buffer_state = buffer_manager.init_state()
+        initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
 
+        rnd_rng, rng = jax.random.split(rng)
+
+        lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
+            rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd
+        ) # will be the same params if the same network
+
+        def get_rho_feats(obs):
+            "DiNO inference"
+            # 1. Parse the shape: obs is usually (B, 4, 84, 84) from EnvPool
+            B, C, H, W = obs.shape
+            
+            # 2. Extract the 4 individual grayscale frames
+            f1 = obs[:, 0, :, :] # Oldest frame (B, 84, 84)
+            f2 = obs[:, 1, :, :]
+            f3 = obs[:, 2, :, :]
+            f4 = obs[:, 3, :, :] # Newest frame (B, 84, 84)
+            
+            # 3. Stitch into a 2x2 grid -> (B, 168, 168)
+            # Put frame 1 and 2 side-by-side for the top row
+            top_row = jnp.concatenate([f1, f2], axis=-1)       # Shape: (B, 84, 168)
+            # Put frame 3 and 4 side-by-side for the bottom row
+            bottom_row = jnp.concatenate([f3, f4], axis=-1)    # Shape: (B, 84, 168)
+            # Stack the rows vertically
+            grid = jnp.concatenate([top_row, bottom_row], axis=1) # Shape: (B, 168, 168)
+            
+            # 4. Add channel dimension and repeat 3 times to fake RGB
+            grid = grid[:, None, :, :]          # Shape: (B, 1, 168, 168)
+            grid = jnp.repeat(grid, 3, axis=1)  # Shape: (B, 3, 168, 168)
+            
+            # 5. Cast to float and scale to [0, 1]
+            grid = grid.astype(jnp.float32) / 255.0
+            
+            # 6. Resize to DINO's expected 224x224
+            grid = jax.image.resize(grid, shape=(B, 3, 224, 224), method='bilinear')
+            
+            # 7. Apply standard ImageNet normalization
+            mean = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32).reshape(1, 3, 1, 1)
+            std = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32).reshape(1, 3, 1, 1)
+            grid = (grid - mean) / std
+            
+            # 8. Forward pass through DINO
+            outputs = dino_model(pixel_values=grid, params=rho_params)
+            
+            # 9. Extract CLS token and project
+            # Note: We only have 1 image per batch item now, so we just take the CLS token
+            cls_tokens = outputs.last_hidden_state[:, 0, :] # Shape: (B, 384)
+            bias = jnp.ones((B, 1), dtype=cls_tokens.dtype)
+            return jnp.concatenate([cls_tokens, bias], axis=-1)
+        
+        def get_lstd_feats(obs):
+            return lstd_net.apply(lstd_params, obs)
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
-        train_state, rnd_state = networks.initialize_flax_train_states(
-            config, network, rho_net, network_params, rho_params
+        train_state, _ = networks.initialize_flax_train_states(
+            config, network, lstd_net, network_params, lstd_params
         )
         
-        # --- initialize the running obs statistics ---
         obsv, env_state = env.reset()
-        
-        # Initialize pure RMS state
-        initial_obs_rms = helpers.init_rms(shape=(1, 84, 84)) 
-        initial_obs_rms = helpers.update_rms(initial_obs_rms, obsv.reshape(-1, 1, 84, 84))
-
-        # --- WARMUP PHASE ---
-        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
-
-        def _warmup_step(warmup_carry, unused):
-            env_state, last_obs, obs_rms, rng = warmup_carry
-            rng, _rng = jax.random.split(rng)
-            action = jax.random.randint(_rng, shape=(last_obs.shape[0],), minval=0, maxval=n_actions)
-            rng, _rng = jax.random.split(rng)
-            obsv, env_state, reward, done, info = env.step(env_state, action)
-            # 3. Update RMS Stats
-            obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84))
-            return (env_state, obsv, obs_rms, rng), None
-
-        # Execute Warmup Scan
-        warmup_carry = (env_state, obsv, initial_obs_rms, rng)
-        (env_state, obsv, obs_rms, rng), _ = jax.lax.scan(
-            _warmup_step, warmup_carry, None, length=WARMUP_STEPS
-        )
-
-        # normalize initial observation
-        normalized_obs = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape)
-        initial_phi =  get_lstd_feats( normalized_obs if normalize_lstd_obs else obsv )
-        initial_rho_feat =  get_rho_feats( normalized_obs if normalize_lstd_obs else obsv )
+        initial_phi = get_lstd_feats(obsv)
+        initial_rho_feat = get_rho_feats(obsv)
 
         def _update_step(runner_state, unused):
-            obs_rms = runner_state['obs_rms']
+
             train_state = runner_state["train_state"]
             lstd_state = runner_state["lstd_state"]
             sigma_state = runner_state["sigma_state"]
             buffer_state = runner_state["buffer_state"] 
-            rnd_state = runner_state["rnd_state"]
             env_state = runner_state["env_state"]
             last_obs = runner_state["last_obs"]
             last_phi = runner_state["last_phi"]
             last_rho_feat = runner_state["last_rho_feat"]
-            obs_rms = runner_state['obs_rms']
             rng = runner_state["rng"]
             idx = runner_state["idx"]
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
                 # Unpack the carried features
-                train_state, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng = env_scan_state
+                train_state, env_state, last_obs, last_phi, last_rho_feat, rng = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -191,40 +199,30 @@ def make_train(config):
                 next_val = network.apply(train_state.params, obsv, method=network.value)
 
                 # --- NEW: IN-LOOP FEATURE EXTRACTION ---
-                obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84)) # update with new obs
-                next_obs_norm = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape) # normalize new obs
-                
-                next_obs_rho = next_obs_norm if normalize_rho_obs else obsv
-                next_obs_lstd = next_obs_norm if normalize_lstd_obs else obsv
-                
-                next_phi = get_lstd_feats(next_obs_lstd)
-                next_rho_feat = get_rho_feats(next_obs_rho)
+                next_phi = get_lstd_feats(obsv)
+                next_rho_feat = get_rho_feats(obsv)
 
                 dummy = jnp.zeros_like(reward)
 
                 transition = Transition(
-                    done, action, value, next_val, dummy, dummy, reward, dummy, log_prob, 
-                    last_obs, obsv, info, phi=last_phi, next_phi=next_phi, 
+                    done, action, value, next_val, dummy, dummy, reward, dummy, log_prob, last_obs, info, phi=last_phi, next_phi=next_phi, 
                     rho_feats=last_rho_feat, next_rho_feats=next_rho_feat
                 )
 
                 # Pass the 'next' features forward as the 'last' features for the next step
-                runner_state = (train_state, env_state, obsv, next_phi, next_rho_feat, obs_rms, rng)
+                runner_state = (train_state, env_state, obsv, next_phi, next_rho_feat, rng)
                 return runner_state, transition
             # end env_step
             env_step_state = (
                 train_state, env_state, last_obs, 
-                runner_state["last_phi"], runner_state["last_rho_feat"], obs_rms, rng
+                runner_state["last_phi"], runner_state["last_rho_feat"], rng
             )
             
-            (_, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            (_, env_state, last_obs, last_phi, last_rho_feat,rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
 
             # Process batch
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
-            sigma_state = helpers.update_cov(sigma_state, 
-                        traj_batch.rho_feats, 
-                        leak = config['COV_LEAK']
-            )            
+            sigma_state = helpers.update_cov(sigma_state, traj_batch.rho_feats)            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_rho))
             
@@ -321,10 +319,8 @@ def make_train(config):
                 "last_rho_feat": last_rho_feat,  
                 "rng": rng,
                 "lstd_state": lstd_state,
-                "rnd_state": rnd_state,
                 "sigma_state": sigma_state,
                 "buffer_state": buffer_state,
-                "obs_rms": obs_rms,
                 "idx": idx + 1,
             }
             return runner_state, metric
@@ -337,13 +333,11 @@ def make_train(config):
             "last_obs": obsv,
             "rng": _rng,
             "lstd_state": initial_lstd_state,
-            "rnd_state": rnd_state,
             "sigma_state": initial_sigma_state,
             "buffer_state": initial_buffer_state,
             "idx": 1,
             "last_phi": initial_phi,            
             "last_rho_feat": initial_rho_feat,  
-            "obs_rms": obs_rms,
         }
 
         runner_state, metrics = jax.lax.scan(_update_step, initial_runner_state, None, config["NUM_UPDATES"])
