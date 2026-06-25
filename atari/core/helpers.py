@@ -179,14 +179,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     log_prob = pi.log_prob(traj_batch.action)
     
     # VALUE LOSS
-    value_pred_clipped = traj_batch.value + (
-        value - traj_batch.value
-    ).clip(-config["VF_CLIP"], config["VF_CLIP"])
-    value_losses = jnp.square(value - targets)
-    value_losses_clipped = jnp.square(value_pred_clipped - targets)
-    value_loss = (
-        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-    )
+    ve_loss = ppo_val_loss(value, traj_batch.value, config)
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
@@ -210,6 +203,47 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (value_loss, loss_actor, entropy)
+
+def ppo_val_loss(v_pred, v_batch, config):
+    # VALUE LOSS
+    value_pred_clipped = v_batch + (v_pred - v_batch).clip(-config["VF_CLIP"], config["VF_CLIP"])
+    value_losses = jnp.square(value - targets)
+    value_losses_clipped = jnp.square(value_pred_clipped - targets)
+    value_loss = (
+        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+    )
+    return value_loss
+
+def ppo_loss_two_vals(params, network, traj_batch, gae, targets, config):
+    "Designed for a three headed value network that returns pi, ve, vi"
+    # RERUN NETWORK
+    pi, ve, vi = network.apply(params, traj_batch.obs)
+    log_prob = pi.log_prob(traj_batch.action)
+    ve_loss = ppo_val_loss(ve, traj_batch.value, config)
+    vi_loss = ppo_val_loss(vi, traj_batch.i_value, config)
+    # CALCULATE ACTOR LOSS
+    ratio = jnp.exp(log_prob - traj_batch.log_prob)
+    gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+    gae = jnp.clip(gae, -3.0, 3.0)
+    loss_actor1 = ratio * gae
+    loss_actor2 = (
+        jnp.clip(
+            ratio,
+            1.0 - config["CLIP_EPS"],
+            1.0 + config["CLIP_EPS"],
+        )
+        * gae
+    )
+    loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+    loss_actor = loss_actor.mean()
+    entropy = pi.entropy().mean()
+
+    total_loss = (
+        loss_actor
+        + config["VF_COEF"] * value_loss
+        - config["ENT_COEF"] * entropy
+    )
+    return total_loss, (ve_loss, vi_loss, loss_actor, entropy)
 
 
 def calculate_traces(features, cut_trace, γ, λ):
