@@ -66,7 +66,7 @@ shared_config = { # for simple pong testing.
     "ENV_KWARGS": {
         "episodic_life": False,
         "reward_clip": True,
-        "repeat_action_probability": 0.25,
+        "repeat_action_probability": 0.1,
         "frame_skip": 4,
         "noop_max": 30,
     },
@@ -85,7 +85,7 @@ shared_config = { # for simple pong testing.
     "RND_FEATURES": 512,
     "NORMALIZE_RHO_FEATURES": True, # New
     "BIAS": False,
-    "COV_LEAK": 0.99999,
+    "COV_LEAK": 0.9999,
     "BONUS_SCALE": 5.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": False, # New
     
@@ -94,9 +94,9 @@ shared_config = { # for simple pong testing.
     "LSTD_FEATURES": 256, # 384. DinoV2 small has this many so let's see how that does.
     "LSTD_L2_REG": 1e-4,
     "POOL_LSTD_NET": False,
-    "LSTD_DINO": False, # DinoV2 features plus a bias, unnormalized
-    "NORMALIZE_LSTD_OBS": True,
+    "LSTD_DINO": True, # DinoV2 features plus a bias, unnormalized
+    "NORMALIZE_LSTD_OBS": False,
     "NORMALIZE_LSTD_FEATURES": True, # New
-    "RB_SIZE": 350_000,
-    "PERCENT_FIFO": .5, # higher means more on-policy, but can lead to forgetting after convergence.
+    "RB_SIZE": 150_000,
+    "PERCENT_FIFO": .25, # higher means more on-policy, but can lead to forgetting after convergence.
 }

@@ -1,5 +1,5 @@
 # RND exactly as the original paper.
-# 1. Normalize the observations, then clip within -5,5
+# 1. The observation for RND is the last frame of the *next* observation, which is normalized and clipped.
 # 2. "Normalize the intrinsic reward by dividing it by a running estimate of the standard deviations of the intrinsic returns."
 # 3. We initialize the normalization parameters by stepping a random agent in the environment for a small number of steps before beginning optimization.
 # 4. Initialize two more networks: one target and one trained.
@@ -73,7 +73,7 @@ def make_train(config):
     # Metrics Function
     def _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
-            value_loss, vi_loss loss_actor, entropy, rnd_mse = loss_info
+            value_loss, vi_loss, loss_actor, entropy, rnd_mse = loss_info
             metric.update({
                 "ppo_actor_loss": loss_actor.mean(),
                 "extrinsic_value_loss": value_loss.mean(),
@@ -104,17 +104,17 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
         normalize_rho_features = False
-        rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, normalize_rho_features, bias=False, k=k_rho 
+        rnd_net, rho_params = networks.initialize_rnd_network(
+            rnd_rng, (1, 84, 84), normalize_rho_features, bias=False, k=k_rho 
         )
         _, target_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, normalize_rho_features, bias=False, k=k_rho 
+            rnd_rng, (1, 84, 84), normalize_rho_features, bias=False, k=k_rho 
         )
         
         # --- initialize PPO network ---
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=3)
         train_state, rnd_state = networks.initialize_flax_train_states(
-            config, network, rho_net, network_params, rho_params
+            config, network, rnd_net, network_params, rho_params
         )
         
         # --- initialize the running obs statistics ---
@@ -122,7 +122,9 @@ def make_train(config):
         
         # Initialize pure RMS state
         initial_obs_rms = helpers.init_rms(shape=(1, 84, 84)) 
-        initial_obs_rms = helpers.update_rms(initial_obs_rms, obsv.reshape(-1, 1, 84, 84))
+        initial_obs_rms = helpers.update_rms(initial_obs_rms, 
+            obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+        )
 
         # --- Warm Up Running Observation Statistics ---
         WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
@@ -134,7 +136,9 @@ def make_train(config):
             rng, _rng = jax.random.split(rng)
             obsv, env_state, reward, done, info = env.step(env_state, action)
             # 3. Update RMS Stats
-            obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84))
+            obs_rms = helpers.update_rms(obs_rms, 
+                obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+            )
             return (env_state, obsv, obs_rms, rng), None
 
         # Execute Warmup Scan
@@ -144,7 +148,9 @@ def make_train(config):
         )
 
         # normalize initial observation
-        normalized_obs = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape)
+        normalized_obs = helpers.normalize_obs(obs_rms, 
+            obsv.reshape(-1, 1, 84, 84)
+        ).reshape(obsv.shape)
 
         def _update_step(runner_state, unused):
             obs_rms = runner_state['obs_rms']
@@ -174,12 +180,11 @@ def make_train(config):
                 next_ve, next_vi = network.apply(train_state.params, obsv, method=network.value)
 
                 # Compute Intrinsic Reward
-                obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84)) # update with new obs
-                next_obs_norm = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape) # normalize new obs
-                
-                next_rnd_obs = next_obs_norm.clip(-5,5)
-                rnd_target_feats = rho_net.apply(target_params, obs)
-                rho_feats = rho_net.apply(rnd_state.params, obs)
+                latest_frame = obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+                obs_rms = helpers.update_rms(obs_rms, latest_frame)
+                next_rnd_obs = helpers.normalize_obs(obs_rms, latest_frame) # normalizes and clip
+                rnd_target_feats = rnd_net.apply(target_params, next_rnd_obs)
+                rho_feats = rnd_net.apply(rnd_state.params, next_rnd_obs)
 
                 ri_raw = 0.5 * (rnd_target_feats - rho_feats).pow(2).sum()
                 
@@ -221,7 +226,6 @@ def make_train(config):
             # --- 6. INTRINSIC vs. EXTRINSIC SCALING ---
             rho_scale = beta_sch(idx) # triangle schedule
             advantages = gae_e + (rho_scale * gae_i)
-            extrinsic_target = targets[0]
 
             # 7. UPDATE NETWORK
             def _update_epoch(update_state, unused):
@@ -266,7 +270,7 @@ def make_train(config):
                 return (train_state, rnd_state, traj_batch, advantages, targets, rng), total_loss
             # end _update_epoch
 
-            initial_update_state = (train_state, rnd_state, traj_batch, advantages, extrinsic_target, rng)
+            initial_update_state = (train_state, rnd_state, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(_update_epoch, initial_update_state, None, config["NUM_EPOCHS"])
             train_state, rnd_state, _, _, _, rng = update_state
 

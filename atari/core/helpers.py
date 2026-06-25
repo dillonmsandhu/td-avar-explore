@@ -179,7 +179,7 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     log_prob = pi.log_prob(traj_batch.action)
     
     # VALUE LOSS
-    ve_loss = ppo_val_loss(value, traj_batch.value, config)
+    ve_loss = ppo_val_loss(value, traj_batch.value, targets, config)
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
@@ -204,23 +204,19 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
     )
     return total_loss, (value_loss, loss_actor, entropy)
 
-def ppo_val_loss(v_pred, v_batch, config):
-    # VALUE LOSS
+def ppo_val_loss(v_pred, v_batch, targets, config):
     value_pred_clipped = v_batch + (v_pred - v_batch).clip(-config["VF_CLIP"], config["VF_CLIP"])
-    value_losses = jnp.square(value - targets)
+    value_losses = jnp.square(v_pred - targets)
     value_losses_clipped = jnp.square(value_pred_clipped - targets)
-    value_loss = (
-        0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-    )
-    return value_loss
+    return 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
 
 def ppo_loss_two_vals(params, network, traj_batch, gae, targets, config):
     "Designed for a three headed value network that returns pi, ve, vi"
     # RERUN NETWORK
     pi, ve, vi = network.apply(params, traj_batch.obs)
     log_prob = pi.log_prob(traj_batch.action)
-    ve_loss = ppo_val_loss(ve, traj_batch.value, config)
-    vi_loss = ppo_val_loss(vi, traj_batch.i_value, config)
+    ve_loss = ppo_val_loss(ve, traj_batch.value, targets[0], config)
+    vi_loss = ppo_val_loss(vi, traj_batch.i_value, targets[1] config)
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
