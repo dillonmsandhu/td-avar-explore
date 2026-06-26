@@ -32,10 +32,9 @@ def make_env(config):
     )
     
     # Expose necessary standard attributes for your agent
-    env.num_envs = config["NUM_ENVS"]
-    env.single_action_space = env.action_space
-    env.single_observation_space = env.observation_space
-    env.name = config["ENV_NAME"]
+    # env.single_action_space = env.action_space
+    # env.single_observation_space = env.observation_space
+    # env.name = config["ENV_NAME"]
     
     # Wrap with our unified XLA logic
     env = JaxEnvPoolWrapper(env, config)
@@ -327,14 +326,11 @@ def _loss_fn_intrinsic_v(params, network, traj_batch, gae, targets, config):
 
 # EXTRINSIC:
 def calculate_gaeE(traj_batch, γ, λ,):
-    # Extrinsic is always strictly episodic. Cut on death OR the dummy step.
-    # (Since you precompute cut_i_trace, we can just quickly grab the extrinsic cuts here)
     done = traj_batch.done
     is_dummy = traj_batch.info.get('is_dummy', jnp.zeros_like(done))
     cut_e_trace = done | is_dummy
     cut_e_mult = 1.0 - cut_e_trace.astype(jnp.float32)
 
-    # Package everything into a single tuple for the scan
     scan_inputs = (traj_batch, cut_e_mult)
 
     def _get_advantages(gae, inputs):

@@ -72,6 +72,138 @@ ATARI_SCORES = {
     "Zaxxon-v5": (32.5, 9173.3),
 }
 
+# @struct.dataclass
+# class LogEnvState:
+#     handle: jnp.array
+#     episode_returns: jnp.array
+#     episode_lengths: jnp.array
+#     returned_episode_returns: jnp.array
+#     returned_episode_lengths: jnp.array
+#     lives: jnp.array  # Added to track life decrements across JAX steps
+#     was_done: jnp.array 
+#     was_goal: jnp.array 
+
+# class JaxEnvPoolWrapper(gym.Wrapper):
+#     """
+#     Wraps EnvPool via XLA to provide logging AND terminal state injections 
+#     (real_next_obs, is_goal) for RND/bootstrapped traces.
+#     """
+#     def __init__(self, env, config, reset_info=True):
+#         super().__init__(env)
+#         # self.num_envs = getattr(env, "num_envs", 1)
+#         # self.env_name = env.name
+        
+#         # Load scores
+#         if self.env_name in ATARI_SCORES:
+#             self.env_random_score, self.env_human_score = ATARI_SCORES[self.env_name]
+#         else:
+#             self.env_random_score, self.env_human_score = 0.0, 1.0
+
+#         self.reset_info = reset_info
+        
+#         # XLA setup
+#         handle, recv, send, step = env.xla()
+#         self.init_handle = handle
+#         self.step_f = step
+
+#     def reset(self, **kwargs):
+#         observations = super().reset(**kwargs)
+#         env_state = LogEnvState(
+#             handle=jnp.array(self.init_handle),
+#             episode_returns=jnp.zeros(self.num_envs, dtype=jnp.float32), 
+#             episode_lengths=jnp.zeros(self.num_envs, dtype=jnp.float32), 
+#             returned_episode_returns=jnp.zeros(self.num_envs, dtype=jnp.float32), 
+#             returned_episode_lengths=jnp.zeros(self.num_envs, dtype=jnp.float32), 
+#             lives=jnp.zeros(self.num_envs, dtype=jnp.int32), # Initialize lives
+#             was_done=jnp.zeros(self.num_envs, dtype=jnp.bool_),
+#             was_goal=jnp.zeros(self.num_envs, dtype=jnp.bool_),
+#         )
+#         return observations, env_state
+
+#     @partial(jax.jit, static_argnums=(0,))
+#     def step(self, state, action):
+#         # 1. Step the underlying EnvPool XLA environment
+#         new_handle, (observations, raw_rewards, dones, infos) = self.step_f(
+#             state.handle, action
+#         )
+
+#         # 2. Terminal & Goal Logic Injection
+#         dones = dones.astype(jnp.bool_)
+#         terminated = infos.get("terminated", dones).astype(jnp.bool_)
+#         truncated = infos.get("TimeLimit.truncated", jnp.zeros_like(dones)).astype(jnp.bool_)
+#         current_lives = infos.get("lives", jnp.zeros_like(dones, dtype=jnp.int32))
+
+#         # Capture the previous step's flags BEFORE we update the state!
+#         is_dummy = state.was_done
+#         was_goal = state.was_goal
+        
+#         # Life loss heuristic: if lives strictly decreased from the previous step
+#         life_loss = current_lives < state.lives
+        
+#         # Goal logic: Episodic termination (no timeout), reward > 0, and NOT a life-loss event
+#         terminal_no_timeout = terminated & ~truncated
+#         is_goal = terminal_no_timeout & (raw_rewards > 0) & ~life_loss
+
+#         # 3. Logging Logic
+#         new_episode_return = state.episode_returns + infos["reward"]
+#         new_episode_length = state.episode_lengths + 1
+        
+#         # Mask out resets
+#         mask = 1 - (terminated | truncated)
+        
+#         state = state.replace(
+#             handle=new_handle,
+#             episode_returns=new_episode_return * mask,
+#             episode_lengths=new_episode_length * mask,
+#             returned_episode_returns=jnp.where(
+#                 terminated | truncated,
+#                 new_episode_return,
+#                 state.returned_episode_returns,
+#             ),
+#             returned_episode_lengths=jnp.where(
+#                 terminated | truncated,
+#                 new_episode_length,
+#                 state.returned_episode_lengths,
+#             ),
+#             lives=current_lives,  
+#             was_done=(terminated | truncated),
+#             was_goal=is_goal, # Save current step's goal status for the next step
+#         )
+
+#         # 4. Package standard infos + custom injections
+#         if self.reset_info:
+#             elapsed_steps = infos["elapsed_step"]
+#             episode_done = terminated | truncated
+#             infos = {} # Clear underlying dict to prevent bloat
+#             infos["elapsed_step"] = elapsed_steps
+#             infos["returned_episode"] = episode_done
+
+#         # Re-inject transition dynamics
+#         infos["is_goal"] = is_goal # currently transitioned into goal
+#         infos["is_dummy"] = is_dummy # transitioned from S_T -> S_0 (dummy step)
+#         infos['was_goal'] = was_goal  # is_goal was true for the last timestep (i.e. is a dummy after goal)
+
+#         # Inject metrics
+#         normalize_score = lambda x: (x - self.env_random_score) / (
+#             self.env_human_score - self.env_random_score + 1e-8
+#         )
+#         infos["returned_episode_returns"] = state.returned_episode_returns
+#         infos["normalized_returned_episode_returns"] = normalize_score(state.returned_episode_returns)
+#         infos["returned_episode_lengths"] = state.returned_episode_lengths
+
+#         return (
+#             observations, 
+#             state,
+#             raw_rewards, 
+#             dones,
+#             infos,
+#         )
+
+# # info["lives"]: The current number of lives remaining.
+# # info["reward"]: The raw, unclipped reward (crucial if you enable reward_clip=True in the EnvPool config, as the standard reward array will be clipped to [-1, 1], but this info key retains the true score).
+# # info["terminated"]: A boolean flag directly mapped to the emulator's game_over() signal.
+# # info["ram"]: A 128-byte array representing the raw RAM state of the Atari 2600.
+
 @struct.dataclass
 class LogEnvState:
     handle: jnp.array
@@ -90,8 +222,10 @@ class JaxEnvPoolWrapper(gym.Wrapper):
     """
     def __init__(self, env, config, reset_info=True):
         super().__init__(env)
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.env_name = env.name
+        
+        # FIX 1: env.name no longer exists in Gymnasium. 
+        # Since you pass config in, just read the name directly from the config!
+        self.env_name = config.get("ENV_NAME", "Pong-v5")
         
         # Load scores
         if self.env_name in ATARI_SCORES:
@@ -101,36 +235,48 @@ class JaxEnvPoolWrapper(gym.Wrapper):
 
         self.reset_info = reset_info
         
-        # XLA setup
+        # XLA setup (This is still the correct, modern API!)
         handle, recv, send, step = env.xla()
         self.init_handle = handle
         self.step_f = step
 
     def reset(self, **kwargs):
-        observations = super().reset(**kwargs)
+        # Extract the output returned by Gymnasium
+        reset_output = super().reset(**kwargs)
+        
+        # Safely unpack it (handles both new Gymnasium and legacy Gym behaviors)
+        if isinstance(reset_output, tuple) and len(reset_output) == 2:
+            observations, info = reset_output
+        else:
+            observations = reset_output
+            
+        num_envs = self.get_wrapper_attr("num_envs") 
+        
         env_state = LogEnvState(
             handle=jnp.array(self.init_handle),
-            episode_returns=jnp.zeros(self.num_envs, dtype=jnp.float32), 
-            episode_lengths=jnp.zeros(self.num_envs, dtype=jnp.float32), 
-            returned_episode_returns=jnp.zeros(self.num_envs, dtype=jnp.float32), 
-            returned_episode_lengths=jnp.zeros(self.num_envs, dtype=jnp.float32), 
-            lives=jnp.zeros(self.num_envs, dtype=jnp.int32), # Initialize lives
-            was_done=jnp.zeros(self.num_envs, dtype=jnp.bool_),
-            was_goal=jnp.zeros(self.num_envs, dtype=jnp.bool_),
+            episode_returns=jnp.zeros(num_envs, dtype=jnp.float32), 
+            episode_lengths=jnp.zeros(num_envs, dtype=jnp.float32), 
+            returned_episode_returns=jnp.zeros(num_envs, dtype=jnp.float32), 
+            returned_episode_lengths=jnp.zeros(num_envs, dtype=jnp.float32), 
+            lives=jnp.zeros(num_envs, dtype=jnp.int32), 
+            was_done=jnp.zeros(num_envs, dtype=jnp.bool_),
+            was_goal=jnp.zeros(num_envs, dtype=jnp.bool_),
         )
         return observations, env_state
-
-    @partial(jax.jit, static_argnums=(0,))
+    
+    # @partial(jax.jit, static_argnums=(0,))
     def step(self, state, action):
-        # 1. Step the underlying EnvPool XLA environment
-        new_handle, (observations, raw_rewards, dones, infos) = self.step_f(
+        # FIX 2: Gymnasium XLA returns 5 values (separated terminated and truncated)
+        new_handle, (observations, raw_rewards, terminated, truncated, infos) = self.step_f(
             state.handle, action
         )
 
         # 2. Terminal & Goal Logic Injection
-        dones = dones.astype(jnp.bool_)
-        terminated = infos.get("terminated", dones).astype(jnp.bool_)
-        truncated = infos.get("TimeLimit.truncated", jnp.zeros_like(dones)).astype(jnp.bool_)
+        # We no longer need to extract these from infos dict, they are natively returned
+        terminated = terminated.astype(jnp.bool_)
+        truncated = truncated.astype(jnp.bool_)
+        dones = terminated | truncated
+        
         current_lives = infos.get("lives", jnp.zeros_like(dones, dtype=jnp.int32))
 
         # Capture the previous step's flags BEFORE we update the state!
@@ -149,39 +295,38 @@ class JaxEnvPoolWrapper(gym.Wrapper):
         new_episode_length = state.episode_lengths + 1
         
         # Mask out resets
-        mask = 1 - (terminated | truncated)
+        mask = 1 - dones
         
         state = state.replace(
             handle=new_handle,
             episode_returns=new_episode_return * mask,
             episode_lengths=new_episode_length * mask,
             returned_episode_returns=jnp.where(
-                terminated | truncated,
+                dones,
                 new_episode_return,
                 state.returned_episode_returns,
             ),
             returned_episode_lengths=jnp.where(
-                terminated | truncated,
+                dones,
                 new_episode_length,
                 state.returned_episode_lengths,
             ),
             lives=current_lives,  
-            was_done=(terminated | truncated),
-            was_goal=is_goal, # Save current step's goal status for the next step
+            was_done=dones,
+            was_goal=is_goal, 
         )
 
         # 4. Package standard infos + custom injections
         if self.reset_info:
             elapsed_steps = infos["elapsed_step"]
-            episode_done = terminated | truncated
             infos = {} # Clear underlying dict to prevent bloat
             infos["elapsed_step"] = elapsed_steps
-            infos["returned_episode"] = episode_done
+            infos["returned_episode"] = dones
 
         # Re-inject transition dynamics
-        infos["is_goal"] = is_goal # currently transitioned into goal
-        infos["is_dummy"] = is_dummy # transitioned from S_T -> S_0 (dummy step)
-        infos['was_goal'] = was_goal  # is_goal was true for the last timestep (i.e. is a dummy after goal)
+        infos["is_goal"] = is_goal 
+        infos["is_dummy"] = is_dummy 
+        infos['was_goal'] = was_goal  
 
         # Inject metrics
         normalize_score = lambda x: (x - self.env_random_score) / (
@@ -198,8 +343,3 @@ class JaxEnvPoolWrapper(gym.Wrapper):
             dones,
             infos,
         )
-
-# info["lives"]: The current number of lives remaining.
-# info["reward"]: The raw, unclipped reward (crucial if you enable reward_clip=True in the EnvPool config, as the standard reward array will be clipped to [-1, 1], but this info key retains the true score).
-# info["terminated"]: A boolean flag directly mapped to the emulator's game_over() signal.
-# info["ram"]: A 128-byte array representing the raw RAM state of the Atari 2600.

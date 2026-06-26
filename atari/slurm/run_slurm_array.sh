@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=atari-array
 #SBATCH --partition=compsci-gpu
-#SBATCH --gres=gpu:a5000:1
+#SBATCH --gres=gpu:rtx_pro_6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --time=128:00:00
 
+# --gres=gpu:rtx_pro_6000:1
 
 # 1. Arguments
 SCRIPT=$1
@@ -14,13 +15,20 @@ CONFIG=$3
 NUM_SEEDS=$4
 DATE_STR=$5
 
-# 2. Corrected JAX Memory & Deterministic Settings
-export XLA_PYTHON_CLIENT_PREALLOCATE=false  
-export XLA_PYTHON_CLIENT_ALLOCATOR="platform"
+# 2. JAX Memory & Deterministic Settings
+# export XLA_PYTHON_CLIENT_PREALLOCATE=false  
+# export XLA_PYTHON_CLIENT_ALLOCATOR="platform"
+# export TF_CUDNN_DETERMINISTIC="1"
+
+# 2. JAX Memory & Deterministic Settings
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export HF_HOME="/usr/xtmp/ds541/hf_models/.cache"
+FRACTION=$(awk "BEGIN {print 0.90 / $NUM_SEEDS}")
+export XLA_PYTHON_CLIENT_MEM_FRACTION=$FRACTION
+
 export XLA_FLAGS="--xla_gpu_strict_conv_algorithm_picker=false"
 export TF_XLA_FLAGS="--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
-export TF_CUDNN_DETERMINISTIC="1"
-export HF_HOME="/usr/xtmp/ds541/hf_models/.cache"
+
 
 # 3. Log Directory Setup
 LOG_BASE="slurm/logs/${DATE_STR}/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"

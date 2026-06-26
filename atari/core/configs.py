@@ -48,15 +48,15 @@
 
 shared_config = { # for simple pong testing.
     "TOTAL_TIMESTEPS": int(10e6),
-    "NUM_ENVS": 64, # CleanRL RND: 128
+    "NUM_ENVS": 128, # CleanRL RND: 128
     "NUM_STEPS": 128, # CleanRL RND: 128, Clean
-    "GAMMA": 0.99, # CleanRL RND is 0.999
+    "GAMMA": 0.999, # CleanRL RND is 0.999
     "GAE_LAMBDA": 0.95, # CleanRL RND
     "CLIP_EPS": 0.1, # CleanRL RND
     "VF_CLIP": 0.5, # Seperate, based on Museli's high clipping and other claims that vf clipping doesn't help
-    "ENT_COEF": 0.01, # CleanRL 0.01, CleanRL RND: 0.001.
+    "ENT_COEF": 0.001, # CleanRL 0.01, CleanRL RND: 0.001.
     "ENV_NAME": "Pong-v5",
-    'LR': 3e-4, # CleanRL: 2e-4, museli 3e-4
+    'LR': 2e-4, # CleanRL: 2e-4, museli 3e-4
     'LR_END': 1e-6, # CleanRL: 0.0
     'MAX_GRAD_NORM': 1.0,
     "LR_SCHEDULE": "linear",
@@ -66,11 +66,11 @@ shared_config = { # for simple pong testing.
     "ENV_KWARGS": {
         "episodic_life": False,
         "reward_clip": True,
-        "repeat_action_probability": 0.1,
+        "repeat_action_probability": 0.25,
         "frame_skip": 4,
         "noop_max": 30,
     },
-    "CNN_TORSO": "IMPALA_CNN",
+    "CNN_TORSO": "CNN",
     "SEED": 42,
     
     # Exploration Specific
@@ -86,7 +86,7 @@ shared_config = { # for simple pong testing.
     "NORMALIZE_RHO_FEATURES": True, # New
     "BIAS": False,
     "COV_LEAK": 0.9999,
-    "BONUS_SCALE": 5.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
+    "BONUS_SCALE": 2.0, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": False, # New
     
 
