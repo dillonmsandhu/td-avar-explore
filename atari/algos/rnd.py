@@ -39,6 +39,7 @@ def make_train(config):
     assert is_episodic or (is_continuing and not is_absorbing), 'Cannot be continuing and absorbing'
 
     def define_trace_logic(terminals, is_dummy, is_goal, was_goal):
+        "Logic for the (intrinsic) GAE depends on whether we have episodic, continuing, or absorbing terminal state"
         if is_episodic: # standard, cut on terminal (also cut dummy transition's trace), and never absorb
             cut_trace = terminals | is_dummy
             absorb_mask = jnp.zeros_like(terminals, dtype=jnp.bool_)
@@ -164,14 +165,14 @@ def make_train(config):
             last_obs = runner_state["last_obs"]
             obs_rms = runner_state['obs_rms']
             iret_rms = runner_state['iret_rms']
-            irets = runner_state['i_rets']
+            irets = runner_state['irets']
             rng = runner_state["rng"]
             idx = runner_state["idx"]
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
                 # Unpack the carried features
-                train_state, env_state, last_obs, obs_rms, ret_rms, iret_rms, rng = env_scan_state
+                train_state, env_state, last_obs, obs_rms, iret_rms, irets, rng = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -189,10 +190,11 @@ def make_train(config):
                 latest_frame = obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
                 obs_rms = helpers.update_rms(obs_rms, latest_frame)
                 next_rnd_obs = helpers.normalize_obs(obs_rms, latest_frame) # normalizes and clip
+                # has shape (64, 1, 84, 84)
                 rnd_target_feats = rnd_net.apply(target_params, next_rnd_obs)
                 rho_feats = rnd_net.apply(rnd_state.params, next_rnd_obs)
 
-                ri_raw = 0.5 * (rnd_target_feats - rho_feats).pow(2).sum()
+                ri_raw = 0.5 * ((rnd_target_feats - rho_feats)**2).sum(-1) # individual squared error
                 # normalization
                 irets = ri_raw + config['GAMMA_i'] * irets
                 iret_rms = helpers.update_rms(iret_rms, ri_raw)
@@ -201,18 +203,19 @@ def make_train(config):
                 
                 # Store transition
                 transition = Transition(
-                    done, action, ve, next_ve, vi, next_vi, reward, ri, log_prob, last_obs, obsv, next_rnd_obs, rnd_target_feats, info
+                    done, action, ve, next_ve, vi, next_vi, reward, ri, log_prob, last_obs, next_rnd_obs, obsv, rnd_target_feats, info
                 )
 
                 runner_state = (train_state, env_state, obsv, obs_rms, iret_rms, irets, rng)
                 return runner_state, transition
             # end env_step
 
-            env_step_state = (train_state, env_state, last_obs, obs_rms, rng)
+            env_step_state = (train_state, env_state, last_obs, obs_rms, iret_rms, irets, rng)
             
-            (_, env_state, last_obs, obs_rms, rng), traj_batch = jax.lax.scan(
+            updated_env_step_state, traj_batch = jax.lax.scan(
                 _env_step, env_step_state, None, config["NUM_STEPS"]
             )
+            (train_state, env_state, last_obs, obs_rms, iret_rms, irets, rng) = updated_env_step_state
             
             # --- 1.a. Done State Handling Post-Processing ---
             terminals = traj_batch.done
@@ -260,7 +263,7 @@ def make_train(config):
                     mask = jax.random.bernoulli(mask_rng, p=config.get('RND_TRAIN_FRAC',0.25), shape=(traj_batch.obs.shape[0],))
                     rnd_loss, rnd_grads = rnd_grad_fn(rnd_state.params)
                     rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
-                    rng, mask_rng = jax.random_split(mask_rng)
+                    rng, mask_rng = jax.random.split(mask_rng)
                     losses = (*aux_losses, rnd_loss)
                     return (train_state, rnd_state, rng), losses
                     # end _update_minibatch
@@ -270,7 +273,7 @@ def make_train(config):
                 rng, _rng = jax.random.split(rng)
                 batch = (traj_batch, advantages, targets)
                 minibatches = helpers.shuffle_and_batch(_rng, batch, config["NUM_MINIBATCHES"])
-                rng, mask_rng = jax.random_split(rng)
+                rng, mask_rng = jax.random.split(rng)
                 train_states = train_state, rnd_state, mask_rng
                 # Apply Gradient Steps
                 train_states, total_loss = jax.lax.scan(_update_minbatch, train_states, minibatches)
