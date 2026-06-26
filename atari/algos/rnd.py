@@ -125,6 +125,10 @@ def make_train(config):
         initial_obs_rms = helpers.update_rms(initial_obs_rms, 
             obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
         )
+        # initialize intrinsic return tracking
+        ret_shape = (config["NUM_ENVS"],)
+        irets = jnp.zeros(ret_shape)
+        iret_rms = helpers.init_rms(shape = ret_shape)
 
         # --- Warm Up Running Observation Statistics ---
         WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
@@ -159,13 +163,15 @@ def make_train(config):
             env_state = runner_state["env_state"]
             last_obs = runner_state["last_obs"]
             obs_rms = runner_state['obs_rms']
+            iret_rms = runner_state['iret_rms']
+            irets = runner_state['i_rets']
             rng = runner_state["rng"]
             idx = runner_state["idx"]
 
             # COLLECT TRAJECTORIES
             def _env_step(env_scan_state, unused):
                 # Unpack the carried features
-                train_state, env_state, last_obs, obs_rms, rng = env_scan_state
+                train_state, env_state, last_obs, obs_rms, ret_rms, iret_rms, rng = env_scan_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -187,16 +193,18 @@ def make_train(config):
                 rho_feats = rnd_net.apply(rnd_state.params, next_rnd_obs)
 
                 ri_raw = 0.5 * (rnd_target_feats - rho_feats).pow(2).sum()
-                
-                # TODO: normalize intrinsic reward
-                ri = ri_raw
+                # normalization
+                irets = ri_raw + config['GAMMA_i'] * irets
+                iret_rms = helpers.update_rms(iret_rms, ri_raw)
+
+                ri = ri_raw / jnp.sqrt(iret_rms["var"])
                 
                 # Store transition
                 transition = Transition(
                     done, action, ve, next_ve, vi, next_vi, reward, ri, log_prob, last_obs, obsv, next_rnd_obs, rnd_target_feats, info
                 )
 
-                runner_state = (train_state, env_state, obsv, obs_rms, rng)
+                runner_state = (train_state, env_state, obsv, obs_rms, iret_rms, irets, rng)
                 return runner_state, transition
             # end env_step
 
@@ -254,7 +262,7 @@ def make_train(config):
                     rnd_state = rnd_state.apply_gradients(grads=rnd_grads)
                     rng, mask_rng = jax.random_split(mask_rng)
                     losses = (*aux_losses, rnd_loss)
-                    return (train_state, rnd_state, mask_rng), aux_losses
+                    return (train_state, rnd_state, rng), losses
                     # end _update_minibatch
                 
                 # Shuffle Minibatches
@@ -284,9 +292,12 @@ def make_train(config):
                 "rng": rng,
                 "rnd_state": rnd_state,
                 "obs_rms": obs_rms,
+                "iret_rms": iret_rms,
+                "irets": irets,
                 "idx": idx + 1,
             }
             return runner_state, metric
+        # end _update_step
 
         rng, _rng = jax.random.split(rng)
 
@@ -297,6 +308,8 @@ def make_train(config):
             "rng": _rng,
             "rnd_state": rnd_state,
             "obs_rms": obs_rms,
+            "iret_rms": iret_rms,
+            "irets": irets,
             "idx": 1,
         }
 
