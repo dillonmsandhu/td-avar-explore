@@ -216,7 +216,7 @@ def ppo_loss_two_vals(params, network, traj_batch, gae, targets, config):
     pi, ve, vi = network.apply(params, traj_batch.obs)
     log_prob = pi.log_prob(traj_batch.action)
     ve_loss = ppo_val_loss(ve, traj_batch.value, targets[0], config)
-    vi_loss = ppo_val_loss(vi, traj_batch.i_value, targets[1] config)
+    vi_loss = ppo_val_loss(vi, traj_batch.i_value, targets[1], config)
     # CALCULATE ACTOR LOSS
     ratio = jnp.exp(log_prob - traj_batch.log_prob)
     gae = (gae - gae.mean()) / (gae.std() + 1e-8)
@@ -236,7 +236,8 @@ def ppo_loss_two_vals(params, network, traj_batch, gae, targets, config):
 
     total_loss = (
         loss_actor
-        + config["VF_COEF"] * value_loss
+        + config["VF_COEF"] * ve_loss
+        + config["VF_COEF"] * vi_loss
         - config["ENT_COEF"] * entropy
     )
     return total_loss, (ve_loss, vi_loss, loss_actor, entropy)
