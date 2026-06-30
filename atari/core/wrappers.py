@@ -276,43 +276,66 @@ class JaxEnvPoolWrapper(gym.Wrapper):
         terminated = terminated.astype(jnp.bool_)
         truncated = truncated.astype(jnp.bool_)
         dones = terminated | truncated
-        
         current_lives = infos.get("lives", jnp.zeros_like(dones, dtype=jnp.int32))
-
+        # Life loss heuristic: if lives strictly decreased from the previous step
+        life_loss = current_lives < state.lives
+        
+        true_game_over = truncated | (terminated & (~life_loss | (current_lives == 0)))
         # Capture the previous step's flags BEFORE we update the state!
         is_dummy = state.was_done
         was_goal = state.was_goal
         
-        # Life loss heuristic: if lives strictly decreased from the previous step
-        life_loss = current_lives < state.lives
-        
         # Goal logic: Episodic termination (no timeout), reward > 0, and NOT a life-loss event
         terminal_no_timeout = terminated & ~truncated
         is_goal = terminal_no_timeout & (raw_rewards > 0) & ~life_loss
+        
 
         # 3. Logging Logic
         new_episode_return = state.episode_returns + infos["reward"]
         new_episode_length = state.episode_lengths + 1
         
         # Mask out resets
-        mask = 1 - dones
+        # mask = 1 - done
+        logging_mask = 1 - true_game_over
+        # actualy only mask out true game over: 
+        
+        # state = state.replace(
+        #     handle=new_handle,
+        #     episode_returns=new_episode_return * mask,
+        #     episode_lengths=new_episode_length * mask,
+        #     returned_episode_returns=jnp.where(
+        #         dones,
+        #         new_episode_return,
+        #         state.returned_episode_returns,
+        #     ),
+        #     returned_episode_lengths=jnp.where(
+        #         dones,
+        #         new_episode_length,
+        #         state.returned_episode_lengths,
+        #     ),
+        #     lives=current_lives,  
+        #     was_done=dones,
+        #     was_goal=is_goal, 
+        # )
+
+        logging_mask = 1 - true_game_over
         
         state = state.replace(
             handle=new_handle,
-            episode_returns=new_episode_return * mask,
-            episode_lengths=new_episode_length * mask,
+            episode_returns=new_episode_return * logging_mask,
+            episode_lengths=new_episode_length * logging_mask,
             returned_episode_returns=jnp.where(
-                dones,
+                true_game_over,
                 new_episode_return,
                 state.returned_episode_returns,
             ),
             returned_episode_lengths=jnp.where(
-                dones,
+                true_game_over,
                 new_episode_length,
                 state.returned_episode_lengths,
             ),
             lives=current_lives,  
-            was_done=dones,
+            was_done=dones, # Important: keep this as 'dones' so the RL agent sees life-loss as terminal
             was_goal=is_goal, 
         )
 
