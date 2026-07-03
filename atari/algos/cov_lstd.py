@@ -12,10 +12,10 @@ from core.dino_features import get_dino_features_on_atari_obs_grid
 SAVE_DIR = "cov_lstd" 
 
 def make_train(config):
-    k_lstd = config.get("LSTD_FEATURES", 128)
-    k_rho = config.get("RND_FEATURES", 128)
-    normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", False)
-    normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", False)
+    k_lstd = config.get("LSTD_FEATURES", 512)
+    k_rho = config.get("RND_FEATURES", 512)
+    normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", True)
+    normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", True)
 
     config['COV_LEAK'] = config.get('COV_LEAK', 1 - 1e-5)
     
@@ -88,6 +88,7 @@ def make_train(config):
                 "vi_pred": traj_batch.i_value.mean(),
                 "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale,
                 "v_e_pred": traj_batch.value.mean(),
+                "val_loss_ratio": value_loss / (loss_actor + 1e-8),
             })
             return metric
 
@@ -99,8 +100,17 @@ def make_train(config):
         rnd_rng, rng = jax.random.split(rng)
         # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
         rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"], bias=config['BIAS'], k=k_rho 
+            rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"],
+             bias=config['BIAS'], k=k_rho 
         )
+
+        # --- initialize intrinsic reward rho components (Random Nets) ---
+        # Change: rho is only based on the final frame (of the next observation)
+        rnd_rng, rng = jax.random.split(rng)
+        rnd_target_net = networks.RND_Target(k=k_rho)        
+        dummy_obs = jnp.zeros((1, 1, 84, 84)) # Dummy input to trace shapes
+        rho_params = rnd_target_net.init(rnd_rng, dummy_obs)
+
         def get_rho_feats(obs):
             return rho_net.apply(rho_params, obs)
         
@@ -122,21 +132,25 @@ def make_train(config):
         initial_buffer_state = buffer_manager.init_state()
         initial_lstd_state = {"w": jnp.zeros(k_lstd), }
 
-
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2, shared_torso = True)
         train_state, rnd_state = networks.initialize_flax_train_states(
             config, network, rho_net, network_params, rho_params
         )
-        
         # --- initialize the running obs statistics ---
         obsv, env_state = env.reset()
         
         # Initialize pure RMS state
         initial_obs_rms = helpers.init_rms(shape=(1, 84, 84)) 
-        initial_obs_rms = helpers.update_rms(initial_obs_rms, obsv.reshape(-1, 1, 84, 84))
+        initial_obs_rms = helpers.update_rms(initial_obs_rms, 
+            obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+        )
+        # initialize intrinsic return tracking
+        ret_shape = (config["NUM_ENVS"],)
+        irets = jnp.zeros(ret_shape)
+        iret_rms = helpers.init_rms(shape = ret_shape)
 
-        # --- WARMUP PHASE ---
-        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
+        # --- Warm Up Running Observation Statistics ---
+        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) * config["NUM_STEPS"]
 
         def _warmup_step(warmup_carry, unused):
             env_state, last_obs, obs_rms, rng = warmup_carry
@@ -145,7 +159,9 @@ def make_train(config):
             rng, _rng = jax.random.split(rng)
             obsv, env_state, reward, done, info = env.step(env_state, action)
             # 3. Update RMS Stats
-            obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84))
+            obs_rms = helpers.update_rms(obs_rms, 
+                obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+            )
             return (env_state, obsv, obs_rms, rng), None
 
         # Execute Warmup Scan
@@ -153,7 +169,6 @@ def make_train(config):
         (env_state, obsv, obs_rms, rng), _ = jax.lax.scan(
             _warmup_step, warmup_carry, None, length=WARMUP_STEPS
         )
-
         # normalize initial observation
         normalized_obs = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape)
         initial_phi =  get_lstd_feats( normalized_obs if normalize_lstd_obs else obsv )
@@ -191,12 +206,12 @@ def make_train(config):
                 next_val = network.apply(train_state.params, obsv, method=network.value)
 
                 # --- NEW: IN-LOOP FEATURE EXTRACTION ---
-                obs_rms = helpers.update_rms(obs_rms, obsv.reshape(-1, 1, 84, 84)) # update with new obs
-                next_obs_norm = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape) # normalize new obs
-                
-                next_obs_rho = next_obs_norm if normalize_rho_obs else obsv
-                next_obs_lstd = next_obs_norm if normalize_lstd_obs else obsv
-                
+                s_prime_last_frame = obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+                obs_rms = helpers.update_rms(obs_rms, s_prime_last_frame.reshape(-1, 1, 84, 84)) # update with new obs
+
+                # Change: LSTD uses all four stacked frames, rho uses just the final frame (matching RND's obs)
+                next_obs_rho = helpers.normalize_obs(obs_rms, s_prime_last_frame) if normalize_rho_obs else s_prime_last_frame
+                next_obs_lstd = helpers.normalize_obs(obs_rms, obsv) if normalize_lstd_obs else obsv
                 next_phi = get_lstd_feats(next_obs_lstd)
                 next_rho_feat = get_rho_feats(next_obs_rho)
 
@@ -211,13 +226,18 @@ def make_train(config):
                 # Pass the 'next' features forward as the 'last' features for the next step
                 runner_state = (train_state, env_state, obsv, next_phi, next_rho_feat, obs_rms, rng)
                 return runner_state, transition
+            
             # end env_step
-            env_step_state = (
+            env_carry = (
                 train_state, env_state, last_obs, 
                 runner_state["last_phi"], runner_state["last_rho_feat"], obs_rms, rng
             )
             
-            (_, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng), traj_batch = jax.lax.scan(_env_step, env_step_state, None, config["NUM_STEPS"])
+            env_carry, traj_batch = jax.lax.scan(
+                _env_step, env_carry, None, config["NUM_STEPS"]
+                )
+
+            (_, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng) = env_carry
 
             # Process batch
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
