@@ -94,6 +94,7 @@ def make_train(config):
                 "vi_pred": traj_batch.i_value.mean(),
                 "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale,
                 "v_e_pred": traj_batch.value.mean(),
+                "val_loss_ratio": value_loss / (loss_actor + 1e-8),
             })
             return metric
 
@@ -126,7 +127,8 @@ def make_train(config):
         # initialize intrinsic return tracking
         ret_shape = (config["NUM_ENVS"],)
         irets = jnp.zeros(ret_shape)
-        iret_rms = helpers.init_rms(shape = ret_shape)
+        # iret_rms = helpers.init_rms(shape = ret_shape)
+        iret_rms = helpers.init_rms(shape=())
 
         # --- Warm Up Running Observation Statistics ---
         WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) * config["NUM_STEPS"]
