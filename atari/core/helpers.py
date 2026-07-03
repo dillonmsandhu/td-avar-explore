@@ -198,10 +198,10 @@ def _loss_fn(params, network, traj_batch, gae, targets, config):
 
     total_loss = (
         loss_actor
-        + config["VF_COEF"] * value_loss
+        + config["VF_COEF"] * ve_loss
         - config["ENT_COEF"] * entropy
     )
-    return total_loss, (value_loss, loss_actor, entropy)
+    return total_loss, (ve_loss, loss_actor, entropy)
 
 def ppo_val_loss(v_pred, v_batch, targets, config):
     value_pred_clipped = v_batch + (v_pred - v_batch).clip(-config["VF_CLIP"], config["VF_CLIP"])

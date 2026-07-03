@@ -52,31 +52,46 @@ class ImpalaCNN(nn.Module):
         
         return x
 
-# Nature DQN with a layer norm. Used for Rho.
-class CNN(nn.Module): 
-    out_dim: int = 128
-    # Modified Nature DQN with a max pool from 20 x 20 to 10 x 10, and no third conv. layer
+class ConvTorso(nn.Module): 
+    # Just the convolutions and the flatten. No dense layers. No division by 255.
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        # 1. Standardize Input
-        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
-            x = x[None, ...]  # Shape becomes (1, H, W, C)
+        if x.ndim == 3:  
+            x = x[None, ...]  
         
-        # channel last for FLAX, while it is first for envpool.
+        # channel last for FLAX
         x = jnp.transpose(x, (0, 2, 3, 1)) 
-        x = x / 255.0
         
-        # 2. Random Convolutional Torso
         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
         x = nn.activation.leaky_relu(x)
         x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID", kernel_init=orthogonal(jnp.sqrt(2)))(x)
-        x = nn.activation.leaky_relu(x)
-        x = x.reshape((x.shape[0], -1))
-        # 4. Final Projection
+        
+        return x.reshape((x.shape[0], -1))
+
+# Nature DQN with a layer norm. Used for Rho.
+class CNN(nn.Module): 
+    out_dim: int = 448
+    divide_by_255: bool = True
+    
+    @nn.compact
+    def __call__(self, x: jnp.ndarray):
+        if self.divide_by_255:
+            x = x / 255.0
+            
+        x = ConvTorso()(x)
+        x = nn.activation.leaky_relu(x) # <-- Restored!
+
+        
+        # Standard PPO visual extraction
+        x = nn.Dense(512, kernel_init=orthogonal(jnp.sqrt(2)))(x)
+        x = nn.activation.relu(x)
+        
+        # Linear output for LSTD precision matrix!
         x = nn.Dense(self.out_dim, kernel_init=orthogonal(jnp.sqrt(2)), use_bias=False)(x)
         return x
+
 
 # Nature-like DQN with pooling, used for LSTD featuers.
 class LSTD_CNN(nn.Module): 
@@ -142,7 +157,7 @@ class RND_Net(nn.Module):
         # Base feature dimension before optional bias
         self.feat_dim = self.k - 1 if self.bias else self.k
         # If state-action, we need enough outputs for all actions
-        self.torso = CNN(self.feat_dim)
+        self.torso = CNN(self.feat_dim, divide_by_255=False)
     def __call__(self, x):
         phi = self.torso(x)  
         
@@ -157,6 +172,35 @@ class RND_Net(nn.Module):
             bias = jnp.ones(bias_shape)
             phi = jnp.concatenate([phi, bias], axis=-1)
         
+        return phi
+
+# These two are actually used by RND, which has a more extensive predictor network.
+class RND_Target(nn.Module):
+    k: int = 512 # CleanRL uses 512 for RND features
+    
+    @nn.compact
+    def __call__(self, x):
+        phi = ConvTorso()(x)
+        phi = nn.leaky_relu(phi)
+        phi = nn.Dense(self.k, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
+        return phi
+
+class RND_Predictor(nn.Module):
+    k: int = 512
+    
+    @nn.compact
+    def __call__(self, x):
+        phi = ConvTorso()(x)
+        phi = nn.leaky_relu(phi)
+        
+        # CleanRL Predictor: Three Dense layers with ReLUs
+        phi = nn.Dense(512, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
+        phi = nn.relu(phi)
+        
+        phi = nn.Dense(512, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
+        phi = nn.relu(phi)
+        
+        phi = nn.Dense(self.k, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
         return phi
 
 class LSTD_Net(nn.Module):
@@ -192,12 +236,17 @@ class LSTD_Net(nn.Module):
 # =====================================================
 class PolicyHead(nn.Module):
     action_dim: int
+    hidden_dim: int
 
     @nn.compact
     def __call__(self, x):
+        # Matches CleanRL's actor: ReLU -> Dense(448) -> ReLU -> Dense(action_dim)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim, kernel_init=orthogonal(0.01))(x)
         x = nn.relu(x)
         logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(x)
         return distrax.Categorical(logits=logits)
+
 
 class ActorCritic2Head(nn.Module):
     """
@@ -205,7 +254,7 @@ class ActorCritic2Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
-    out_dim: int = 384
+    out_dim: int = 448
     cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
@@ -247,7 +296,7 @@ class ActorCritic3Head(nn.Module):
     """
     action_dim: int
     normalize_value_features: bool = False
-    out_dim: int= 384
+    out_dim: int= 448
     cnn_torso: str = 'IMPALA_CNN'
 
     def setup(self):
@@ -306,6 +355,81 @@ class ActorCritic3Head(nn.Module):
         pi = self.policy(x)
         v_ext, v_int = self.value(x)
         return pi, v_ext, v_int
+
+class ActorCritic3HeadSharedTorso(nn.Module):
+    """
+    Returns: (pi, v_ext, v_int)
+    """
+    action_dim: int
+    normalize_value_features: bool = False
+    out_dim: int = 448
+    cnn_torso: str = 'IMPALA_CNN'
+
+    def setup(self):
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.torso = ImpalaCNN(self.out_dim)
+        else:
+            self.torso = CNN(self.out_dim)
+        
+        self.pi_head = PolicyHead(action_dim=self.action_dim, hidden_dim=self.out_dim)
+        
+        # Residual network: maps 448 -> 448, std=0.1
+        self.v_head_residual = nn.Sequential([
+            nn.Dense(self.out_dim, kernel_init=orthogonal(0.1)), 
+            nn.relu
+        ])
+        
+        # Value heads: pure linear, std=0.01
+        self.v_ext_head = nn.Dense(1, kernel_init=orthogonal(0.01))
+        self.v_int_head = nn.Dense(1, kernel_init=orthogonal(0.01))
+        
+    # ---------------- Value -----------------
+
+    def get_value_features(self, phi):
+        # Calculate residual using the CNN features (phi)
+        phi_res = self.v_head_residual(phi)
+        phi_combined = phi + phi_res
+        
+        if self.normalize_value_features:
+            phi_combined = phi_combined / (
+                jnp.linalg.norm(phi_combined, axis=-1, keepdims=True) + 1e-8
+            )
+
+        return phi_combined, phi_combined
+
+    def get_i_value_features(self, x):
+        """Returns ONLY the intrinsic value features for LSTD evaluation."""
+        phi = nn.relu(self.torso(x))
+        _, phi_int = self.get_value_features(phi)
+        return phi_int
+
+    def get_e_value_features(self, x):
+        """Returns ONLY the extrinsic value features (for completeness)."""
+        phi = nn.relu(self.torso(x))
+        phi_ext, _ = self.get_value_features(phi)
+        return phi_ext
+    
+    def value(self, x):
+        phi = nn.relu(self.torso(x))
+        phi_ext, phi_int = self.get_value_features(phi)
+        v_ext = self.v_ext_head(phi_ext).squeeze(-1)
+        v_int = self.v_int_head(phi_int).squeeze(-1)
+        return v_ext, v_int
+    # ---------------- Full forward ----------
+
+    def __call__(self, x):
+        # 1. Run CNN exactly once
+        phi = nn.relu(self.torso(x))
+        
+        # 2. Get Policy
+        pi = self.pi_head(phi)
+        
+        # 3. Get Values
+        phi_ext, phi_int = self.get_value_features(phi)
+        v_ext = self.v_ext_head(phi_ext).squeeze(-1)
+        v_int = self.v_int_head(phi_int).squeeze(-1)
+        
+        return pi, v_ext, v_int
 # =====================================================
 # --------------- INITIALIZATION ----------------------
 # =====================================================
@@ -347,14 +471,18 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128
     params = model.init(init_rng, init_x)
     return model, params
 
-
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN'):
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=False):
     if n_heads == 1:
         model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 2:
         model = ActorCritic2Head(action_dim=action_dim, cnn_torso = cnn_torso)
+        if shared_torso:
+            raise NotImplementedError()
     elif n_heads == 3:
-        model = ActorCritic3Head(action_dim=action_dim, cnn_torso = cnn_torso)
+        if shared_torso:
+            model = ActorCritic3HeadSharedTorso(action_dim=action_dim, cnn_torso = cnn_torso)
+        else:
+            model = ActorCritic3Head(action_dim=action_dim, cnn_torso = cnn_torso)
     else:
         raise ValueError("n_heads must be 2 (standard ppo) or 3 (+ rnd intrinsic value head)")
 
