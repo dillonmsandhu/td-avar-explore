@@ -10,7 +10,6 @@ import core.helpers as helpers
 import core.networks as networks
 # jax.config.update("jax_enable_x64", True)
 
-
 SAVE_DIR = "rnd" 
 
 class Transition(NamedTuple):
@@ -104,16 +103,14 @@ def make_train(config):
         # --- initialize intrinsic reward rho components (Random Nets) ---
         rnd_rng, rng = jax.random.split(rng)
         target_rng, rng = jax.random.split(rng)
-        normalize_rho_features = False
-        rnd_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, (1, 84, 84), normalize_rho_features, bias=False, k=k_rho 
-        )
-        _, target_params = networks.initialize_rnd_network(
-            rnd_rng, (1, 84, 84), normalize_rho_features, bias=False, k=k_rho 
-        )
-        
+        rnd_net = networks.RND_Predictor(k=k_rho)
+        rnd_target_net = networks.RND_Target(k=k_rho)        
+        dummy_obs = jnp.zeros((1, 1, 84, 84)) # Dummy input to trace shapes
+        rho_params = rnd_net.init(rnd_rng, dummy_obs)
+        target_params = rnd_target_net.init(target_rng, dummy_obs)
+
         # --- initialize PPO network ---
-        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=3)
+        network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=3, shared_torso=True)
         train_state, rnd_state = networks.initialize_flax_train_states(
             config, network, rnd_net, network_params, rho_params
         )
@@ -132,7 +129,7 @@ def make_train(config):
         iret_rms = helpers.init_rms(shape = ret_shape)
 
         # --- Warm Up Running Observation Statistics ---
-        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) # Typically 50-200 steps (x num_envs)
+        WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) * config["NUM_STEPS"]
 
         def _warmup_step(warmup_carry, unused):
             env_state, last_obs, obs_rms, rng = warmup_carry
@@ -151,11 +148,6 @@ def make_train(config):
         (env_state, obsv, obs_rms, rng), _ = jax.lax.scan(
             _warmup_step, warmup_carry, None, length=WARMUP_STEPS
         )
-
-        # normalize initial observation
-        normalized_obs = helpers.normalize_obs(obs_rms, 
-            obsv.reshape(-1, 1, 84, 84)
-        ).reshape(obsv.shape)
 
         def _update_step(runner_state, unused):
             obs_rms = runner_state['obs_rms']
@@ -191,13 +183,13 @@ def make_train(config):
                 obs_rms = helpers.update_rms(obs_rms, latest_frame)
                 next_rnd_obs = helpers.normalize_obs(obs_rms, latest_frame) # normalizes and clip
                 # has shape (64, 1, 84, 84)
-                rnd_target_feats = rnd_net.apply(target_params, next_rnd_obs)
+                rnd_target_feats = rnd_target_net.apply(target_params, next_rnd_obs)
                 rho_feats = rnd_net.apply(rnd_state.params, next_rnd_obs)
 
                 ri_raw = 0.5 * ((rnd_target_feats - rho_feats)**2).sum(-1) # individual squared error
                 # normalization
                 irets = ri_raw + config['GAMMA_i'] * irets
-                iret_rms = helpers.update_rms(iret_rms, ri_raw)
+                iret_rms = helpers.update_rms(iret_rms, irets)
 
                 ri = ri_raw / jnp.sqrt(iret_rms["var"])
                 
