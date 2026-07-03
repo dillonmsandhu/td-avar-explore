@@ -175,7 +175,7 @@ class FeatureTraceBufferManagerE(BaseBufferManager[LSTDBufferStateE]):
         phi = buffer_state.features
 
         Z_all = buffer_state.traces
-        X_all = phi - self.config['GAMMA_i'] * buffer_state.next_features * buffer_state.continue_masks
+        X_all = phi - self.config['GAMMA'] * buffer_state.next_features * buffer_state.continue_masks
 
         def cut_step(carry, step_idx):
             mask_curr = carry

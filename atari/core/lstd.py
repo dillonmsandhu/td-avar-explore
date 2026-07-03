@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from core.buffer import LSTDBufferState,LSTDBufferStateE
 from core.helpers import get_scale_free_bonus
 
-def solve_lstd_lambda_from_buffer(buffer: LSTDBufferState, Sigma_inv, config):
+def solve_lstd_lambda_from_buffer(buffer: LSTDBufferState, Sigma_inv, config, scaling_factor = 1.0):
     """Solves LSTD over the entire extended buffer using a memory-safe chunked scan."""
     N = buffer.size
     chunk_size = config['CHUNK_SIZE']
@@ -36,12 +36,12 @@ def solve_lstd_lambda_from_buffer(buffer: LSTDBufferState, Sigma_inv, config):
         
         # 2. Compute Intrinsic Reward (rho)
         target_rho = get_scale_free_bonus(Sigma_inv, target_rho_feats)
-        
+        rho = target_rho / scaling_factor
         # 3. Standard LSTD Accumulation (continue_mask is already 1.0 or 0.0)
         delta_Phi = phi - gamma_i * target_phi * continue_mask
         
         A_batch = jnp.einsum("ni, nj, n -> ij", traces, delta_Phi, mask)
-        b_batch = jnp.einsum("ni, n -> i", traces, target_rho * mask)
+        b_batch = jnp.einsum("ni, n -> i", traces, rho * mask)
         
         return (A_acc + A_batch, b_acc + b_batch), None
     

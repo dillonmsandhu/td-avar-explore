@@ -15,6 +15,7 @@ def make_train(config):
     k_lstd = config.get("LSTD_FEATURES", 512)
     k_rho = config.get("RND_FEATURES", 512)
     normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", True)
+    normalize_rho = config.get("NORMALIZE_RHO", True)
     normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", True)
 
     config['COV_LEAK'] = config.get('COV_LEAK', 1 - 1e-5)
@@ -99,17 +100,17 @@ def make_train(config):
         initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
         rnd_rng, rng = jax.random.split(rng)
         # Normalized keeps rho between 0 and 1, bias ensures sigma keeps track of total count.
-        rho_net, rho_params = networks.initialize_rnd_network(
-            rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"],
-             bias=config['BIAS'], k=k_rho 
-        )
+        # rho_net, rho_params = networks.initialize_rnd_network(
+        #     rnd_rng, obs_shape, config["NORMALIZE_RHO_FEATURES"],
+        #      bias=config['BIAS'], k=k_rho 
+        # )
 
         # --- initialize intrinsic reward rho components (Random Nets) ---
         # Change: rho is only based on the final frame (of the next observation)
         rnd_rng, rng = jax.random.split(rng)
-        rnd_target_net = networks.RND_Target(k=k_rho)        
+        rho_net = networks.RND_Target(k=k_rho)        
         dummy_obs = jnp.zeros((1, 1, 84, 84)) # Dummy input to trace shapes
-        rho_params = rnd_target_net.init(rnd_rng, dummy_obs)
+        rho_params = rho_net.init(rnd_rng, dummy_obs)
 
         def get_rho_feats(obs):
             return rho_net.apply(rho_params, obs)
@@ -147,7 +148,8 @@ def make_train(config):
         # initialize intrinsic return tracking
         ret_shape = (config["NUM_ENVS"],)
         irets = jnp.zeros(ret_shape)
-        iret_rms = helpers.init_rms(shape = ret_shape)
+        iret_rms = helpers.init_rms(shape=())
+        # iret_rms = helpers.init_rms(shape = ret_shape)
 
         # --- Warm Up Running Observation Statistics ---
         WARMUP_STEPS = config.get("RND_WARMUP_STEPS", 50) * config["NUM_STEPS"]
@@ -170,12 +172,16 @@ def make_train(config):
             _warmup_step, warmup_carry, None, length=WARMUP_STEPS
         )
         # normalize initial observation
-        normalized_obs = helpers.normalize_obs(obs_rms, obsv.reshape(-1, 1, 84, 84)).reshape(obsv.shape)
-        initial_phi =  get_lstd_feats( normalized_obs if normalize_lstd_obs else obsv )
-        initial_rho_feat =  get_rho_feats( normalized_obs if normalize_lstd_obs else obsv )
+        obs_last_frame = obsv[:, 3, :, :].reshape(-1, 1, 84, 84)
+        initial_phi =  get_lstd_feats(helpers.normalize_obs(obs_rms, obsv) if normalize_lstd_obs else obsv )
+        initial_rho_feat = get_rho_feats(
+            helpers.normalize_obs(obs_rms, obs_last_frame) if normalize_rho_obs else obs_last_frame
+        )
 
         def _update_step(runner_state, unused):
             obs_rms = runner_state['obs_rms']
+            iret_rms = runner_state['iret_rms']
+            irets = runner_state['irets']
             train_state = runner_state["train_state"]
             lstd_state = runner_state["lstd_state"]
             sigma_state = runner_state["sigma_state"]
@@ -256,7 +262,34 @@ def make_train(config):
             was_goal = traj_batch.info.get("was_goal", jnp.zeros_like(terminals))
             cut_trace, continue_mask, absorb_mask = define_trace_logic(terminals, is_dummy, is_goal, was_goal)
             
-            # --- 2. Compute Trace and Add to Buffer ---
+            # --- 2. Compute Rho ---
+            rho_feats_final = jnp.where(absorb_mask[..., None], traj_batch.rho_feats, traj_batch.next_rho_feats)
+            rho = helpers.get_scale_free_bonus(Sigma_inv, rho_feats_final)
+
+            # --- Standardize Rho --- 
+            def compute_intrinsic_ret(current_irets, raw_rho, continue_mask, gamma_i):
+                """
+                Applies the standard RND forward exponential filter to the rewards.
+                raw_rho expected shape: (NUM_STEPS, NUM_ENVS)
+                """
+                def _forward_step(carry, step_data):
+                    r_t, cont_mask = step_data
+                    # carry is the running return per environment: (NUM_ENVS,)
+                    next_ret = cont_mask * gamma_i + r_t
+                    return next_ret, next_ret
+                
+                c_mask = continue_mask.squeeze(-1) if continue_mask.ndim == 3 else continue_mask
+                scan_inputs = (raw_rho, c_mask)
+                # Scan forward over the time dimension (axis 0)
+                final_irets, per_timestep_irets = jax.lax.scan(_forward_step, current_irets, scan_inputs)
+                return final_irets, per_timestep_irets
+            
+            irets, per_timestep_irets = compute_intrinsic_ret(irets, rho, continue_mask, config["GAMMA_i"])
+            iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
+            intrinsic_return_std = jnp.sqrt(iret_rms["var"] + 1e-8)
+            rho = rho / intrinsic_return_std if normalize_rho else rho
+            
+            # --- 3. Compute Trace and Add to Buffer ---
             traces = helpers.calculate_traces(traj_batch.phi, cut_trace, config["GAMMA_i"], config["LSTD_LAMBDA_i"])
             buffer_batch = LSTDBufferState(
                 traces=traces, 
@@ -271,27 +304,24 @@ def make_train(config):
             buffer_state = buffer_manager.update_buffer(buffer_state, buffer_batch)
             
             # --- 3. SOLVE LSTD ON BUFFER ---
-            lstd_state = solve_lstd_lambda_from_buffer(buffer_state, Sigma_inv, config)
+            lstd_state = solve_lstd_lambda_from_buffer(buffer_state, Sigma_inv, config, scaling_factor = intrinsic_return_std)
 
             # --- 4. EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
             buffer_state = buffer_manager.evict_buffer(buffer_state, prb_rng)
             
             # --- 5. COMPUTE TARGETS ---
-            rho_feats_final = jnp.where(absorb_mask[..., None], traj_batch.rho_feats, traj_batch.next_rho_feats)
-            rho = helpers.get_scale_free_bonus(Sigma_inv, rho_feats_final)
             
             # --- LSTD PREDICTIONS ---
             v_i = traj_batch.phi @ lstd_state["w"] 
             next_v_i = traj_batch.next_phi @ lstd_state["w"] 
             
             # --- Clip ---
-            V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
-            v_i, next_v_i = jax.tree_util.tree_map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
+            # V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
+            # v_i, next_v_i = jax.tree_util.tree_map(lambda x: jnp.clip(x, 0, V_max_raw), (v_i, next_v_i))
             
-            # --- Final traj_batch update for GAE ---
             traj_batch = traj_batch._replace(i_value=v_i, intrinsic_reward=rho, next_i_val=next_v_i)
-
+            # --- GAE ---
             gaes, targets = helpers.calculate_gae(
                 traj_batch, 
                 config["GAMMA"], config["GAE_LAMBDA"], 
@@ -345,6 +375,8 @@ def make_train(config):
                 "sigma_state": sigma_state,
                 "buffer_state": buffer_state,
                 "obs_rms": obs_rms,
+                "iret_rms": iret_rms,
+                "irets": irets,
                 "idx": idx + 1,
             }
             return runner_state, metric
@@ -360,10 +392,12 @@ def make_train(config):
             "rnd_state": rnd_state,
             "sigma_state": initial_sigma_state,
             "buffer_state": initial_buffer_state,
-            "idx": 1,
             "last_phi": initial_phi,            
             "last_rho_feat": initial_rho_feat,  
             "obs_rms": obs_rms,
+            "iret_rms": iret_rms,
+            "irets": irets,
+            "idx": 1,
         }
 
         runner_state, metrics = jax.lax.scan(_update_step, initial_runner_state, None, config["NUM_UPDATES"])
