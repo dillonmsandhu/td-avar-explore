@@ -3,6 +3,7 @@ import flax.linen as nn
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 import distrax
+import warnings
 
 class ImpalaStack(nn.Module):
     channels: int
@@ -93,56 +94,77 @@ class CNN(nn.Module):
         return x
 
 
-# Nature-like DQN with pooling, used for LSTD featuers.
-class LSTD_CNN(nn.Module): 
-    out_dim: int = 128
-    pool: bool = False
+# # Nature-like DQN with pooling, used for LSTD featuers.
+# class LSTD_CNN(nn.Module): 
+#     out_dim: int = 128
+#     pool: bool = False
 
+#     @nn.compact
+#     def __call__(self, x: jnp.ndarray):
+
+#         if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
+#             x = x[None, ...]  # Shape becomes (1, H, W, C)
+        
+#         x = jnp.transpose(x, (0, 2, 3, 1))
+#         x = x / 255.0
+
+#         # Input: [Batch, 84, 84, Channels]
+        
+#         # 1. First Layer (Nature DQN style)
+#         # Formula: floor((W - K) / S) + 1
+#         # floor((84 - 8) / 4) + 1 = floor(19) + 1 = 20
+#         # Result: [Batch, 20, 20, 32]
+#         x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID")(x)
+#         x = nn.activation.leaky_relu(x)
+        
+#         # 2. Second Layer
+#         # floor((20 - 4) / 2) + 1 = floor(8) + 1 = 9
+#         # Result: [Batch, 9, 9, 64]
+#         x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID")(x)
+#         x = nn.activation.leaky_relu(x)
+
+#         # 3. Hybrid Pooling (Smoothing)
+#         # stride=(1, 1) preserves resolution but smears features across 2x2 neighbors
+#         # Result: [Batch, 9, 9, 64]
+#         if self.pool:
+#             x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
+        
+#         # 4. Final Convolutional Compression
+#         # floor((9 - 3) / 1) + 1 = 7
+#         # Result: [Batch, 7, 7, 64]
+#         x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID")(x)
+#         x = nn.activation.leaky_relu(x)
+        
+#         # 5. Flatten & Projection
+#         # 7 * 7 * 64 = 3,136
+#         x = x.reshape((x.shape[0], -1))
+#         x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        
+#         # 3,136 -> 128
+#         x = nn.Dense(self.out_dim, use_bias=True)(x)
+        
+#         return x
+
+class LSTD_Feature_Net(nn.Module):
+    k: int = 512
+    bias: bool = True
+    
     @nn.compact
-    def __call__(self, x: jnp.ndarray):
-
-        if x.ndim == 3:  # Shape (H, W, C) -> Add batch dimension
-            x = x[None, ...]  # Shape becomes (1, H, W, C)
+    def __call__(self, x):
+        # Calculate base feature dimension depending on bias
+        feat_dim = self.k - 1 if self.bias else self.k
         
-        x = jnp.transpose(x, (0, 2, 3, 1))
-        x = x / 255.0
-
-        # Input: [Batch, 84, 84, Channels]
+        phi = ConvTorso()(x)
+        phi = nn.leaky_relu(phi)
+        # Note: No LayerNorm, No L2 normalization
+        phi = nn.Dense(feat_dim, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
         
-        # 1. First Layer (Nature DQN style)
-        # Formula: floor((W - K) / S) + 1
-        # floor((84 - 8) / 4) + 1 = floor(19) + 1 = 20
-        # Result: [Batch, 20, 20, 32]
-        x = nn.Conv(32, (8, 8), strides=(4, 4), padding="VALID")(x)
-        x = nn.activation.leaky_relu(x)
-        
-        # 2. Second Layer
-        # floor((20 - 4) / 2) + 1 = floor(8) + 1 = 9
-        # Result: [Batch, 9, 9, 64]
-        x = nn.Conv(64, (4, 4), strides=(2, 2), padding="VALID")(x)
-        x = nn.activation.leaky_relu(x)
-
-        # 3. Hybrid Pooling (Smoothing)
-        # stride=(1, 1) preserves resolution but smears features across 2x2 neighbors
-        # Result: [Batch, 9, 9, 64]
-        if self.pool:
-            x = nn.avg_pool(x, window_shape=(2, 2), strides=(1, 1), padding="SAME")
-        
-        # 4. Final Convolutional Compression
-        # floor((9 - 3) / 1) + 1 = 7
-        # Result: [Batch, 7, 7, 64]
-        x = nn.Conv(64, (3, 3), strides=(1, 1), padding="VALID")(x)
-        x = nn.activation.leaky_relu(x)
-        
-        # 5. Flatten & Projection
-        # 7 * 7 * 64 = 3,136
-        x = x.reshape((x.shape[0], -1))
-        x = nn.LayerNorm(use_scale=False, use_bias=False)(x)
-        
-        # 3,136 -> 128
-        x = nn.Dense(self.out_dim, use_bias=True)(x)
-        
-        return x
+        if self.bias:
+            bias_shape = phi.shape[:-1] + (1,)
+            bias_val = jnp.ones(bias_shape)
+            phi = jnp.concatenate([phi, bias_val], axis=-1)
+            
+        return phi
 
 # =====================================================
 # --------------------- RND ---------------------------
@@ -203,33 +225,33 @@ class RND_Predictor(nn.Module):
         phi = nn.Dense(self.k, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
         return phi
 
-class LSTD_Net(nn.Module):
-    k: int = 384 # same as small dino
-    normalize: bool = False
-    bias: bool = True
-    pool: bool = False
+# class LSTD_Net(nn.Module):
+#     k: int = 384 # same as small dino
+#     normalize: bool = False
+#     bias: bool = True
+#     pool: bool = False
     
-    def setup(self):
-        # Base feature dimension before optional bias
-        self.feat_dim = self.k - 1 if self.bias else self.k
-        # If state-action, we need enough outputs for all actions
-        self.torso = LSTD_CNN(self.feat_dim, pool = self.pool)
+#     def setup(self):
+#         # Base feature dimension before optional bias
+#         self.feat_dim = self.k - 1 if self.bias else self.k
+#         # If state-action, we need enough outputs for all actions
+#         self.torso = LSTD_CNN(self.feat_dim, self.bias)
     
-    def __call__(self, x):
-        phi = self.torso(x)  
+#     def __call__(self, x):
+#         phi = self.torso(x)  
         
-        if self.normalize:
-            # Normalize along the feature dimension
-            norm = jnp.linalg.norm(phi, axis=-1, keepdims=True)
-            phi = phi / jnp.maximum(norm, 1e-8)
+#         if self.normalize:
+#             # Normalize along the feature dimension
+#             norm = jnp.linalg.norm(phi, axis=-1, keepdims=True)
+#             phi = phi / jnp.maximum(norm, 1e-8)
         
-        if self.bias:
-            # Concatenate 1.0 to the feature dimension
-            bias_shape = phi.shape[:-1] + (1,)
-            bias = jnp.ones(bias_shape)
-            phi = jnp.concatenate([phi, bias], axis=-1)
+#         if self.bias:
+#             # Concatenate 1.0 to the feature dimension
+#             bias_shape = phi.shape[:-1] + (1,)
+#             bias = jnp.ones(bias_shape)
+#             phi = jnp.concatenate([phi, bias], axis=-1)
         
-        return phi
+#         return phi
 
 # =====================================================
 # ------------ ACTOR-CRITIC (2 HEAD) ------------------
@@ -240,13 +262,11 @@ class PolicyHead(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        # Matches CleanRL's actor: ReLU -> Dense(448) -> ReLU -> Dense(action_dim)
         x = nn.relu(x)
         x = nn.Dense(self.hidden_dim, kernel_init=orthogonal(0.01))(x)
         x = nn.relu(x)
         logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(x)
         return distrax.Categorical(logits=logits)
-
 
 class ActorCritic2Head(nn.Module):
     """
@@ -284,6 +304,66 @@ class ActorCritic2Head(nn.Module):
 
     def __call__(self, x):
         return self.policy(x), self.value(x)
+
+class ActorCriticSharedTorso(nn.Module):
+    """
+    Returns: (pi, v_ext)
+    Designed for strict ablation against the 3-head RND baseline.
+    """
+    action_dim: int
+    normalize_value_features: bool = False
+    out_dim: int = 448
+    cnn_torso: str = 'IMPALA_CNN'
+
+    def setup(self):
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.torso = ImpalaCNN(self.out_dim)
+        else:
+            self.torso = CNN(self.out_dim)
+        
+        self.pi_head = PolicyHead(action_dim=self.action_dim, hidden_dim=self.out_dim)
+        
+        # Retained residual network to match baseline capacity: maps 448 -> 448, std=0.1
+        self.v_head_residual = nn.Sequential([
+            nn.Dense(self.out_dim, kernel_init=orthogonal(0.1)), 
+            nn.relu
+        ])
+        
+        # Pure linear extrinsic value head, std=0.01
+        self.v_ext_head = nn.Dense(1, kernel_init=orthogonal(0.01))
+        
+    def get_value_features(self, phi):
+        # Calculate residual using the activated CNN features
+        phi_res = self.v_head_residual(phi)
+        phi_combined = phi + phi_res
+        
+        if self.normalize_value_features:
+            phi_combined = phi_combined / (
+                jnp.linalg.norm(phi_combined, axis=-1, keepdims=True) + 1e-8
+            )
+
+        return phi_combined
+
+    def value(self, x):
+        phi_raw = self.torso(x)
+        phi_act = nn.relu(phi_raw)
+        phi_ext = self.get_value_features(phi_act)
+        v_ext = self.v_ext_head(phi_ext).squeeze(-1)
+        return v_ext
+
+    def __call__(self, x):
+        # 1. Run CNN exactly once (no activation here to avoid double ReLU in heads)
+        phi_raw = self.torso(x)
+        
+        # 2. Get Policy (PolicyHead applies its own initial ReLU)
+        pi = self.pi_head(phi_raw)
+        
+        # 3. Get Extrinsic Value
+        phi_act = nn.relu(phi_raw)
+        phi_ext = self.get_value_features(phi_act)
+        v_ext = self.v_ext_head(phi_ext).squeeze(-1)
+        
+        return pi, v_ext
 
 
 # =====================================================
@@ -443,6 +523,7 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
     If state_action_features is True, returns shape (..., n_actions, k).
     Otherwise returns shape (..., k).
     """
+    raise NotImplementedError()
     model = RND_Net(
         k=k, 
         normalize=normalize_features, 
@@ -454,30 +535,29 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
     return model, params
 
 
-def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=128, pool=False):
+def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=512, pool=False):
     """
     Initializes the RND network. 
     If state_action_features is True, returns shape (..., n_actions, k).
     Otherwise returns shape (..., k).
     """
-    model = LSTD_Net(
+    if normalize_features or pool: warnings.warn("normalize features and pooling automatically false in initialize_lstd_network")
+    model = LSTD_Feature_Net(
         k=k, 
-        normalize=normalize_features, 
         bias=bias, 
-        pool=pool,
     )
     rng, init_rng = jax.random.split(rng)
     init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
     params = model.init(init_rng, init_x)
     return model, params
 
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=False):
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=True):
     if n_heads == 1:
         model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 2:
         model = ActorCritic2Head(action_dim=action_dim, cnn_torso = cnn_torso)
         if shared_torso:
-            raise NotImplementedError()
+            model = ActorCriticSharedTorso(action_dim = action_dim, cnn_torso = cnn_torso)
     elif n_heads == 3:
         if shared_torso:
             model = ActorCritic3HeadSharedTorso(action_dim=action_dim, cnn_torso = cnn_torso)
