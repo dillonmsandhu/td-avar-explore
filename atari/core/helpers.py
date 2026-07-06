@@ -406,8 +406,27 @@ def update_rms(rms_state, batch):
         "count": tot_count
     }
 
+def update_ema_rms(rms_state, x, beta=0.999):
+    """
+    x: The flattened batch of intrinsic returns (shape: (batch_size,))
+    beta: Momentum. Higher = longer memory.
+    """
+    batch_mean = jnp.mean(x)
+    batch_var = jnp.var(x)
+    batch_count = x.shape[0]
+    tot_count = rms_state["count"] + batch_count
+    # EMA Mean Update
+    new_mean = beta * rms_state["mean"] + (1 - beta) * batch_mean
+    
+    # EMA Variance Update (includes the variance of the means)
+    mean_diff = batch_mean - rms_state["mean"]
+    new_var = beta * rms_state["var"] + (1 - beta) * batch_var + beta * (1 - beta) * jnp.square(mean_diff)
+    
+    return {"mean": new_mean, "var": new_var, "count": tot_count}
+
 def normalize_obs(rms_state, obs, clip=5.0):
     """Centers, scales, and clips the observation."""
     std = jnp.sqrt(rms_state["var"] + 1e-8)
     norm_obs = (obs - rms_state["mean"]) / std
     return jnp.clip(norm_obs, -clip, clip)
+

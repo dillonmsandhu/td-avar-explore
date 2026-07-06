@@ -12,7 +12,6 @@ from core.dino_features import get_dino_features_on_atari_obs_grid
 SAVE_DIR = "cov_lstd" 
 
 def make_train(config):
-    k_lstd = config.get("LSTD_FEATURES", 512)
     k_rho = config.get("RND_FEATURES", 512)
     normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", True)
     normalize_rho = config.get("NORMALIZE_RHO", True)
@@ -76,6 +75,7 @@ def make_train(config):
                 "feat_var": jnp.var(traj_batch.phi, axis=0).mean(),
                 "rho_feat_var": jnp.var(traj_batch.rho_feats, axis=0).mean(),
                 "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2)),
+                "median_obs": jnp.median(traj_batch.obs, axis=(0,1,2)),
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
@@ -121,6 +121,7 @@ def make_train(config):
             k_lstd = 385
 
         else:
+            k_lstd = config.get("LSTD_FEATURES", 512)
             lstd_net, lstd_params = networks.initialize_lstd_network( # Or a different architecture
                 rnd_rng, obs_shape, config["NORMALIZE_LSTD_FEATURES"], bias=True, k=k_lstd, pool=config['POOL_LSTD_NET']
             ) # will be the same params if the same network
@@ -285,9 +286,11 @@ def make_train(config):
                 return final_irets, per_timestep_irets
             
             irets, per_timestep_irets = compute_intrinsic_ret(irets, rho, continue_mask, config["GAMMA_i"])
-            iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
-            intrinsic_return_std = jnp.sqrt(iret_rms["var"] + 1e-8)
-            rho = rho / intrinsic_return_std if normalize_rho else rho
+            # iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
+            iret_rms = helpers.update_ema_rms(iret_rms, per_timestep_irets.reshape(-1))
+            
+            scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8) if normalize_rho else 1.0
+            rho = rho / scaling_factor
             
             # --- 3. Compute Trace and Add to Buffer ---
             traces = helpers.calculate_traces(traj_batch.phi, cut_trace, config["GAMMA_i"], config["LSTD_LAMBDA_i"])
@@ -304,7 +307,7 @@ def make_train(config):
             buffer_state = buffer_manager.update_buffer(buffer_state, buffer_batch)
             
             # --- 3. SOLVE LSTD ON BUFFER ---
-            lstd_state = solve_lstd_lambda_from_buffer(buffer_state, Sigma_inv, config, scaling_factor = intrinsic_return_std)
+            lstd_state = solve_lstd_lambda_from_buffer(buffer_state, Sigma_inv, config, scaling_factor = 1.0)
 
             # --- 4. EVICT BUFFER ---
             rng, prb_rng = jax.random.split(rng)
@@ -313,8 +316,8 @@ def make_train(config):
             # --- 5. COMPUTE TARGETS ---
             
             # --- LSTD PREDICTIONS ---
-            v_i = traj_batch.phi @ lstd_state["w"] 
-            next_v_i = traj_batch.next_phi @ lstd_state["w"] 
+            v_i = traj_batch.phi @ lstd_state["w"] / scaling_factor
+            next_v_i = traj_batch.next_phi @ lstd_state["w"] / scaling_factor
             
             # --- Clip ---
             # V_max_raw = 1.0 / (1.0 - config['GAMMA_i'])
@@ -336,6 +339,10 @@ def make_train(config):
             # --- 6. INTRINSIC vs. EXTRINSIC SCALING ---
             rho_scale = beta_sch(idx) # triangle schedule
             advantages = gae_e + (rho_scale * gae_i)
+            advantages = jnp.where(config.get('CENTER_ADVANTAGES', True),
+                (advantages - advantages.mean()) / (advantages.std() + 1e-8),
+                advantages
+            )
             extrinsic_target = targets[0]
 
             # 7. UPDATE NETWORK

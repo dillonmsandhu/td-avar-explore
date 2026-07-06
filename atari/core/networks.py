@@ -537,7 +537,7 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
 
 def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=512, pool=False):
     """
-    Initializes the RND network. 
+    Initializes the random network for LSTD. 
     If state_action_features is True, returns shape (..., n_actions, k).
     Otherwise returns shape (..., k).
     """
