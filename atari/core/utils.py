@@ -57,6 +57,7 @@ def run_experiment_main(make_train, SAVE_DIR):
         run_config['SEED'] = args.seed
         run_config['THREADS'] = args.threads
         run_config['CONFIG_NAME'] = config_name
+        run_config['RUN_SUFFIX'] = args.run_suffix
         
         print(f"\n{'='*50}")
         print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name} | SEED: {args.seed}")
@@ -84,80 +85,6 @@ def run_experiment_main(make_train, SAVE_DIR):
             
         if args.wandb:
             wandb.finish()
-
-# def run_experiment_main(make_train, SAVE_DIR):
-#     import argparse
-#     import datetime
-#     import traceback
-#     import core.helpers as helpers
-    
-#     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--config', type=str,)
-#     parser.add_argument('--run-suffix', type=str, default=run_timestamp)
-#     parser.add_argument('--seed', type=int, default=0)
-#     parser.add_argument('--threads', type=int, default=1)
-#     parser.add_argument('--save-checkpoint', action='store_true')
-#     parser.add_argument('--envs', nargs='+', default=[])
-    
-#     # WandB/Tuning args
-#     parser.add_argument('--output-dir', type=str, default=None)
-#     parser.add_argument('--wandb', action='store_true')
-#     parser.add_argument('--project', type=str, default="lstd-explore")
-    
-#     args = parser.parse_args()
-
-#     config = shared_config
-    
-#     # Apply JSON overrides if --config was passed as a JSON string
-#     try:
-#         if args.config.startswith('{'):
-#             config.update(json.loads(args.config))
-#     except json.JSONDecodeError:
-#         pass # It was just a filepath
-    
-#     # 2. Environment overwrite from CLI
-#     env_list = args.envs if args.envs else [config.get('ENV_NAME')]
-
-#     env_list = args.envs if args.envs else [config.get('ENV_NAME')]
-#     config_path_name = args.config if not args.config.startswith('{') else "custom_json"
-
-#     for i, env_name in enumerate(env_list):
-#         # Create a clean copy for this specific environment run
-#         run_config = config.copy()
-#         run_config['ENV_NAME'] = env_name
-#         run_config['SEED'] = args.seed
-#         run_config['THREADS'] = args.threads
-#         run_config['CONFIG_NAME'] = os.path.basename(config_path_name)
-        
-        
-#         print(f"\n{'='*50}")
-#         print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name} | SEED: {args.seed}")
-#         print(f"{'='*50}")
-        
-#         rng = jax.random.PRNGKey(run_config['SEED'])
-        
-#         # Optional WandB Initialization
-#         if args.wandb:
-#             import wandb
-#             # Group by config name, name the run by env and seed
-#             wandb.init(
-#                 project=args.project, 
-#                 config=run_config, 
-#                 name=f"{env_name}_s{args.seed}", 
-#                 group=run_config['CONFIG_NAME']
-#             )
-
-#         try:
-#             evaluate(run_config, make_train, SAVE_DIR, args, rng)
-#         except Exception as e:
-#             print(f"!!! CRITICAL ERROR running {env_name} !!!")
-#             print(f"Error: {e}")
-#             traceback.print_exc()
-#             print("Continuing to next environment...")
-            
-#         if args.wandb:
-#             wandb.finish()
 
 
 def parse_config_override(config_str):
@@ -375,7 +302,7 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         'bonus_mean': 'i_advantage_mean',
         "normalized_returned_episode_returns": "normalized_returned_episode_returns",
         'bonus_std': 'i_advantage_std',
-        'intrinsic_rew_mean': 'intrinsic_rew_mean',
+        'ri_mean': 'ri_mean',
         "mean_rew": "mean_rew",
         "raw_intrinsic_rew_mean": "raw_intrinsic_rew_mean",
         "bellman_residual_non_done": "bellman_residual_non_done",
@@ -393,7 +320,22 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
         "adv_mean": "adv_mean",
         "adv_std": "adv_std",
         "rho_feat_var": "rho_feat_var",
-        "lstd_feat_var": "feat_var"
+        "lstd_feat_var": "feat_var",
+        "ret_std": "ret_std",
+        "gae_scale_ratio": "gae_scale_ratio",
+        "gae_intrinsic_frac": "gae_intrinsic_frac",
+        "lstd_A_trace": "lstd_A_trace", 
+        "lstd_w_norm": "lstd_w_norm",
+        "sigma_trace": "sigma_trace",
+        "gae_i_mean": "gae_i_mean",
+        "gae_e_mean": "gae_e_mean",
+        "bonus_max": "bonus_max",
+        "bonus_min": "bonus_min",
+        "vi_pred_max": "vi_pred_max",
+        "vi_pred_min": "vi_pred_min",
+        "i_target_mean": "i_target_mean",
+        "i_value_error": "i_value_error",
+
     }
 
     for m_key, save_name in standard_plots.items():
@@ -416,6 +358,35 @@ def evaluate(run_config, make_train, SAVE_DIR, args, rng):
             except Exception as e:
                 print(f"Failed to save plot for {m_key}: {e}")
                 
+    grouped_overlays = {
+        # Hypothesis 1: Vanishing Bonus (Is the covariance leak crushing the intrinsic reward?)
+        "Hypo1_ri_Spread": ["ri_min", "ri_mean", "ri_max"],
+        
+        # Hypothesis 2: LSTD Explosion (Are the LSTD weights causing value predictions to blow up?)
+        "Hypo2_Vi_Spread": ["vi_pred_max", "vi_pred", "vi_pred_min"],
+        
+        # Hypothesis 3: Stale Buffer / Off-Policy Drift
+        "Hypo3_Stale_Buffer": ["i_target_mean", "vi_pred"],
+        
+        # Hypothesis 4: Advantage Domination (Is the intrinsic signal dwarfing the environment?)
+        "Hypo4_Advantage_Scale": ["gae_e_mean", "gae_i_mean"]
+    }
+
+    for group_title, metric_keys in grouped_overlays.items():
+        data_dict = {}
+        for key in metric_keys:
+            # Re-fetch the metric for this group
+            data = get_metric(key, 1)
+            if data is not None:
+                data_dict[key] = data
+        
+        if data_dict:
+            try:
+                plot_title = f"{group_title}_s{seed}"
+                save_multi_plot(env_dir, run_config['ENV_NAME'], steps_per_pi, data_dict, plot_title)
+            except Exception as e:
+                print(f"Failed to save multi-plot for {group_title}: {e}")
+
     # 5. Flush to WandB efficiently
     if args.wandb:
         import wandb
@@ -433,6 +404,32 @@ def save_plot(env_dir, env_name, steps_per_pi, y, title):
     plt.ylabel(f"{title}")
     plt.title(f"{env_name} ({title})")
     plt.legend()
+
+    plot_path = os.path.join(env_dir, f"{title}.png")
+    plt.savefig(plot_path)
+    plt.close()
+
+def save_multi_plot(env_dir, env_name, steps_per_pi, data_dict, title):
+    """Plots multiple 1D arrays on the same figure."""
+    plt.figure()
+    plotted_anything = False
+    
+    for label, y in data_dict.items():
+        if y is not None and y.shape[0] > 0:
+            x = [i * steps_per_pi for i in range(int(y.shape[0]))]
+            # Use alpha and different line styles to make overlapping data readable
+            plt.plot(x, y, label=label, alpha=0.8)
+            plotted_anything = True
+            
+    if not plotted_anything:
+        plt.close()
+        return
+
+    plt.xlabel("Step")
+    plt.ylabel("Value")
+    plt.title(f"{env_name} ({title})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
 
     plot_path = os.path.join(env_dir, f"{title}.png")
     plt.savefig(plot_path)

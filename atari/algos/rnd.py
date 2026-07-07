@@ -96,6 +96,28 @@ def make_train(config):
                 "v_e_pred": traj_batch.value.mean(),
                 "val_loss_ratio": value_loss / (loss_actor + 1e-8),
             })
+            metric.update({
+                # 1. Vanishing Bonus Check
+                "ri_mean": traj_batch.intrinsic_reward.max(),
+                "ri_max": traj_batch.intrinsic_reward.max(),
+                "ri_min": traj_batch.intrinsic_reward.min(),
+                
+                # 2. LSTD Explosion Check
+                "vi_pred_max": traj_batch.i_value.max(),
+                "vi_pred_min": traj_batch.i_value.min(),
+                
+                # 3. Advantage Domination Check
+                "gae_i_mean": jnp.mean(jnp.abs(gaes[1])), # Mean absolute advantage
+                "gae_e_mean": jnp.mean(jnp.abs(gaes[0])),
+                "gae_scale_ratio": jnp.mean(jnp.abs(gaes[1])) / (jnp.mean(jnp.abs(gaes[0])) + 1e-8),
+                "gae_ratio": jnp.mean( jnp.abs(gaes[1]) / (jnp.abs(gaes[0])+ 1e-8) ) ,
+                "gae_intrinsic_frac": jnp.mean(jnp.abs(gaes[1]) / (jnp.abs(gaes[0]) + jnp.abs(gaes[1]) + 1e-8)),
+                
+                # Intrinsic value accuracy:
+                "i_target_mean": "i_target_mean",
+                "i_value_error": "i_value_error",
+            })
+
             return metric
 
     def train(rng):

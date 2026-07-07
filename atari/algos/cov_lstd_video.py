@@ -11,6 +11,34 @@ from core.dino_features import get_dino_features_on_atari_obs_grid
 
 SAVE_DIR = "cov_lstd" 
 
+import imageio
+import numpy as np
+import os
+
+def save_video_callback(idx, frames, env_name):
+    """
+    Host-side function called by JAX during execution.
+    frames shape expected: (NUM_STEPS, 84, 84)
+    """
+    # Convert JAX array to standard NumPy array on the CPU
+    frames_np = np.array(frames)
+    
+    # Ensure it is properly scaled for video (uint8)
+    # If your CNN normalizes by 255.0, your raw obs are likely still 0-255.
+    frames_np = np.clip(frames_np, 0, 255).astype(np.uint8)
+    base_env_name = config['ENV_NAME']
+    env_size = config.get("ENV_SIZE")
+    full_env_name = f"{base_env_name}-{env_size}" if env_size else base_env_name
+    env_dir = os.path.join("results", f"{SAVE_DIR}/{config['RUN_SUFFIX']}", full_env_name)
+    
+    save_dir = os.path.join(env_dir, "videos")
+    os.makedirs(save_dir, exist_ok=True)
+    filename = os.path.join(save_dir, f"update_{int(idx):05d}.mp4")
+    
+    # Save the trajectory as a 30 FPS video
+    imageio.mimsave(filename, frames_np, fps=30)
+    print(f"Saved trajectory video to {filename}")
+
 def make_train(config):
     k_rho = config.get("RND_FEATURES", 512)
     normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", True)
@@ -278,6 +306,28 @@ def make_train(config):
                 )
 
             (_, env_state, last_obs, last_phi, last_rho_feat, obs_rms, rng) = env_carry
+
+            # --- NEW: VIDEO CAPTURE LOGIC ---
+            # 1. Isolate 1 environment (index 0) and 1 frame channel (index 3, the latest frame)
+            # traj_batch.obs shape is (NUM_STEPS, NUM_ENVS, 4, 84, 84)
+            video_frames = traj_batch.obs[:, 0, 3, :, :]
+            
+            # 2. Determine logging frequency (e.g., 10 times per total run)
+            total_updates = config["NUM_UPDATES"]
+            save_interval = jnp.maximum(1, total_updates // 10)
+            
+            # 3. Conditionally trigger the host callback
+            jax.lax.cond(
+                idx % save_interval == 0,
+                lambda _: jax.debug.callback(
+                    save_video_callback, 
+                    idx, 
+                    video_frames, 
+                    config["ENV_NAME"]
+                ),
+                lambda _: None,
+                operand=None
+            )
 
             # Process batch
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
