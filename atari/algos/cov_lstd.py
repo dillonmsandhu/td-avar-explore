@@ -64,8 +64,10 @@ def make_train(config):
         beta_sch = lambda x: config['BONUS_SCALE']
 
     # Metrics Function
-    def _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale):
+    def _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale, ret_std, lstd_state, sigma_state):
             metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
+            w_norm = lstd_state["w_norm"]
+            A_trace = lstd_state["A_trace"]
             value_loss, loss_actor, entropy = loss_info
             metric.update({
                 "ppo_actor_loss": loss_actor.mean(),
@@ -76,6 +78,7 @@ def make_train(config):
                 "rho_feat_var": jnp.var(traj_batch.rho_feats, axis=0).mean(),
                 "average_obs": jnp.mean(traj_batch.obs, axis=(0,1,2)),
                 "median_obs": jnp.median(traj_batch.obs, axis=(0,1,2)),
+                "obs": traj_batch.obs[0,0,0,:,:],
                 "bonus_mean": gaes[1].mean(),
                 "bonus_std": gaes[1].std(),
                 "bonus_max": gaes[1].max(),
@@ -85,12 +88,42 @@ def make_train(config):
                 "intrinsic_rew_std": traj_batch.intrinsic_reward.std(),
                 "mean_rew": traj_batch.reward.mean(),
                 "rho_scale": rho_scale,
+                "ret_std": ret_std,
                 "num_goals": jnp.sum(traj_batch.info.get('is_goal', jnp.zeros_like(traj_batch.done))),
                 "vi_pred": traj_batch.i_value.mean(),
-                "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale,
+                "vi_pred_scaled": traj_batch.i_value.mean() * rho_scale / (ret_std + 1e-8),
                 "v_e_pred": traj_batch.value.mean(),
                 "val_loss_ratio": value_loss / (loss_actor + 1e-8),
             })
+            metric.update({
+                # 1. Vanishing Bonus Check
+                "ri_mean": traj_batch.intrinsic_reward.max(),
+                "ri_max": traj_batch.intrinsic_reward.max(),
+                "ri_min": traj_batch.intrinsic_reward.min(),
+                
+                # 2. LSTD Explosion Check
+                "vi_pred_max": traj_batch.i_value.max(),
+                "vi_pred_min": traj_batch.i_value.min(),
+                "lstd_w_norm": w_norm,
+                "lstd_A_trace": A_trace,
+                
+                # 3. Advantage Domination Check
+                "gae_i_mean": jnp.mean(jnp.abs(gaes[1])), # Mean absolute advantage
+                "gae_e_mean": jnp.mean(jnp.abs(gaes[0])),
+                "gae_scale_ratio": jnp.mean(jnp.abs(gaes[1])) / (jnp.mean(jnp.abs(gaes[0])) + 1e-8),
+                "gae_ratio": jnp.mean( jnp.abs(gaes[1]) / (jnp.abs(gaes[0])+ 1e-8) ) ,
+                "gae_intrinsic_frac": jnp.mean(jnp.abs(gaes[1]) / (jnp.abs(gaes[0]) + jnp.abs(gaes[1]) + 1e-8)),
+                
+                # intrinsic value accuracy:
+                "i_target_mean": targets[1].mean(),
+                "i_value_error": jnp.mean(jnp.square(targets[1] - traj_batch.i_value)),
+                
+                
+                # 4. Feature Health
+                "phi_max": traj_batch.phi.max(),
+                "sigma_trace": jnp.trace(sigma_state["S"]), # Is the covariance exploding?
+            })
+            
             return metric
 
     def train(rng):
@@ -132,7 +165,7 @@ def make_train(config):
         config['NUM_CHUNKS'] = buffer_manager.padded_capacity // config['CHUNK_SIZE']
         config['PADDED_CAPACITY'] = buffer_manager.padded_capacity
         initial_buffer_state = buffer_manager.init_state()
-        initial_lstd_state = {"w": jnp.zeros(k_lstd), }
+        initial_lstd_state = {"w": jnp.zeros(k_lstd), "w_norm": 0, "A_trace": 0}
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, n_heads=2, shared_torso = True)
         train_state, rnd_state = networks.initialize_flax_train_states(

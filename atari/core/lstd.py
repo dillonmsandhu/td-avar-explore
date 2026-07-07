@@ -63,8 +63,13 @@ def solve_lstd_lambda_from_buffer(buffer: LSTDBufferState, Sigma_inv, config, sc
     reg = jnp.eye(k_lstd) * config.get("LSTD_L2_REG", 1e-3) * N
     A_view = final_A  + reg
     w_i = jnp.linalg.solve(A_view, final_b)
+    w_norm = jnp.linalg.norm(w_i)
+    # Fast condition number proxy (ratio of trace to norm, or just trace)
+    # Using jnp.linalg.cond is expensive, so we track matrix magnitude
+    A_trace = jnp.trace(A_view) 
     
-    return {"w": w_i}
+    return {"w": w_i, "w_norm": w_norm, "A_trace": A_trace}
+    
 
 
 def solve_lstd_lambda_from_buffer_extrinsic(buffer: LSTDBufferStateE, config):
