@@ -57,6 +57,7 @@ def run_experiment_main(make_train, SAVE_DIR):
         run_config['SEED'] = args.seed
         run_config['THREADS'] = args.threads
         run_config['CONFIG_NAME'] = config_name
+        run_config['RUN_SUFFIX'] = args.run_suffix
         
         print(f"\n{'='*50}")
         print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name} | SEED: {args.seed}")
@@ -84,80 +85,6 @@ def run_experiment_main(make_train, SAVE_DIR):
             
         if args.wandb:
             wandb.finish()
-
-# def run_experiment_main(make_train, SAVE_DIR):
-#     import argparse
-#     import datetime
-#     import traceback
-#     import core.helpers as helpers
-    
-#     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--config', type=str,)
-#     parser.add_argument('--run-suffix', type=str, default=run_timestamp)
-#     parser.add_argument('--seed', type=int, default=0)
-#     parser.add_argument('--threads', type=int, default=1)
-#     parser.add_argument('--save-checkpoint', action='store_true')
-#     parser.add_argument('--envs', nargs='+', default=[])
-    
-#     # WandB/Tuning args
-#     parser.add_argument('--output-dir', type=str, default=None)
-#     parser.add_argument('--wandb', action='store_true')
-#     parser.add_argument('--project', type=str, default="lstd-explore")
-    
-#     args = parser.parse_args()
-
-#     config = shared_config
-    
-#     # Apply JSON overrides if --config was passed as a JSON string
-#     try:
-#         if args.config.startswith('{'):
-#             config.update(json.loads(args.config))
-#     except json.JSONDecodeError:
-#         pass # It was just a filepath
-    
-#     # 2. Environment overwrite from CLI
-#     env_list = args.envs if args.envs else [config.get('ENV_NAME')]
-
-#     env_list = args.envs if args.envs else [config.get('ENV_NAME')]
-#     config_path_name = args.config if not args.config.startswith('{') else "custom_json"
-
-#     for i, env_name in enumerate(env_list):
-#         # Create a clean copy for this specific environment run
-#         run_config = config.copy()
-#         run_config['ENV_NAME'] = env_name
-#         run_config['SEED'] = args.seed
-#         run_config['THREADS'] = args.threads
-#         run_config['CONFIG_NAME'] = os.path.basename(config_path_name)
-        
-        
-#         print(f"\n{'='*50}")
-#         print(f"RUNNING ENV {i+1}/{len(env_list)}: {env_name} | SEED: {args.seed}")
-#         print(f"{'='*50}")
-        
-#         rng = jax.random.PRNGKey(run_config['SEED'])
-        
-#         # Optional WandB Initialization
-#         if args.wandb:
-#             import wandb
-#             # Group by config name, name the run by env and seed
-#             wandb.init(
-#                 project=args.project, 
-#                 config=run_config, 
-#                 name=f"{env_name}_s{args.seed}", 
-#                 group=run_config['CONFIG_NAME']
-#             )
-
-#         try:
-#             evaluate(run_config, make_train, SAVE_DIR, args, rng)
-#         except Exception as e:
-#             print(f"!!! CRITICAL ERROR running {env_name} !!!")
-#             print(f"Error: {e}")
-#             traceback.print_exc()
-#             print("Continuing to next environment...")
-            
-#         if args.wandb:
-#             wandb.finish()
 
 
 def parse_config_override(config_str):
