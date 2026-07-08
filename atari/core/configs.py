@@ -9,7 +9,7 @@ shared_config = { # for simple pong testing.
     "ENT_COEF": 0.001, # CleanRL 0.01, CleanRL RND: 0.001.
     "ENV_NAME": "Pong-v5",
     'LR': 1e-4, # CleanRL: 2e-4, museli 3e-4
-    'LR_END': 1e-6, # CleanRL: 0.0
+    'LR_END': 1e-4, # CleanRL: 0.0
     'MAX_GRAD_NORM': 0.5,
     "LR_SCHEDULE": "linear",
     "NUM_EPOCHS": 4, # CleanRL: 4
@@ -37,14 +37,15 @@ shared_config = { # for simple pong testing.
     "RND_FEATURES": 512,
     "NORMALIZE_RHO_FEATURES": False, # New
     "BIAS": False,
-    "COV_LEAK": 0.999999,
+    "COV_LEAK": 0.99,
     "BONUS_SCALE": 0.5, # CleanRL RND starts at 2 and keeps it at 2. Due to reward normalization exploration never decays
     "SCHEDULE_BETA": False, # New
+    "BONUS_TYPE": "EMA", # options: EMA or SUM
     
 
     # LSTD
     "LSTD_FEATURES": 512, # 384. DinoV2 small has this many so let's see how that does.
-    "LSTD_L2_REG": 1e-8,
+    "LSTD_L2_REG": 1e-4,
     "POOL_LSTD_NET": False,
     "LSTD_DINO": False, # DinoV2 features plus a bias, unnormalized
     "NORMALIZE_LSTD_OBS": True,

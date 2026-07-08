@@ -114,8 +114,8 @@ def make_train(config):
                 "gae_intrinsic_frac": jnp.mean(jnp.abs(gaes[1]) / (jnp.abs(gaes[0]) + jnp.abs(gaes[1]) + 1e-8)),
                 
                 # Intrinsic value accuracy:
-                "i_target_mean": "i_target_mean",
-                "i_value_error": "i_value_error",
+                "i_target_mean": targets[1].mean(),
+                "i_value_error": jnp.mean(jnp.square(targets[1] - traj_batch.i_value)),
             })
 
             return metric

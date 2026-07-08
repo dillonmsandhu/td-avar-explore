@@ -9,13 +9,13 @@ from core.helpers import Transition
 from core.dino_features import get_dino_features_on_atari_obs_grid
 # jax.config.update("jax_enable_x64", True)
 
-SAVE_DIR = "cov_lstd" 
+SAVE_DIR = "cov_lstd_video" 
 
 import imageio
 import numpy as np
 import os
 
-def save_video_callback(idx, frames, env_name):
+def save_video_callback(idx, frames, config):
     """
     Host-side function called by JAX during execution.
     frames shape expected: (NUM_STEPS, 84, 84)
@@ -323,7 +323,7 @@ def make_train(config):
                     save_video_callback, 
                     idx, 
                     video_frames, 
-                    config["ENV_NAME"]
+                    config
                 ),
                 lambda _: None,
                 operand=None
@@ -333,7 +333,8 @@ def make_train(config):
             # --- 0. GLOBAL COVARIANCE UPDATE (Pure Accumulation) ---
             sigma_state = helpers.update_cov(sigma_state, 
                         traj_batch.rho_feats, 
-                        leak = config['COV_LEAK']
+                        leak = config['COV_LEAK'],
+                        bonus_type = config['BONUS_TYPE']
             )            
             cho_S = jax.scipy.linalg.cho_factor(sigma_state["S"]) # Cholesky solver
             Sigma_inv = jax.scipy.linalg.cho_solve(cho_S, jnp.eye(k_rho))
@@ -451,7 +452,8 @@ def make_train(config):
             train_state, _, _, _, rng = update_state
 
             # --------- Metrics ---------
-            metric = _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale)
+            metric = _compile_metrics(traj_batch, loss_info, gaes, targets, rho_scale, scaling_factor, lstd_state, sigma_state)
+
 
             runner_state = {
                 "train_state": train_state,

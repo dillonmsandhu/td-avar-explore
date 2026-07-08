@@ -46,10 +46,15 @@ def get_scale_free_bonus(S_inv, features):
     bonus_sq = jnp.einsum("...i,ij,...j->...", features, S_inv, features)
     return jnp.sqrt(jnp.maximum(bonus_sq, 0.0))
 
-def update_cov(sigma_state, phi, leak=1.0):
+def update_cov(sigma_state, phi, leak=1.0, bonus_type='SUM'):
     S = sigma_state['S']
     S_batch_sum = jnp.einsum("tni, tnj -> ij", phi, phi)
-    S_new = leak * S + S_batch_sum
+    if bonus_type == 'EMA':
+        batch_size = phi.shape[0] * phi.shape[1]
+        batch_cov_mean = S_batch_sum / batch_size
+        S_new = leak * S + (1.0 - leak) * batch_cov_mean
+    elif bonus_type == 'SUM':
+        S_new = leak * S + S_batch_sum
     S_new = 0.5 * (S_new + S_new.T)
     return {'S': S_new, }
 
