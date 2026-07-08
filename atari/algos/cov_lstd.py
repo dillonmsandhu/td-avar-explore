@@ -320,8 +320,8 @@ def make_train(config):
                 return final_irets, per_timestep_irets
             
             irets, per_timestep_irets = compute_intrinsic_ret(irets, rho, continue_mask, config["GAMMA_i"])
-            # iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
-            iret_rms = helpers.update_ema_rms(iret_rms, per_timestep_irets.reshape(-1))
+            iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
+            # iret_rms = helpers.update_ema_rms(iret_rms, per_timestep_irets.reshape(-1))
             
             scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8) if normalize_rho else 1.0
             rho = rho / scaling_factor
