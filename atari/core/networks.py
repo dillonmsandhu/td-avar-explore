@@ -148,6 +148,7 @@ class CNN(nn.Module):
 class LSTD_Feature_Net(nn.Module):
     k: int = 512
     bias: bool = True
+    layer_norm: bool = False
     
     @nn.compact
     def __call__(self, x):
@@ -158,12 +159,15 @@ class LSTD_Feature_Net(nn.Module):
         phi = nn.leaky_relu(phi)
         # Note: No LayerNorm, No L2 normalization
         phi = nn.Dense(feat_dim, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
+
+        if self.layer_norm:
+            phi = nn.LayerNorm(use_scale=False, use_bias=False)(phi)
         
         if self.bias:
             bias_shape = phi.shape[:-1] + (1,)
             bias_val = jnp.ones(bias_shape)
             phi = jnp.concatenate([phi, bias_val], axis=-1)
-            
+        
         return phi
 
 # =====================================================
@@ -199,12 +203,15 @@ class RND_Net(nn.Module):
 # These two are actually used by RND, which has a more extensive predictor network.
 class RND_Target(nn.Module):
     k: int = 512 # CleanRL uses 512 for RND features
+    layer_norm: bool = False
     
     @nn.compact
     def __call__(self, x):
         phi = ConvTorso()(x)
         phi = nn.leaky_relu(phi)
         phi = nn.Dense(self.k, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
+        if self.layer_norm:
+            phi = nn.LayerNorm(use_scale=False, use_bias=False)(phi)
         return phi
 
 class RND_Predictor(nn.Module):
@@ -510,6 +517,71 @@ class ActorCritic3HeadSharedTorso(nn.Module):
         v_int = self.v_int_head(phi_int).squeeze(-1)
         
         return pi, v_ext, v_int
+
+
+class AC_plus_vi(nn.Module):
+    """
+    Returns: (pi, v_ext, v_int)
+    """
+    action_dim: int
+    normalize_value_features: bool = False
+    out_dim: int = 448
+    cnn_torso: str = 'IMPALA_CNN'
+
+    def setup(self):
+        if self.cnn_torso == 'IMPALA_CNN':
+            self.torso = ImpalaCNN(self.out_dim)
+            self.vi_torso = ImpalaCNN(self.out_dim)
+        else:
+            self.torso = CNN(self.out_dim)
+            self.vi_torso = CNN(self.out_dim)
+        
+        self.pi_head = PolicyHead(action_dim=self.action_dim, hidden_dim=self.out_dim)
+        
+        # Residual network: maps 448 -> 448, std=0.1
+        self.v_head_residual = nn.Sequential([
+            nn.Dense(self.out_dim, kernel_init=orthogonal(0.1)), 
+            nn.relu
+        ])
+        
+        # Value heads: pure linear, std=0.01
+        self.v_ext_head = nn.Dense(1, kernel_init=orthogonal(0.01))
+        self.v_int_head = nn.Dense(1, kernel_init=orthogonal(0.01))
+        
+    # ---------------- Value -----------------
+    def get_i_value_features(self, x):
+        """Returns ONLY the intrinsic value features for LSTD evaluation."""
+        phi = nn.relu(self.vi_torso(x))
+        return phi
+
+    def get_e_value_features(self, z):
+        """Returns ONLY the extrinsic value features (for completeness)."""
+        phi_res = self.v_head_residual(z)
+        return z + phi_res
+    
+    def value(self, x):
+        phi_e = self.get_e_value_features(nn.relu(self.torso(x)))
+        phi_i = self.get_i_value_features(x)
+        v_ext = self.v_ext_head(phi_e).squeeze(-1)
+        v_int = self.v_int_head(phi_i).squeeze(-1)
+        return v_ext, v_int
+    # ---------------- Full forward ----------
+
+    def __call__(self, x):
+        # 1. Run CNN exactly once
+        phi = nn.relu(self.torso(x))
+        
+        # 2. Get Policy
+        pi = self.pi_head(phi)
+        
+        # 3. Get Values
+        phi_e = self.get_e_value_features(phi)
+        phi_i = self.get_i_value_features(x)
+        v_ext = self.v_ext_head(phi_e).squeeze(-1)
+        v_int = self.v_int_head(phi_i).squeeze(-1)
+        
+        return pi, v_ext, v_int
+
 # =====================================================
 # --------------- INITIALIZATION ----------------------
 # =====================================================
@@ -535,7 +607,11 @@ def initialize_rnd_network(rng, obs_shape, normalize_features, bias=True, k=128)
     return model, params
 
 
-def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=512, pool=False):
+def initialize_lstd_network(rng, 
+    obs_shape, 
+    normalize_features, 
+    bias=True, k=512, pool=False, layer_norm=False
+):
     """
     Initializes the random network for LSTD. 
     If state_action_features is True, returns shape (..., n_actions, k).
@@ -545,13 +621,14 @@ def initialize_lstd_network(rng, obs_shape, normalize_features, bias=True, k=512
     model = LSTD_Feature_Net(
         k=k, 
         bias=bias, 
+        layer_norm = layer_norm
     )
     rng, init_rng = jax.random.split(rng)
     init_x = jnp.zeros((1, *obs_shape), dtype = jnp.float32)
     params = model.init(init_rng, init_x)
     return model, params
 
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=True):
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=True, seperate_vi = False):
     if n_heads == 1:
         model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 2:
@@ -560,7 +637,10 @@ def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso 
             model = ActorCriticSharedTorso(action_dim = action_dim, cnn_torso = cnn_torso)
     elif n_heads == 3:
         if shared_torso:
-            model = ActorCritic3HeadSharedTorso(action_dim=action_dim, cnn_torso = cnn_torso)
+            if seperate_vi: 
+                model = AC_plus_vi(action_dim=action_dim, cnn_torso = cnn_torso)
+            else:
+                model = ActorCritic3HeadSharedTorso(action_dim=action_dim, cnn_torso = cnn_torso)
         else:
             model = ActorCritic3Head(action_dim=action_dim, cnn_torso = cnn_torso)
     else:
@@ -602,6 +682,25 @@ def initialize_flax_train_states(config, network, rnd_net, params, rnd_params, t
     )
     return train_state, rnd_state
 
+
+def initialize_single_train_state(config, network, params):
+    # --- PPO Agent Scheduler & Optimizer ---
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    lr_scheduler = optax.linear_schedule(
+        init_value=config["LR"],
+        end_value=config["LR_END"],
+        transition_steps=total_grad_steps
+    )
+    tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adamw(lr_scheduler, eps=1e-5),
+    )
+    train_state = TrainState.create(
+        apply_fn=network.apply,
+        params=params,
+        tx=tx,
+    )
+    return train_state
 # Learned Features for LSTD:
 class FeatureNet(nn.Module):
     """
