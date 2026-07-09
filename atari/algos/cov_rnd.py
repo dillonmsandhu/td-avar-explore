@@ -1,5 +1,4 @@
-# RND exactly as the original paper.
-# Except the intrinsic reward is based on the covariance of the target network's features.
+# PPO as the RND paper with an intrinsic reward based on target net feature covariance.
 from jax import config
 from core.imports import *
 import core.helpers as helpers
