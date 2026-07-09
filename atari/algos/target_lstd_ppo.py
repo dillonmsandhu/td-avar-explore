@@ -12,15 +12,43 @@ SAVE_DIR = "target_lstd_ppo"
 class TransitionE(NamedTuple):
     done: jnp.ndarray
     action: jnp.ndarray
-    value: jnp.ndarray
-    next_value: jnp.ndarray
+    value: jnp.ndarray       # Neural network value
+    next_value: jnp.ndarray 
+    v_lstd: jnp.ndarray     # LSTD value (filled later)
+    next_v_lstd: jnp.ndarray
     reward: jnp.ndarray
     log_prob: jnp.ndarray
     obs: jnp.ndarray
-    info: dict
-    # --- NEW FIELDS ---
-    phi: jnp.ndarray            # LSTD features
+    phi: jnp.ndarray        # Features for LSTD
     next_phi: jnp.ndarray 
+    info: dict
+
+def calculate_gae(traj_batch, γ, λ, use_lstd):
+    done = traj_batch.done
+    is_dummy = traj_batch.info.get('is_dummy', jnp.zeros_like(done))
+    cut_e_trace = done | is_dummy
+    cut_e_mult = 1.0 - cut_e_trace.astype(jnp.float32)
+
+    if use_lstd:
+        def _get_advantages(gae, inputs):
+            transition, mask = inputs
+            delta = transition.reward + γ * transition.next_v_lstd * mask - transition.v_lstd
+            gae = delta + (γ * λ * mask * gae)
+            return gae, gae
+    else: # use network
+        def _get_advantages(gae, inputs):
+            transition, mask = inputs
+            delta = transition.reward + γ * transition.next_value * mask - transition.value
+            gae = delta + (γ * λ * mask * gae)
+            return gae, gae
+
+    initial_acc = jnp.zeros_like(traj_batch.value[0])
+    scan_inputs = (traj_batch, cut_e_mult)
+    _, advantages = jax.lax.scan(
+        _get_advantages, initial_acc, scan_inputs, reverse=True, unroll=16
+    )
+    
+    return advantages, advantages + traj_batch.value
 
 def make_train(config):
     k_lstd = config.get('LSTD_FEATURES', 128)
@@ -50,9 +78,15 @@ def make_train(config):
     n_actions = env.single_action_space.n
 
     # Metrics Function
-    def _compile_metrics(traj_batch, loss_info, gaes, targets):
-            metric = {k: v.mean() for k, v in traj_batch.info.items() if k not in ["real_next_obs", "real_next_state"]}
-            loss_actor, entropy = loss_info
+    def _compile_metrics(traj_batch, loss_info, gaes, targets, lstd_state):
+            metric = {k: v.mean() for k, v in traj_batch.info.items() 
+                if k not in ["real_next_obs", "real_next_state"]
+            }
+            w_norm = lstd_state["w_norm"]
+            A_trace = lstd_state["A_trace"]
+            
+            loss_actor, ve_loss, entropy = loss_info
+
             metric.update({
                 "ppo_actor_loss": loss_actor.mean(),
                 "entropy": entropy.mean(),
@@ -63,13 +97,18 @@ def make_train(config):
                 "lambda_ret_std": targets.std(),
                 "mean_rew": traj_batch.reward.mean(),
                 "num_goals": jnp.sum(traj_batch.info.get('is_goal', jnp.zeros_like(traj_batch.done))),
-                "v_pred": traj_batch.value.mean(),
+                "v_pred": traj_batch.vaalue.mean(),
+                "v_pred_lstd": traj_batch.v_lstd.mean(),
                 "v_std": traj_batch.value.std(),
+                "v_lstd_std": traj_batch.v_lstd.std(),
+                "lstd_w_norm": w_norm,
+                "lstd_A_trace": A_trace,
             })
             return metric
 
     def train(rng):
-        initial_lstd_state = {"w": jnp.zeros(k_lstd), }
+        # To do; don't hard code output shape number of feats.
+        initial_lstd_state = {"w": jnp.zeros(448), "w_norm": 0, "A_trace": 0}
         initial_buffer_state = buffer_manager.init_state() 
 
         network, network_params = networks.initialize_actor_critic(rng, obs_shape, n_actions, 
@@ -103,7 +142,7 @@ def make_train(config):
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
-                b, _ = network.apply(train_state.params, last_obs)
+                b, v_nn = network.apply(train_state.params, last_obs)
                 action = b.sample(seed=_rng)
                 log_prob = b.log_prob(action)
 
@@ -113,21 +152,22 @@ def make_train(config):
 
                 # --- IN-LOOP FEATURE EXTRACTION ---
                 next_phi = get_lstd_feats(obsv, train_state.target_params)
+                _, next_v_nn = network.apply(train_state.params, obsv)
                 
-                dummy = jnp.zeros_like(reward)
-
+                dummy_v = jnp.zeros_like(v_nn)
                 transition = TransitionE(
-                    done, action, dummy, dummy, reward, log_prob, 
-                    last_obs, info, phi=last_phi, next_phi=next_phi, 
+                    done, action, v_nn, next_v_nn, dummy_v, dummy_v, reward, log_prob, 
+                    last_obs, last_phi, next_phi, info
                 )
                 #
                 runner_state = (train_state, env_state, obsv, next_phi, rng)
                 return runner_state, transition
             # end env_step
+            
             env_step_state = (
                 train_state, env_state, last_obs, runner_state["last_phi"], rng
             )
-            
+
             (_, env_state, last_obs, last_phi,rng), traj_batch = jax.lax.scan(_env_step, 
                 env_step_state, None, config["NUM_STEPS"]
             )
@@ -143,6 +183,7 @@ def make_train(config):
             traces = helpers.calculate_traces(
                 traj_batch.phi, cut_trace, config["GAMMA"], config["LSTD_LAMBDA_i"]
             )
+
             buffer_batch = LSTDBufferStateE(
                 traces=traces, 
                 features=traj_batch.phi, 
@@ -151,26 +192,31 @@ def make_train(config):
                 continue_masks=continue_mask, 
                 size=jnp.array(batch_size)
             )
-            buffer_state = buffer_manager.update_buffer(buffer_state, buffer_batch)
-            
-            # --- 3. SOLVE LSTD ON BUFFER ---
-            lstd_state = solve_lstd_lambda_from_buffer_extrinsic(buffer_state, config)
 
-            # --- 4. EVICT BUFFER ---
+            buffer_state = buffer_manager.update_buffer(buffer_state, buffer_batch)
+                
+            # --- SOLVE LSTD ---
+            lstd_state = solve_lstd_lambda_from_buffer_extrinsic(buffer_state, config)
+            # Evict extra states from buffer
             rng, prb_rng = jax.random.split(rng)
             buffer_state = buffer_manager.evict_buffer(buffer_state, prb_rng)
-            
-            # --- LSTD PREDICTIONS ---
-            v = traj_batch.phi @ lstd_state["w"] 
-            next_v = traj_batch.next_phi @ lstd_state["w"] 
-            
-            # --- traj_batch update for GAE ---
-            traj_batch = traj_batch._replace(value=v, next_value=next_v)
 
-            advantages, extrinsic_target = helpers.calculate_gaeE(
-                traj_batch, config["GAMMA"], config["GAE_LAMBDA"], 
+            # --- COMPUTE LSTD VALUES ---
+            v_lstd = traj_batch.phi @ lstd_state["w"]
+            next_v_lstd = traj_batch.next_phi @ lstd_state["w"]
+
+            # Inject LSTD values into the batch
+            traj_batch = traj_batch._replace(v_lstd=v_lstd, next_v_lstd=next_v_lstd)
+
+            # --- 1. GAE FOR ACTOR (Uses LSTD) ---
+            advantages, _ = calculate_gae(
+                traj_batch, config["GAMMA"], config["GAE_LAMBDA"], use_lstd=True
             )
 
+            # --- 2. TD TARGETS FOR CRITIC (Uses NN) ---
+            _, extrinsic_target = calculate_gae(
+                traj_batch, config["GAMMA"], config["GAE_LAMBDA"], use_lstd=False
+            )
             # 7. UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
