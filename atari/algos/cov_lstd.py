@@ -309,13 +309,12 @@ def make_train(config):
                 """
                 def _forward_step(carry, step_data):
                     r_t, cont_mask = step_data
-                    # carry is the running return per environment: (NUM_ENVS,)
-                    next_ret = cont_mask * gamma_i + r_t
+                    # Multiply the running return (carry) by gamma and the mask
+                    next_ret = r_t + (gamma_i * carry * cont_mask)
                     return next_ret, next_ret
                 
                 c_mask = continue_mask.squeeze(-1) if continue_mask.ndim == 3 else continue_mask
                 scan_inputs = (raw_rho, c_mask)
-                # Scan forward over the time dimension (axis 0)
                 final_irets, per_timestep_irets = jax.lax.scan(_forward_step, current_irets, scan_inputs)
                 return final_irets, per_timestep_irets
             
@@ -373,7 +372,7 @@ def make_train(config):
             # --- 6. INTRINSIC vs. EXTRINSIC SCALING ---
             rho_scale = beta_sch(idx) # triangle schedule
             advantages = gae_e + (rho_scale * gae_i)
-            advantages = jnp.where(config.get('CENTER_ADVANTAGES', True),
+            advantages = jnp.where(config.get('CENTER_ADVANTAGES', False),
                 (advantages - advantages.mean()) / (advantages.std() + 1e-8),
                 advantages
             )

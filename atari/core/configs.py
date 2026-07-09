@@ -1,5 +1,5 @@
 shared_config = { # for simple pong testing.
-    "TOTAL_TIMESTEPS": int(1e7),
+    "TOTAL_TIMESTEPS": int(5e6),
     "NUM_ENVS": 128, # CleanRL RND: 128
     "NUM_STEPS": 128, # CleanRL RND: 128, Clean
     "GAMMA": 0.999, # CleanRL RND is 0.999
@@ -33,6 +33,8 @@ shared_config = { # for simple pong testing.
     "ABSORBING_GOAL_STATE": False,
     
     # Rho
+    "NORMALIZE_RHO": True, # normalize ri based on Gi.
+    "NORMALIZE_RHO_RMS": True, # uses the RMS of Gi to normalize
     "NORMALIZE_RHO_OBS": True,
     "RND_FEATURES": 512,
     "NORMALIZE_RHO_FEATURES": False, # New

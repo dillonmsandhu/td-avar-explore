@@ -204,6 +204,7 @@ class RND_Net(nn.Module):
 class RND_Target(nn.Module):
     k: int = 512 # CleanRL uses 512 for RND features
     layer_norm: bool = False
+    l2_norm: bool = False
     
     @nn.compact
     def __call__(self, x):
@@ -212,6 +213,11 @@ class RND_Target(nn.Module):
         phi = nn.Dense(self.k, kernel_init=orthogonal(jnp.sqrt(2)))(phi)
         if self.layer_norm:
             phi = nn.LayerNorm(use_scale=False, use_bias=False)(phi)
+
+        if self.l2_norm:
+            phi_norm = jnp.linalg.norm(phi, axis=-1, keepdims=True)
+            phi = phi / (phi_norm + 1e-8)
+        
         return phi
 
 class RND_Predictor(nn.Module):

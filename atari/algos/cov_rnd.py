@@ -24,6 +24,7 @@ class Transition(NamedTuple):
 def make_train(config):
     k_rho = config.get("RND_FEATURES", 128)
     normalize_rho = config.get("NORMALIZE_RHO", True)
+    rms_normalize = config.get("NORMALIZE_RHO_RMS", False)
     
     # Episodic / Continuing / Absorbing
     is_episodic = config.get("EPISODIC", True)
@@ -119,7 +120,9 @@ def make_train(config):
         
         # --- initialize intrinsic reward rho components (Random Nets) ---
         target_rng, rng = jax.random.split(rng)
-        rnd_target_net = networks.RND_Target(k=k_rho, layer_norm = config['RHO_LAYER_NORM'])        
+        rnd_target_net = networks.RND_Target(
+            k=k_rho, layer_norm = config['RHO_LAYER_NORM'], l2_norm = config['NORMALIZE_RHO_FEATURES']
+        )        
         dummy_obs = jnp.zeros((1, 1, 84, 84)) # Dummy input to trace shapes
         target_params = rnd_target_net.init(target_rng, dummy_obs)
         initial_sigma_state = {"S": jnp.eye(k_rho, dtype=jnp.float64)} # global accumulation
@@ -247,20 +250,25 @@ def make_train(config):
                 """
                 def _forward_step(carry, step_data):
                     r_t, cont_mask = step_data
-                    # carry is the running return per environment: (NUM_ENVS,)
-                    next_ret = cont_mask * gamma_i + r_t
+                    # Multiply the running return (carry) by gamma and the mask
+                    next_ret = r_t + (gamma_i * carry * cont_mask)
                     return next_ret, next_ret
                 
                 c_mask = continue_mask.squeeze(-1) if continue_mask.ndim == 3 else continue_mask
                 scan_inputs = (raw_rho, c_mask)
-                # Scan forward over the time dimension (axis 0)
                 final_irets, per_timestep_irets = jax.lax.scan(_forward_step, current_irets, scan_inputs)
                 return final_irets, per_timestep_irets
             
             irets, per_timestep_irets = compute_intrinsic_ret(irets, rho, continue_mask, config["GAMMA_i"])
             iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
             
-            scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8) if normalize_rho else 1.0
+            if normalize_rho:
+                if rms_normalize:
+                    rms_val = iret_rms["var"] + jnp.square(iret_rms["mean"])
+                    scaling_factor = jnp.sqrt(rms_val + 1e-8)
+                else:
+                    scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8)
+            
             traj_batch = traj_batch._replace(intrinsic_reward = rho / scaling_factor)
             
             # --- GAE ---
