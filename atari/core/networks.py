@@ -283,12 +283,15 @@ class PolicyHead(nn.Module):
 
 class ActorCritic2Head(nn.Module):
     """
-    Returns: (pi, v)
+    Returns: (pi, v).
+    Seperate CNN torso for actor and critic. 
     """
     action_dim: int
     normalize_value_features: bool = False
     out_dim: int = 448
     cnn_torso: str = 'IMPALA_CNN'
+    layer_norm: bool = False
+    bias: bool = False
 
     def setup(self):
         if self.cnn_torso == 'IMPALA_CNN':
@@ -299,17 +302,27 @@ class ActorCritic2Head(nn.Module):
             self.critic_torso = CNN(self.out_dim)            
         
         self.pi_head = PolicyHead(action_dim=self.action_dim)
-        self.v_head = nn.Sequential([nn.relu, nn.Dense(1, kernel_init=orthogonal(1.0))])
+        self.v_head = nn.Sequential([nn.leaky_relu,
+                                        nn.Dense(1, kernel_init=orthogonal(1.0))
+                                        ]
+        )
 
     def policy(self, x):
             return self.pi_head(self.actor_torso(x))
 
     def get_value_features(self, x):
         features = self.critic_torso(x)
+        if self.layer_norm:
+            features = nn.LayerNorm()(x)
         if self.normalize_value_features:
             features = features / (
                 jnp.linalg.norm(features, axis=-1, keepdims=True) + 1e-8
             )
+        if self.bias:
+            bias = jnp.ones(features.shape[:-1] + (1,))
+            features = jnp.concatenate([features, bias], axis=-1)
+
+            
         return features
 
     def value(self, x):
@@ -317,6 +330,9 @@ class ActorCritic2Head(nn.Module):
 
     def __call__(self, x):
         return self.policy(x), self.value(x)
+
+
+
 
 class ActorCriticSharedTorso(nn.Module):
     """
@@ -634,11 +650,15 @@ def initialize_lstd_network(rng,
     params = model.init(init_rng, init_x)
     return model, params
 
-def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=True, seperate_vi = False):
+def initialize_actor_critic(rng, obs_shape, action_dim, n_heads: int, cnn_torso = 'IMPALA_CNN', shared_torso=True, seperate_vi = False, layer_norm=False, bias = False):
     if n_heads == 1:
         model = Actor1Head(action_dim=action_dim, cnn_torso = cnn_torso)
     elif n_heads == 2:
-        model = ActorCritic2Head(action_dim=action_dim, cnn_torso = cnn_torso)
+        model = ActorCritic2Head(action_dim=action_dim, 
+            cnn_torso = cnn_torso, 
+            layer_norm = layer_norm,     
+            bias = bias
+        )
         if shared_torso:
             model = ActorCriticSharedTorso(action_dim = action_dim, cnn_torso = cnn_torso)
     elif n_heads == 3:
@@ -808,5 +828,26 @@ def basic_flax_train_state(config, network, params):
         apply_fn=network.apply,
         params=params,
         tx=tx,
+    )
+    return train_state
+
+def target_flax_train_state(config, network, params, target_params):
+    # Stores a target network (EMA)
+    # --- PPO Agent Scheduler & Optimizer ---
+    total_grad_steps = config["NUM_UPDATES"] * config["NUM_MINIBATCHES"] * config["NUM_EPOCHS"]
+    lr_scheduler = optax.linear_schedule(
+        init_value=config["LR"],
+        end_value=config["LR_END"],
+        transition_steps=total_grad_steps
+    )
+    tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adamw(lr_scheduler, eps=1e-5),
+    )
+    train_state = RNDTrainState.create(
+        apply_fn=network.apply,
+        params=params,
+        tx=tx,
+        target_params = target_params,
     )
     return train_state
