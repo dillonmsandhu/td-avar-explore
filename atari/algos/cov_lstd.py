@@ -15,6 +15,7 @@ def make_train(config):
     k_rho = config.get("RND_FEATURES", 512)
     normalize_rho_obs = config.get("NORMALIZE_RHO_OBS", True)
     normalize_rho = config.get("NORMALIZE_RHO", True)
+    rms_normalize = config.get("NORMALIZE_RHO_RMS", False)
     normalize_lstd_obs = config.get("NORMALIZE_LSTD_OBS", True)
 
     config['COV_LEAK'] = config.get('COV_LEAK', 1 - 1e-5)
@@ -320,9 +321,14 @@ def make_train(config):
             
             irets, per_timestep_irets = compute_intrinsic_ret(irets, rho, continue_mask, config["GAMMA_i"])
             iret_rms = helpers.update_rms(iret_rms, per_timestep_irets.reshape(-1))
-            # iret_rms = helpers.update_ema_rms(iret_rms, per_timestep_irets.reshape(-1))
             
-            scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8) if normalize_rho else 1.0
+            if normalize_rho:
+                if rms_normalize:
+                    rms_val = iret_rms["var"] + jnp.square(iret_rms["mean"])
+                    scaling_factor = jnp.sqrt(rms_val + 1e-8)
+                else:
+                    scaling_factor = jnp.sqrt(iret_rms["var"] + 1e-8)
+                        
             rho = rho / scaling_factor
             
             # --- 3. Compute Trace and Add to Buffer ---
